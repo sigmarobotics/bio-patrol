@@ -284,4 +284,6 @@ CI/CD 透過 GitHub Actions (`.github/workflows/docker.yml`) 自動建置 multi-
 
 ## License
 
-Copyright 2026 Sigma Robotics. All rights reserved.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+Copyright 2026 Sigma Robotics
