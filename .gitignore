@@ -103,3 +103,4 @@ data/maps/
 data/config/*.json
 data/config/patrol_presets/
 logs/
+docs/plans/
