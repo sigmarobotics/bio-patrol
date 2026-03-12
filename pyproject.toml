@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-kachaka-sdk-toolkit = { git = "https://github.com/Sigma-Snaken/kachaka-sdk-toolkit.git" }
+kachaka-sdk-toolkit = { git = "https://github.com/sigmarobotics/kachaka-sdk-toolkit.git" }
 
 [dependency-groups]
 dev = [
