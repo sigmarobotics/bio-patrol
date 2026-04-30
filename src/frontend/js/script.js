@@ -1446,7 +1446,12 @@ async function fetchShelves() {
   btn.disabled = true;
 
   try {
-    const shelves = await dataService.getRobotShelves();
+    const data = await dataService.getRobotShelves();
+    const shelves = Array.isArray(data) ? data : (data?.shelves || []);
+    if (!shelves.length) {
+      alert('No shelves registered on the robot.');
+      return;
+    }
     select.innerHTML = '<option value="">-- Select a shelf --</option>';
     shelves.forEach(s => {
       const id = s.id || s.shelf_id || '';
@@ -1463,7 +1468,39 @@ async function fetchShelves() {
 
     select.style.display = '';
   } catch (e) {
-    alert('Failed to fetch shelves: ' + e.message);
+    const detail = e?.response?.data?.detail || e.message;
+    alert('Failed to fetch shelves: ' + detail);
+  } finally {
+    btn.textContent = original;
+    btn.disabled = false;
+  }
+}
+
+async function reconnectRobot() {
+  const btn = document.getElementById('btn-reconnect-robot');
+  const status = document.getElementById('reconnect-status');
+  const original = btn.textContent;
+  btn.textContent = 'Reconnecting...';
+  btn.disabled = true;
+  status.textContent = '';
+  status.className = 'reconnect-status';
+
+  try {
+    const res = await dataService.reconnectRobot();
+    const ok = res.status === 'ok';
+    const result = res.result || {};
+    if (ok) {
+      const serial = result.serial ? ` — serial ${result.serial}` : '';
+      status.textContent = `✓ Connected at ${res.ip}${serial}`;
+      status.classList.add('reconnect-status-ok');
+    } else {
+      status.textContent = `✗ Failed at ${res.ip}: ${result.error || 'unknown error'}`;
+      status.classList.add('reconnect-status-fail');
+    }
+  } catch (e) {
+    const detail = e?.response?.data?.detail || e.message;
+    status.textContent = `✗ Error: ${detail}`;
+    status.classList.add('reconnect-status-fail');
   } finally {
     btn.textContent = original;
     btn.disabled = false;

@@ -20,6 +20,11 @@ class DataService {
     return res.data;
   }
 
+  async reconnectRobot() {
+    const res = await axios.post('/api/settings/reconnect-robot');
+    return res.data;
+  }
+
   async getBeds() {
     const res = await axios.get('/api/beds');
     return res.data;

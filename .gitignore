@@ -110,3 +110,6 @@ docs/plans/
 
 # Auto-generated tests from /simulate skill (must be reviewed before committing)
 tests/generated/
+
+# Playwright MCP browser session artifacts
+.playwright-mcp/

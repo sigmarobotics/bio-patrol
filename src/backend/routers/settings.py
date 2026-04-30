@@ -69,6 +69,32 @@ async def get_settings():
     return get_runtime_settings()
 
 
+@router.post("/settings/reconnect-robot")
+async def reconnect_robot():
+    """Force re-registration using the currently saved robot_ip.
+
+    Useful when the robot was rebooted or the network hiccupped — IP unchanged
+    but the FleetAPI slot needs a fresh gRPC connection.
+    """
+    cfg = get_runtime_settings()
+    ip = cfg.get("robot_ip", "")
+    if not ip:
+        raise HTTPException(status_code=400, detail="robot_ip is not set in settings")
+    result = await _reregister_robot(ip)
+    if result.get("ok"):
+        logger.info(f"Robot '{ROBOT_ID}' reconnected at {ip}")
+    else:
+        logger.warning(
+            f"Robot '{ROBOT_ID}' reconnect failed at {ip}: "
+            f"{result.get('error', 'unknown')}"
+        )
+    return {
+        "status": "ok" if result.get("ok") else "error",
+        "ip": ip,
+        "result": result,
+    }
+
+
 @router.post("/settings")
 async def save_settings(body: dict):
     """Merge incoming JSON into settings.json. Re-register the robot on IP change."""

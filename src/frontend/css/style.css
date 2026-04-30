@@ -663,6 +663,15 @@ body::after {
     flex-shrink: 0;
 }
 
+.reconnect-status {
+    margin-top: 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    min-height: 16px;
+}
+.reconnect-status-ok { color: var(--mint); }
+.reconnect-status-fail { color: var(--coral); }
+
 .shelf-dropdown {
     margin-top: 6px;
     width: 100%;
