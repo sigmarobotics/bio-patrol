@@ -17,4 +17,4 @@ advanced:
   homeassistant_legacy_entity_attributes: false
   legacy_api: false
   legacy_availability_payload: false
-  channel: 11
+  channel: 25
