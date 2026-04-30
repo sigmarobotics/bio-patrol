@@ -21,7 +21,9 @@ from services.zigbee_mqtt import ZigbeeMQTT
 logger = logging.getLogger("services.button_manager")
 
 SUPPORTED_TRIGGER = "single"
-DEBOUNCE_SECONDS = 2.0
+# z2m occasionally emits duplicate `single` events for one physical press;
+# 0.3 s catches those without eating deliberate rapid presses.
+DEBOUNCE_SECONDS = 0.3
 PAIR_WINDOW_SECONDS = 120
 
 
