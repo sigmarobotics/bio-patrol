@@ -521,6 +521,35 @@ async def resume_patrol(req: ResumePatrolRequest):
     }
 
 
+async def resume_latest_shelf_drop() -> dict:
+    """Find the most recent shelf-dropped task and resume it.
+
+    Used by the Zigbee `shelf_resume` button so the operator never has to
+    look up a task_id. Picks the task with the latest `metadata.dropped_at`,
+    falling back to insertion order when timestamps are missing.
+    """
+    candidates = []
+    for task in tasks_db.values():
+        meta = task.metadata or {}
+        if meta.get("shelf_drop") and task.status != TaskStatus.DONE:
+            candidates.append(task)
+    if not candidates:
+        raise HTTPException(
+            status_code=400, detail="No shelf-dropped task to resume"
+        )
+    latest = max(
+        candidates,
+        key=lambda t: (t.metadata or {}).get("dropped_at", "") or t.task_id,
+    )
+    return await resume_patrol(ResumePatrolRequest(task_id=latest.task_id))
+
+
+@router.post("/patrol/resume-latest")
+async def resume_latest_endpoint():
+    """Convenience endpoint that calls resume_latest_shelf_drop."""
+    return await resume_latest_shelf_drop()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MQTT TEST (SSE)
 # ═══════════════════════════════════════════════════════════════════════════

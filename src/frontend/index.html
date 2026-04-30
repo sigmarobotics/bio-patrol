@@ -412,6 +412,19 @@
         </div>
       </div>
 
+      <div class="bb-panel-wrap" style="padding:0 16px 16px;">
+        <div class="glass-panel">
+          <div class="bb-panel-header">
+            <h3>Zigbee Buttons</h3>
+            <span id="bb-mqtt-pill" class="bb-pill">MQTT —</span>
+          </div>
+          <p class="bb-help">每個動作可配對一顆 SONOFF SNZB-01 按鈕（單擊觸發）。</p>
+          <div id="bb-list" class="bb-list">
+            <div class="bb-loading">載入中…</div>
+          </div>
+        </div>
+      </div>
+
       <div style="padding:0 16px 16px;">
         <button class="btn-premium" onclick="saveSettings()">Save Settings</button>
       </div>
@@ -442,6 +455,7 @@
   <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
   <script src="js/dataService.js?v=2"></script>
   <script src="js/script.js?v=2"></script>
+  <script src="js/buttons.js?v=1"></script>
 
 </body>
 </html>
