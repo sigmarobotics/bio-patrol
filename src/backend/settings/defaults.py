@@ -4,9 +4,9 @@ Default settings for the Bio Patrol system.
 
 DEFAULT_SETTINGS = {
     "robot_ip": "192.168.204.37:26400",
-    "mqtt_broker": "localhost",
+    "mqtt_broker": "demo.wisleep-eck.org",
     "mqtt_port": 1883,
-    "mqtt_topic": "/data-test/demo/wisleep-eck/org/201906078",
+    "mqtt_topic": "data-test-level2/demo/wisleep-eck/org/201906559",
     "mqtt_shelf_id": "",
     "mqtt_enabled": False,
     "bio_scan_wait_time": 10,
