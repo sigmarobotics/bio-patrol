@@ -1285,9 +1285,10 @@ function regenerateBeds() {
 
 async function fetchRobotLocations() {
   try {
-    const locations = await dataService.getRobotLocations();
-    if (!Array.isArray(locations)) {
-      alert('Unexpected response format');
+    const data = await dataService.getRobotLocations();
+    const locations = Array.isArray(data) ? data : (data?.locations || []);
+    if (!locations.length) {
+      alert('No locations registered on the robot.');
       return;
     }
 
@@ -1295,7 +1296,8 @@ async function fetchRobotLocations() {
     renderBedsGrid();
     alert(`Fetched ${locations.length} locations — select from dropdowns`);
   } catch (e) {
-    alert('Failed to fetch robot locations: ' + (e.message || e));
+    const detail = e?.response?.data?.detail || e.message;
+    alert('Failed to fetch robot locations: ' + detail);
   }
 }
 
