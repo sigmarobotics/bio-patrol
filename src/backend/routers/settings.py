@@ -22,7 +22,34 @@ from utils.json_io import load_json, save_json
 from common_types import (
     Task, TaskStep, TaskStatus, StepStatus, generate_task_id,
 )
-from services.task_runtime import tasks_db, submit_task
+from services.task_runtime import tasks_db, submit_task, engines, task_queues, task_worker, TaskEngine
+
+DEFAULT_ROBOT_PORT = 26400
+ROBOT_ID = "kachaka"
+ROBOT_NAME = "Kachaka Care"
+
+
+def _normalize_robot_ip(ip: str) -> str:
+    """Append default Kachaka gRPC port if caller omitted it."""
+    if not ip:
+        return ip
+    return ip if ":" in ip else f"{ip}:{DEFAULT_ROBOT_PORT}"
+
+
+async def _reregister_robot(new_ip: str) -> dict:
+    """Swap the FleetAPI's kachaka slot to a new IP without a container restart.
+
+    Returns the register_robot result dict so callers can surface ok/error to the UI.
+    """
+    from dependencies import get_fleet
+    fleet = get_fleet()
+    await fleet.unregister_robot(ROBOT_ID)
+    result = await fleet.register_robot(ROBOT_ID, new_ip, ROBOT_NAME)
+    if result.get("ok") and ROBOT_ID not in engines:
+        engines[ROBOT_ID] = TaskEngine(fleet, ROBOT_ID)
+        task_queues[ROBOT_ID] = asyncio.Queue()
+        asyncio.create_task(task_worker(ROBOT_ID))
+    return result
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +71,32 @@ async def get_settings():
 
 @router.post("/settings")
 async def save_settings(body: dict):
-    """Merge incoming JSON into settings.json and save."""
+    """Merge incoming JSON into settings.json. Re-register the robot on IP change."""
+    if "robot_ip" in body:
+        body["robot_ip"] = _normalize_robot_ip(body["robot_ip"])
+
     current = load_json(SETTINGS_FILE, {})
+    old_ip = current.get("robot_ip", "")
     current.update(body)
     save_json(SETTINGS_FILE, current)
-    return {"status": "ok", "data": get_runtime_settings()}
+    new_ip = current.get("robot_ip", "")
+
+    response: dict = {"status": "ok", "data": get_runtime_settings()}
+    if new_ip and new_ip != old_ip:
+        try:
+            result = await _reregister_robot(new_ip)
+            response["robot_re_register"] = result
+            if result.get("ok"):
+                logger.info(f"Robot '{ROBOT_ID}' re-registered at {new_ip}")
+            else:
+                logger.warning(
+                    f"Robot '{ROBOT_ID}' re-register failed at {new_ip}: "
+                    f"{result.get('error', 'unknown')}"
+                )
+        except Exception as e:
+            logger.error(f"Re-register raised: {e}")
+            response["robot_re_register"] = {"ok": False, "error": str(e)}
+    return response
 
 
 # ═══════════════════════════════════════════════════════════════════════════
