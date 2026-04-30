@@ -24,6 +24,9 @@ DEFAULT_SETTINGS = {
     "shelf_id": "S_04",
     "demo_preset": "",
     "timezone": "Asia/Taipei",
+    "zigbee_enabled": True,
+    "zigbee_mqtt_host": "mqtt-broker",
+    "zigbee_mqtt_port": 1883,
 }
 
 DEFAULT_BEDS = {

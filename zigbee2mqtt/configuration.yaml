@@ -1,0 +1,20 @@
+homeassistant: false
+permit_join: false
+
+mqtt:
+  base_topic: zigbee2mqtt
+  server: mqtt://mqtt-broker:1883
+
+serial:
+  port: ${ZIGBEE_SERIAL_PORT:-/dev/zigbee}
+  adapter: ezsp
+
+frontend:
+  port: 8080
+
+advanced:
+  log_level: info
+  homeassistant_legacy_entity_attributes: false
+  legacy_api: false
+  legacy_availability_payload: false
+  channel: 11

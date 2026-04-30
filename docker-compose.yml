@@ -10,6 +10,8 @@ services:
       - ./data:/app/data:rw
     networks:
       - bio-patrol-net
+    depends_on:
+      - mqtt-broker
 
   mqtt-broker:
     image: eclipse-mosquitto:2.0
@@ -18,6 +20,25 @@ services:
       - "1883:1883"
     volumes:
       - ./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    networks:
+      - bio-patrol-net
+
+  zigbee2mqtt:
+    image: koenkk/zigbee2mqtt:latest
+    container_name: bio-patrol-z2m
+    restart: unless-stopped
+    volumes:
+      - ./zigbee2mqtt:/app/data
+      - /run/udev:/run/udev:ro
+    devices:
+      - "${ZIGBEE_SERIAL_PORT:-/dev/zigbee}:/dev/zigbee"
+    environment:
+      - TZ=Asia/Taipei
+      - ZIGBEE_SERIAL_PORT=/dev/zigbee
+    ports:
+      - "8080:8080"
+    depends_on:
+      - mqtt-broker
     networks:
       - bio-patrol-net
 

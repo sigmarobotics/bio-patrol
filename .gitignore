@@ -108,6 +108,9 @@ docs/plans/
 # Sigma session context (local state, not committed)
 .sigma/
 
+# Local git worktrees (isolated dev workspaces, not committed)
+.worktrees/
+
 # Auto-generated tests from /simulate skill (must be reviewed before committing)
 tests/generated/
 

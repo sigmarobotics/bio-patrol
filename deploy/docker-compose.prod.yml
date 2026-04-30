@@ -9,6 +9,8 @@ services:
       - ./data:/app/data:rw
     networks:
       - bio-patrol-net
+    depends_on:
+      - mqtt-broker
     logging:
       driver: json-file
       options:
@@ -24,6 +26,30 @@ services:
     volumes:
       - mosquitto-data:/mosquitto/data
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    networks:
+      - bio-patrol-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  zigbee2mqtt:
+    image: koenkk/zigbee2mqtt:latest
+    container_name: bio-patrol-z2m
+    restart: unless-stopped
+    volumes:
+      - ./zigbee2mqtt:/app/data
+      - /run/udev:/run/udev:ro
+    devices:
+      - "${ZIGBEE_SERIAL_PORT:-/dev/zigbee}:/dev/zigbee"
+    environment:
+      - TZ=Asia/Taipei
+      - ZIGBEE_SERIAL_PORT=/dev/zigbee
+    ports:
+      - "8080:8080"
+    depends_on:
+      - mqtt-broker
     networks:
       - bio-patrol-net
     logging:

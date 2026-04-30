@@ -58,6 +58,10 @@ function switchTab(tabName) {
     case 'sensor': loadSensorData(); break;
     case 'settings': loadSettings(); break;
   }
+  // Stop the buttons-panel polling when leaving settings.
+  if (tabName !== 'settings' && typeof window.unloadButtons === 'function') {
+    window.unloadButtons();
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1532,6 +1536,9 @@ async function loadSettings() {
     console.error('Failed to load settings:', e);
   }
   loadMapList();
+  if (typeof window.loadButtons === 'function') {
+    window.loadButtons();
+  }
 }
 
 async function saveSettings() {

@@ -1526,3 +1526,120 @@ input[type="checkbox"]:checked::after {
     margin-top: 6px;
     font-style: italic;
 }
+
+/* ───────── Zigbee Buttons panel ───────── */
+.bb-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+.bb-panel-header h3 { margin: 0; }
+
+.bb-help {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+}
+
+.bb-pill {
+    font-family: var(--font-display);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border: 1px solid var(--border-subtle);
+    background: var(--void);
+    color: var(--text-muted);
+}
+.bb-pill--ok {
+    color: var(--mint);
+    border-color: rgba(40, 167, 69, 0.4);
+    background: rgba(40, 167, 69, 0.08);
+}
+.bb-pill--bad {
+    color: var(--coral);
+    border-color: rgba(220, 53, 69, 0.4);
+    background: rgba(220, 53, 69, 0.08);
+}
+
+.bb-list { display: flex; flex-direction: column; gap: 8px; }
+
+.bb-loading,
+.bb-error {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+.bb-error { color: var(--coral); }
+
+.bb-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    background: var(--panel-mid);
+    border: 1px solid var(--border-subtle);
+}
+.bb-info { flex: 1; min-width: 0; }
+.bb-label {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text-bright);
+    margin-bottom: 4px;
+}
+.bb-meta {
+    font-size: 11px;
+    color: var(--text-secondary);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.bb-meta code {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--amber);
+    background: var(--void);
+    padding: 1px 5px;
+    border: 1px solid var(--border-subtle);
+}
+.bb-status--unpaired { color: var(--text-muted); font-style: italic; }
+.bb-status--bound    { color: var(--mint); }
+.bb-status--pairing  { color: var(--amber-bright); font-weight: 600; }
+.bb-fired { color: var(--text-muted); font-size: 10px; }
+
+.bb-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.bb-actions button {
+    font-family: var(--font-display);
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    padding: 6px 12px;
+    cursor: pointer;
+    border: 1px solid var(--border-medium);
+    background: var(--void);
+    transition: all 0.15s ease;
+}
+.bb-actions .btn-success {
+    color: var(--mint);
+    border-color: rgba(40, 167, 69, 0.4);
+}
+.bb-actions .btn-success:hover {
+    background: rgba(40, 167, 69, 0.08);
+}
+.bb-actions .btn-danger {
+    color: var(--coral);
+    border-color: rgba(220, 53, 69, 0.4);
+}
+.bb-actions .btn-danger:hover {
+    background: rgba(220, 53, 69, 0.08);
+}
+
+@media (max-width: 720px) {
+    .bb-row { flex-direction: column; align-items: flex-start; }
+    .bb-actions { width: 100%; justify-content: flex-end; }
+}

@@ -3,6 +3,7 @@ import routers.kachaka as kachaka
 import routers.tasks as tasks
 import routers.settings as settings_router
 import routers.bio_sensor as bio_sensor
+import routers.buttons as buttons_router
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import asyncio
@@ -16,6 +17,9 @@ from services.task_runtime import (
     engines, task_queues, task_worker, TaskEngine
 )
 from services.scheduler import scheduler_service
+from services import action_registry, button_db
+from services.zigbee_mqtt import ZigbeeMQTT
+from services.button_manager import ButtonManager
 from dependencies import get_fleet, get_bio_sensor_client
 
 # ---------------------------------------------------------------------------
@@ -86,6 +90,8 @@ logger = logging.getLogger("bio_patrol.main")
 async def lifespan(app: FastAPI):
     logger.info("Starting application lifespan...")
     bio_sensor_client = None
+    zigbee_mqtt = None
+    button_manager = None
     try:
         # Bio-sensor MQTT client
         from settings.config import get_runtime_settings
@@ -122,9 +128,33 @@ async def lifespan(app: FastAPI):
         logger.info("Starting task scheduler...")
         await scheduler_service.start()
 
+        try:
+            action_registry.init_default_actions()
+            button_db.init_schema()
+            button_db.seed_actions([a["key"] for a in action_registry.list_actions()])
+            if cfg.get("zigbee_enabled", True):
+                zigbee_mqtt = ZigbeeMQTT(
+                    host=cfg.get("zigbee_mqtt_host", "mqtt-broker"),
+                    port=int(cfg.get("zigbee_mqtt_port", 1883)),
+                )
+                button_manager = ButtonManager(zigbee_mqtt)
+                zigbee_mqtt.set_handler(button_manager.handle_event)
+                await zigbee_mqtt.start()
+                buttons_router.set_manager(button_manager)
+                logger.info("Zigbee button bindings initialised")
+            else:
+                logger.info("Zigbee bindings disabled (zigbee_enabled=false)")
+        except Exception as e:
+            logger.error(f"Failed to initialise zigbee button bindings: {e}")
+
         yield
 
         # Cleanup
+        if zigbee_mqtt:
+            try:
+                await zigbee_mqtt.stop()
+            except Exception:
+                pass
         if bio_sensor_client:
             bio_sensor_client.stop()
         await scheduler_service.stop()
@@ -150,6 +180,7 @@ app.include_router(tasks.router)
 app.include_router(kachaka.router)
 app.include_router(settings_router.router)
 app.include_router(bio_sensor.router)
+app.include_router(buttons_router.router)
 
 frontend_path = get_resource_path("src/frontend")
 if os.path.exists(frontend_path):
