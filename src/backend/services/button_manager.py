@@ -28,7 +28,7 @@ PAIR_WINDOW_SECONDS = 120
 # When a bound device announces leave, hold permit_join open this long so the
 # next press auto-rejoins without nurse intervention. SNZB-01P firmware sleeps
 # at end of every press session — without this window the device is orphaned.
-AUTO_REJOIN_WINDOW_SECONDS = 300
+AUTO_REJOIN_WINDOW_SECONDS = 254  # z2m max — single-byte field
 
 
 class ButtonManager:
