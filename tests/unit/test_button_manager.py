@@ -116,14 +116,13 @@ def test_already_bound_device_rejoin_silent_readmit(mgr, db_path):
     assert permit_calls_for_pair == []
 
 
-def test_device_leave_for_bound_ieee_opens_permit_join(mgr, db_path):
+def test_device_leave_for_bound_ieee_does_not_open_permit_join(mgr, db_path):
+    """Z2M's database.db preserves TC credentials across leaves; rejoin is
+    accepted without permit_join open. We only flip UI state."""
     button_db.bind_action("demo_run", "0xAA", None, db_path)
     event = {"type": "device_leave", "ieee_addr": "0xAA"}
     asyncio.run(mgr.handle_event(event))
-    # last permit call should be the auto-rejoin window
-    last_call = mgr.zigbee.permit_calls[-1]
-    assert last_call[0] is True
-    assert last_call[1] == button_manager.AUTO_REJOIN_WINDOW_SECONDS
+    assert mgr.zigbee.permit_calls == []
 
 
 def test_device_leave_for_unknown_ieee_does_nothing(mgr):

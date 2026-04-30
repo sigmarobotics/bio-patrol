@@ -25,10 +25,6 @@ SUPPORTED_TRIGGER = "single"
 # 0.3 s catches those without eating deliberate rapid presses.
 DEBOUNCE_SECONDS = 0.3
 PAIR_WINDOW_SECONDS = 120
-# When a bound device announces leave, hold permit_join open this long so the
-# next press auto-rejoins without nurse intervention. SNZB-01P firmware sleeps
-# at end of every press session — without this window the device is orphaned.
-AUTO_REJOIN_WINDOW_SECONDS = 254  # z2m max — single-byte field
 
 
 class ButtonManager:
@@ -121,6 +117,12 @@ class ButtonManager:
         logger.info("Paired %s → action %s", ieee, target)
 
     async def _on_device_leave(self, event: dict) -> None:
+        # z2m preserves the device record + TC link credentials in database.db
+        # across `device_leave` events — verified live. The device's
+        # subsequent rejoin is accepted as a Trust-Center-Rejoin without
+        # permit_join open, so all we do here is mark the row offline for the
+        # UI indicator. A factory-reset (>10 s hold) would require permit_join
+        # open + UI-side Pair click, which is the deliberate flow for that.
         ieee = event.get("ieee_addr")
         if not ieee:
             return
@@ -128,11 +130,7 @@ class ButtonManager:
         if not (binding and binding.get("action_key")):
             return
         button_db.record_left(ieee, self._db_path)
-        ok = await self.zigbee.permit_join(True, time_s=AUTO_REJOIN_WINDOW_SECONDS)
-        logger.info(
-            "Bound device %s left network → permit_join open %ds for auto-rejoin (publish ok=%s)",
-            ieee, AUTO_REJOIN_WINDOW_SECONDS, ok,
-        )
+        logger.info("Bound device %s left network — UI flipped to offline", ieee)
 
     async def _on_button_action(self, event: dict) -> None:
         ieee = event.get("ieee_addr")
