@@ -13,8 +13,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
 
+from common_types import get_now
 from services import action_registry, button_db
 from services.zigbee_mqtt import ZigbeeMQTT
 
@@ -25,14 +25,6 @@ DEBOUNCE_SECONDS = 2.0
 PAIR_WINDOW_SECONDS = 120
 
 
-def _now_iso() -> str:
-    try:
-        from common_types import get_now
-        return get_now().isoformat()
-    except Exception:
-        return datetime.now(timezone.utc).isoformat()
-
-
 class ButtonManager:
     def __init__(self, zigbee: ZigbeeMQTT, db_path: str | None = None):
         self.zigbee = zigbee
@@ -41,8 +33,6 @@ class ButtonManager:
         self._pair_expires_at: float = 0.0
         self._pair_lock = asyncio.Lock()
         self._last_fire_at: dict[str, float] = {}
-
-    # ───────── Pairing API ─────────
 
     async def arm_pair(self, action_key: str,
                        time_s: int = PAIR_WINDOW_SECONDS) -> dict:
@@ -68,6 +58,9 @@ class ButtonManager:
         await self.zigbee.permit_join(False, time_s=0)
         return {"ok": True, "cancelled_target": target}
 
+    async def forget_device(self, ieee_addr: str) -> bool:
+        return await self.zigbee.remove_device(ieee_addr)
+
     @property
     def pairing_target(self) -> str | None:
         if self._pair_target is None:
@@ -76,7 +69,14 @@ class ButtonManager:
             return None
         return self._pair_target
 
-    # ───────── MQTT event handler ─────────
+    @property
+    def pair_remaining_seconds(self) -> int | None:
+        if self._pair_target is None:
+            return None
+        remaining = self._pair_expires_at - time.monotonic()
+        if remaining <= 0:
+            return None
+        return int(remaining)
 
     async def handle_event(self, event: dict) -> None:
         evt = event.get("type")
@@ -94,8 +94,6 @@ class ButtonManager:
             expired = time.monotonic() >= self._pair_expires_at
             if target is None or expired:
                 logger.debug("Device %s seen but no active pairing target", ieee)
-                self._pair_target = None
-                self._pair_expires_at = 0.0
                 return
             self._pair_target = None
             self._pair_expires_at = 0.0
@@ -108,8 +106,15 @@ class ButtonManager:
         action_str = event.get("action")
         if not ieee:
             return
+
+        # Look up binding before writing status — an unbound device's status
+        # is irrelevant and burns a write per stray press.
+        binding = button_db.get_binding_by_ieee(ieee, self._db_path)
+        if binding is None:
+            logger.warning("Press from unbound device %s, ignoring", ieee)
+            return
         button_db.update_status(
-            ieee, event.get("battery"), _now_iso(), self._db_path
+            ieee, event.get("battery"), get_now().isoformat(), self._db_path
         )
         if action_str != SUPPORTED_TRIGGER:
             return
@@ -121,13 +126,8 @@ class ButtonManager:
             return
         self._last_fire_at[ieee] = now
 
-        binding = button_db.get_binding_by_ieee(ieee, self._db_path)
-        if binding is None or not binding.get("action_key"):
-            logger.warning("Press from unbound device %s, ignoring", ieee)
-            return
-
-        action_key = binding["action_key"]
-        if not action_registry.is_registered(action_key):
+        action_key = binding.get("action_key")
+        if not action_key or not action_registry.is_registered(action_key):
             logger.warning("Bound action %s no longer registered", action_key)
             return
 

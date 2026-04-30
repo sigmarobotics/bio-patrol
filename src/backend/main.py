@@ -128,7 +128,6 @@ async def lifespan(app: FastAPI):
         logger.info("Starting task scheduler...")
         await scheduler_service.start()
 
-        # Zigbee button bindings: register actions, prep DB, start MQTT loop.
         try:
             action_registry.init_default_actions()
             button_db.init_schema()

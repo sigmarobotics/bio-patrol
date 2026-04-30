@@ -65,10 +65,6 @@ async def fire(key: str, params: dict | None = None) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Built-in handlers — call existing bio-patrol internals
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def _action_demo_run(_params: dict) -> dict:
     from routers.settings import PatrolStartRequest, start_patrol
     return await start_patrol(PatrolStartRequest(mode="demo"))

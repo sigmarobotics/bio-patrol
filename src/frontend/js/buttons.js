@@ -1,6 +1,4 @@
 // Settings tab — Zigbee Buttons panel.
-// One row per registered action; Pair / Cancel / Unpair / Test per row.
-
 (function () {
   const POLL_INTERVAL_MS = 3000;
   const PAIR_COUNTDOWN_MS = 1000;
@@ -114,12 +112,12 @@
         mqttPill.className = `bb-pill ${ok ? "bb-pill--ok" : "bb-pill--bad"}`;
       }
 
-      // If server reports a different armed_action than us, sync.
       const armed = data.pair_status?.armed_action;
+      const remaining = data.pair_status?.armed_remaining_s;
       if (armed && (!pairingState || pairingState.action_key !== armed)) {
         pairingState = {
           action_key: armed,
-          deadline_ts: Date.now() + 120 * 1000,
+          deadline_ts: Date.now() + (remaining ?? 120) * 1000,
         };
       } else if (!armed && pairingState) {
         pairingState = null;
@@ -154,8 +152,8 @@
         `/api/button-bindings/${encodeURIComponent(actionKey)}/pair/cancel`,
         { method: "POST" },
       );
-    } catch (e) {
-      // ignore
+    } catch (_) {
+      // best-effort cancel — refresh below will re-sync from server state
     } finally {
       pairingState = null;
       await refresh();
@@ -199,7 +197,6 @@
         refresh();
         return;
       }
-      // Re-render only the pairing row to update the countdown.
       const row = document.querySelector(
         `[data-bb-action="${pairingState.action_key}"] .bb-status--pairing`,
       );
@@ -224,7 +221,6 @@
     }
   }
 
-  // Public init — called from script.js loadSettings().
   window.loadButtons = function () {
     stopTimers();
     refresh();
@@ -232,6 +228,5 @@
     startCountdown();
   };
 
-  // Cleanup if user leaves settings tab.
   window.unloadButtons = stopTimers;
 })();

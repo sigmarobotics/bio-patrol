@@ -18,7 +18,7 @@ logger = logging.getLogger("routers.buttons")
 router = APIRouter(prefix="/api", tags=["Button Bindings"])
 
 
-_button_manager = None  # populated by main.py at startup
+_button_manager = None
 
 
 def set_manager(manager) -> None:
@@ -58,6 +58,7 @@ async def list_bindings():
     mgr = _button_manager
     pair_status = {
         "armed_action": mgr.pairing_target if mgr else None,
+        "armed_remaining_s": mgr.pair_remaining_seconds if mgr else None,
         "mqtt_connected": bool(mgr and mgr.zigbee.connected),
     }
     return {"actions": actions, "pair_status": pair_status}
@@ -86,7 +87,7 @@ async def unpair(action_key: str, forget_device: bool = False):
         raise HTTPException(status_code=404, detail=f"Unknown action: {action_key}")
     prev_ieee = button_db.unbind_action(action_key)
     if forget_device and prev_ieee and _button_manager is not None:
-        await _button_manager.zigbee.remove_device(prev_ieee)
+        await _button_manager.forget_device(prev_ieee)
     return {"ok": True, "previous_ieee": prev_ieee, "forget_device": forget_device}
 
 

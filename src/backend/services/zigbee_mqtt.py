@@ -1,11 +1,7 @@
-"""
-Async MQTT client for the zigbee2mqtt bridge.
+"""Async MQTT client for the zigbee2mqtt bridge.
 
-Subscribes to `zigbee2mqtt/#`, parses bridge events (device_joined/announce) and
-device messages (button_action), and dispatches them to a handler. Also exposes
-permit_join / forget_device for pairing UX.
-
-Adapted from sigma-button-controller (services/mqtt_service.py).
+Subscribes to `zigbee2mqtt/#`, parses bridge events and device messages,
+exposes `permit_join` / `remove_device` for the pairing UX.
 """
 from __future__ import annotations
 
