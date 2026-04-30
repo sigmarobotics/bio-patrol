@@ -164,6 +164,24 @@ def test_repeat_press_within_debounce_window_dropped(mgr, db_path, fired):
     assert len(fired) == 1
 
 
+def test_device_leave_records_last_left_at(mgr, db_path):
+    button_db.bind_action("demo_run", "0xAA", None, db_path)
+    asyncio.run(mgr.handle_event({"type": "device_leave", "ieee_addr": "0xAA"}))
+    row = button_db.get_binding_by_ieee("0xAA", db_path)
+    assert row["last_left_at"] is not None
+
+
+def test_rejoin_after_leave_clears_last_left_at(mgr, db_path):
+    button_db.bind_action("demo_run", "0xAA", None, db_path)
+    asyncio.run(mgr.handle_event({"type": "device_leave", "ieee_addr": "0xAA"}))
+    assert button_db.get_binding_by_ieee("0xAA", db_path)["last_left_at"]
+    asyncio.run(mgr.handle_event({
+        "type": "device_joined", "ieee_addr": "0xAA", "friendly_name": "demo",
+        "battery": 90,
+    }))
+    assert button_db.get_binding_by_ieee("0xAA", db_path)["last_left_at"] is None
+
+
 def test_repeat_press_after_debounce_fires(mgr, db_path, fired, monkeypatch):
     button_db.bind_action("demo_run", "0xAA", None, db_path)
     event = {"type": "button_action", "ieee_addr": "0xAA", "action": "single"}

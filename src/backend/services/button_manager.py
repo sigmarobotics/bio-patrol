@@ -127,6 +127,7 @@ class ButtonManager:
         binding = button_db.get_binding_by_ieee(ieee, self._db_path)
         if not (binding and binding.get("action_key")):
             return
+        button_db.record_left(ieee, self._db_path)
         ok = await self.zigbee.permit_join(True, time_s=AUTO_REJOIN_WINDOW_SECONDS)
         logger.info(
             "Bound device %s left network → permit_join open %ds for auto-rejoin (publish ok=%s)",

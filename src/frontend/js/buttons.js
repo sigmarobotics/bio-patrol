@@ -46,9 +46,15 @@
     } else if (isBound) {
       const battery =
         row.battery == null ? "" : ` · 電量 ${row.battery}%`;
-      const lastSeen = fmtRelative(row.last_seen);
+      const offline = row.online_state === "offline";
+      const dot = offline
+        ? `<span class="bb-dot bb-dot--offline" title="離線 — 長按按鈕重新連線"></span>`
+        : `<span class="bb-dot bb-dot--online" title="線上"></span>`;
+      const stateText = offline
+        ? `<span class="bb-state-offline">離線（請長按按鈕喚醒）</span> · 上次 ${fmtRelative(row.last_left_at)}`
+        : `最後上線 ${fmtRelative(row.last_seen)}`;
       statusHtml = `<span class="bb-status bb-status--bound">
-        <code>${row.ieee_addr}</code>${battery} · 最後上線 ${lastSeen}
+        ${dot}<code>${row.ieee_addr}</code>${battery} · ${stateText}
       </span>`;
     } else {
       statusHtml = `<span class="bb-status bb-status--unpaired">尚未配對</span>`;
