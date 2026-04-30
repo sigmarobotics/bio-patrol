@@ -104,3 +104,9 @@ data/config/*.json
 data/config/patrol_presets/
 logs/
 docs/plans/
+
+# Sigma session context (local state, not committed)
+.sigma/
+
+# Auto-generated tests from /simulate skill (must be reviewed before committing)
+tests/generated/
