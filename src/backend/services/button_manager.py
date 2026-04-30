@@ -25,6 +25,10 @@ SUPPORTED_TRIGGER = "single"
 # 0.3 s catches those without eating deliberate rapid presses.
 DEBOUNCE_SECONDS = 0.3
 PAIR_WINDOW_SECONDS = 120
+# When a bound device announces leave, hold permit_join open this long so the
+# next press auto-rejoins without nurse intervention. SNZB-01P firmware sleeps
+# at end of every press session — without this window the device is orphaned.
+AUTO_REJOIN_WINDOW_SECONDS = 300
 
 
 class ButtonManager:
@@ -84,6 +88,8 @@ class ButtonManager:
         evt = event.get("type")
         if evt in ("device_joined", "device_announce"):
             await self._on_device_event(event)
+        elif evt == "device_leave":
+            await self._on_device_leave(event)
         elif evt == "button_action":
             await self._on_button_action(event)
 
@@ -91,6 +97,17 @@ class ButtonManager:
         ieee = event.get("ieee_addr")
         if not ieee:
             return
+
+        # Already-bound devices that left and rejoined: silent re-admit. No
+        # pair_target needed; nurse never has to re-pair after a sleep cycle.
+        existing = button_db.get_binding_by_ieee(ieee, self._db_path)
+        if existing and existing.get("action_key"):
+            button_db.update_status(
+                ieee, event.get("battery"), get_now().isoformat(), self._db_path
+            )
+            logger.info("Bound device %s rejoined → %s", ieee, existing["action_key"])
+            return
+
         async with self._pair_lock:
             target = self._pair_target
             expired = time.monotonic() >= self._pair_expires_at
@@ -102,6 +119,19 @@ class ButtonManager:
         button_db.bind_action(target, ieee, event.get("friendly_name"), self._db_path)
         await self.zigbee.permit_join(False, time_s=0)
         logger.info("Paired %s → action %s", ieee, target)
+
+    async def _on_device_leave(self, event: dict) -> None:
+        ieee = event.get("ieee_addr")
+        if not ieee:
+            return
+        binding = button_db.get_binding_by_ieee(ieee, self._db_path)
+        if not (binding and binding.get("action_key")):
+            return
+        ok = await self.zigbee.permit_join(True, time_s=AUTO_REJOIN_WINDOW_SECONDS)
+        logger.info(
+            "Bound device %s left network → permit_join open %ds for auto-rejoin (publish ok=%s)",
+            ieee, AUTO_REJOIN_WINDOW_SECONDS, ok,
+        )
 
     async def _on_button_action(self, event: dict) -> None:
         ieee = event.get("ieee_addr")

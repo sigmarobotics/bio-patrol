@@ -100,6 +100,38 @@ def test_pair_target_expires_silently(mgr, monkeypatch):
     assert mgr.pairing_target is None
 
 
+def test_already_bound_device_rejoin_silent_readmit(mgr, db_path):
+    # Device was paired before; now it announces a join (e.g. after a sleep
+    # cycle). No pair_target armed — should silently re-admit and update status.
+    button_db.bind_action("demo_run", "0xAA", "demo_btn", db_path)
+    event = {"type": "device_joined", "ieee_addr": "0xAA",
+             "friendly_name": "demo_btn"}
+    asyncio.run(mgr.handle_event(event))
+    row = button_db.get_binding_by_ieee("0xAA", db_path)
+    assert row["action_key"] == "demo_run"
+    # rejoin must NOT trigger another permit_join publish
+    permit_calls_for_pair = [
+        c for c in mgr.zigbee.permit_calls if c == (False, 0)
+    ]
+    assert permit_calls_for_pair == []
+
+
+def test_device_leave_for_bound_ieee_opens_permit_join(mgr, db_path):
+    button_db.bind_action("demo_run", "0xAA", None, db_path)
+    event = {"type": "device_leave", "ieee_addr": "0xAA"}
+    asyncio.run(mgr.handle_event(event))
+    # last permit call should be the auto-rejoin window
+    last_call = mgr.zigbee.permit_calls[-1]
+    assert last_call[0] is True
+    assert last_call[1] == button_manager.AUTO_REJOIN_WINDOW_SECONDS
+
+
+def test_device_leave_for_unknown_ieee_does_nothing(mgr):
+    event = {"type": "device_leave", "ieee_addr": "0xUNKNOWN"}
+    asyncio.run(mgr.handle_event(event))
+    assert mgr.zigbee.permit_calls == []
+
+
 def test_button_press_fires_bound_action(mgr, db_path, fired):
     button_db.bind_action("demo_run", "0xAA", "demo_btn", db_path)
     event = {"type": "button_action", "ieee_addr": "0xAA", "action": "single",

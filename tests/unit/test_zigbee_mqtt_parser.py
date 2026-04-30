@@ -51,8 +51,14 @@ def test_parse_other_bridge_topics_ignored():
     assert out is None
 
 
+def test_parse_device_leave_event():
+    payload = json.dumps({"type": "device_leave", "data": {"ieee_address": "0x00158d0001abcd99"}})
+    out = parse_zigbee_message("zigbee2mqtt/bridge/event", payload)
+    assert out == {"type": "device_leave", "ieee_addr": "0x00158d0001abcd99"}
+
+
 def test_parse_unknown_bridge_event_type():
-    payload = json.dumps({"type": "device_leave", "data": {"ieee_address": "0x123"}})
+    payload = json.dumps({"type": "ota_update_finished", "data": {"ieee_address": "0x123"}})
     out = parse_zigbee_message("zigbee2mqtt/bridge/event", payload)
     assert out is None
 
