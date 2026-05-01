@@ -3,7 +3,7 @@ import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from services.fleet_api import FleetAPI
-from services.notifications.dispatcher import dispatcher
+from services.notifications import AnomalyEvent, Severity, Source, dispatcher
 from services.notifications.evaluator import BioScanFailureEvaluator
 from common_types import Task, TaskStep, TaskStatus, StepStatus, StepResult, get_now
 from dependencies import get_bio_sensor_client
@@ -229,12 +229,19 @@ class TaskEngine:
         }
         task.status = TaskStatus.SHELF_DROPPED
 
-        # Telegram notification
-        try:
-            from services.telegram_service import send_telegram_message
-            await send_telegram_message("⚠️ 貨架掉落，請協助歸位")
-        except Exception as tg_err:
-            logger.error(f"Failed to send shelf-drop Telegram: {tg_err}")
+        await dispatcher.dispatch(AnomalyEvent(
+            severity=Severity.CRITICAL,
+            source=Source.SHELF_DROP,
+            bed_key=location_id,
+            task_id=task.task_id,
+            title="⚠️ 貨架掉落，請協助歸位",
+            body=(
+                f"床位：{location_id}\n"
+                f"貨架：{shelf_id}\n"
+                f"剩餘 {len(remaining_beds)} 床尚未巡視"
+            ),
+            raw={"shelf_id": shelf_id, "remaining_beds": remaining_beds},
+        ))
 
         # Record all skipped bio_scan steps to DB
         steps_to_skip = []
@@ -403,9 +410,10 @@ class TaskEngine:
         finally:
             tag = f"Task {task.task_id}"
             await self._stop_shelf_monitor()
+            cancelled = task.status == TaskStatus.CANCELLED
 
             # Cancelled cleanup: return shelf and go home
-            if task.status == TaskStatus.CANCELLED and getattr(self, "_current_shelf_id", None):
+            if cancelled and getattr(self, "_current_shelf_id", None):
                 try:
                     await self.fleet.return_shelf(self.robot_id, self._current_shelf_id)
                     logger.info(f"[{tag}] Cancelled: returned shelf {self._current_shelf_id}")
@@ -415,16 +423,28 @@ class TaskEngine:
                     logger.error(f"[{tag}] Cancelled cleanup error: {e}")
 
             try:
-                from services.telegram_service import send_telegram_message
                 bio_steps = [s for s in task.steps if s.action == "bio_scan"]
                 total_beds = len(bio_steps)
                 success_beds = sum(1 for s in bio_steps if s.status == StepStatus.SUCCESS)
-                if task.status == TaskStatus.CANCELLED:
-                    await send_telegram_message(f"🚫 巡房已取消\n本次巡房 {total_beds} 床，已完成 {success_beds} 床")
-                else:
-                    await send_telegram_message(f"✅ 巡房完成\n本次巡房 {total_beds} 床，成功讀取 {success_beds} 床")
-            except Exception as tg_err:
-                logger.error(f"Failed to send task-completion Telegram: {tg_err}")
+                title = "🚫 巡房已取消" if cancelled else "✅ 巡房完成"
+                body = (
+                    f"本次巡房 {total_beds} 床\n"
+                    f"{'已完成' if cancelled else '成功讀取'} {success_beds} 床"
+                )
+                await dispatcher.dispatch(AnomalyEvent(
+                    severity=Severity.INFO,
+                    source=Source.TASK_SUMMARY,
+                    task_id=task.task_id,
+                    title=title,
+                    body=body,
+                    raw={
+                        "cancelled": cancelled,
+                        "total_beds": total_beds,
+                        "success_beds": success_beds,
+                    },
+                ))
+            except Exception:
+                logger.exception("Failed to dispatch task-summary anomaly")
             current_tasks.pop(self.robot_id, None)
             logger.info(f"Robot {self.robot_id} is now free.")
         return task
