@@ -104,6 +104,7 @@ data/config/*.json
 data/config/patrol_presets/
 logs/
 docs/plans/
+docs/superpowers/
 
 # Sigma session context (local state, not committed)
 .sigma/
