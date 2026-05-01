@@ -23,6 +23,31 @@ class TaskStatus(str, Enum):
     CANCELLED = "cancelled"
     SHELF_DROPPED = "shelf_dropped"
 
+
+class StepAction(str, Enum):
+    """Patrol step actions executed by TaskEngine. The string values are the
+    on-the-wire representation kept on TaskStep.action and in stored task JSON.
+    """
+    SPEAK = "speak"
+    MOVE_TO_POSE = "move_to_pose"
+    MOVE_TO_LOCATION = "move_to_location"
+    DOCK_SHELF = "dock_shelf"
+    UNDOCK_SHELF = "undock_shelf"
+    MOVE_SHELF = "move_shelf"
+    RETURN_SHELF = "return_shelf"
+    RETURN_HOME = "return_home"
+    BIO_SCAN = "bio_scan"
+    WAIT = "wait"
+
+
+# Actions that should not fail the whole task when they error out.
+NON_CRITICAL_ACTIONS = frozenset({
+    StepAction.BIO_SCAN.value,
+    StepAction.WAIT.value,
+    StepAction.SPEAK.value,
+    StepAction.RETURN_SHELF.value,
+})
+
 # Enhanced Result Models
 class StepResult(BaseModel):
     success: bool
