@@ -375,6 +375,15 @@
         <div class="settings-two-column">
           <div>
             <div class="glass-panel">
+              <h3>Dashboard 床卡顯示</h3>
+              <div class="form-group">
+                <label for="setting-bed-card-stale-hours">床卡資料過期門檻（小時）</label>
+                <input type="number" id="setting-bed-card-stale-hours" min="1" max="720" step="1">
+                <p class="test-note">超過此時數未掃到該床，dashboard 上會轉為灰色「過期」狀態。預設 24 小時，最大 720（30 天）。</p>
+              </div>
+            </div>
+
+            <div class="glass-panel">
               <h3>Telegram Notifications</h3>
               <div class="form-group" style="display:flex;align-items:center;gap:12px;">
                 <input type="checkbox" id="setting-enable-telegram" style="width:auto;">
