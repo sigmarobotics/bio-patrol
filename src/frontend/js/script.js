@@ -1281,6 +1281,7 @@ async function saveSettings() {
 
   try {
     await dataService.saveSettings(data);
+    if (window.bedGrid?.refreshConfig) bedGrid.refreshConfig();
     alert('Settings saved!');
   } catch (e) {
     alert('Failed to save settings: ' + e.message);

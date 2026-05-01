@@ -104,12 +104,69 @@
     }
   }
 
-  // _lastData is populated by loadBedGrid (Task 2.6).
-  let _lastData = null;
+  // Module-level state for polling + caches.
+  const _pollState = { intervalId: null, visibilityHandler: null };
+  let _lastData = null;             // cached for re-render on collapse + 5xx tolerance
+  let _staleHoursCache = 24;        // cached at init; only refreshed when settings change
+  let _bedsCache = null;            // cached at init
+  let _patrolCache = null;          // cached at init
+
+  async function loadBedGrid() {
+    try {
+      // Only refetch latest-by-bed every cycle (review feedback).
+      // Beds + patrol cached from init; refresh on visible settings/patrol save.
+      const latestRes = await dataService.getLatestByBed();
+      if (latestRes.status !== 'success') {
+        console.warn('latest-by-bed not OK:', latestRes);
+        return; // keep last data — don't clear
+      }
+      _lastData = { beds: _bedsCache, patrol: _patrolCache, latest: latestRes.data, staleHours: _staleHoursCache };
+      const html = renderBedGrid(_bedsCache, _patrolCache, latestRes.data, _staleHoursCache);
+      const main = document.getElementById('bed-grid-main');
+      if (main) main.innerHTML = html;
+    } catch (e) {
+      console.warn('loadBedGrid failed:', e); // keep last data
+    }
+  }
+
+  async function _refreshConfig() {
+    // Called by init() and exposed via refreshConfig() for save-event hooks
+    const [bedsConfig, patrolConfig, settings] = await Promise.all([
+      dataService.getBeds(),
+      dataService.getPatrol(),
+      dataService.getSettings(),
+    ]);
+    _bedsCache = bedsConfig;
+    _patrolCache = patrolConfig;
+    _staleHoursCache = settings?.bed_card_stale_hours ?? 24;
+  }
+
+  async function init() {
+    if (_pollState.intervalId) return; // already running
+    await _refreshConfig();
+    await loadBedGrid();
+    _pollState.intervalId = setInterval(() => {
+      if (!document.hidden) loadBedGrid();
+    }, 10000);
+    _pollState.visibilityHandler = () => {
+      if (!document.hidden) loadBedGrid();  // resume immediately on visibility-restore
+    };
+    document.addEventListener('visibilitychange', _pollState.visibilityHandler);
+  }
+
+  function refreshConfig() { _refreshConfig().then(() => loadBedGrid()); }
+
+  function teardown() {
+    if (_pollState.intervalId) clearInterval(_pollState.intervalId);
+    if (_pollState.visibilityHandler) document.removeEventListener('visibilitychange', _pollState.visibilityHandler);
+    _pollState.intervalId = null;
+    _pollState.visibilityHandler = null;
+  }
 
   global.bedGrid = {
-    init() {},
-    teardown() {},
+    init,
+    teardown,
+    refreshConfig,
     classifyBedState,
     formatRelativeTime,
     renderBedCard,
