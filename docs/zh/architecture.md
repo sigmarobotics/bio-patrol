@@ -266,6 +266,39 @@ Vanilla JavaScript SPA，使用 Canvas 渲染地圖：
 | 歷史紀錄 | 掃描歷史表格、統計卡片、CSV 匯出 |
 | Settings | 機器人 IP、MQTT、Telegram、掃描參數、地圖管理 |
 
+## Zigbee 按鈕中樞
+
+基於 `zigbee2mqtt` 的實體按鈕中樞，讓護理人員不需操作平板就能觸發常用的 bio-patrol 動作。bio-patrol 容器透過 `aiomqtt` 訂閱本機 Mosquitto broker；SNZB-01P 的按壓事件以 MQTT 訊息送達，並轉發至六個固定動作之一。
+
+```mermaid
+graph LR
+    subgraph Hardware["硬體"]
+        Btn["SNZB-01P"] -.->|"Zigbee"| Dongle["Zigbee Dongle V2<br/>(ezsp adapter)"]
+    end
+    subgraph EdgeHost["邊緣主機（Docker）"]
+        Dongle --> Z2M["zigbee2mqtt"]
+        Z2M -->|"MQTT"| Broker["mqtt-broker"]
+        Broker --> ZBM["services/zigbee_mqtt.py<br/>(aiomqtt)"]
+        ZBM --> BMG["services/button_manager.py"]
+        BMG --> REG["services/action_registry.py<br/>（6 個固定動作）"]
+        BMG --> BDB[(button_bindings<br/>於 sensor_data.db)]
+        REG -->|"呼叫既有 router/service"| App["巡房 / Fleet handler"]
+    end
+```
+
+### 模組職責
+
+| 模組 | 用途 |
+|------|------|
+| `services/zigbee_mqtt.py` | 訂閱 `zigbee2mqtt/#` 的 aiomqtt client，解析 `device_joined` / `device_announce` / `button_action`，並提供 `permit_join()`、`remove_device()`。 |
+| `services/button_manager.py` | 配對鎖、IEEE → action 派發。已綁定裝置進入「靜默重新接納」分支，讓深度睡眠後不需重新配對。0.3 秒 debounce。 |
+| `services/action_registry.py` | 6 個動作 handler 的封閉列舉，每個 handler 直接呼叫既有 router / service，使按鈕行為與 UI 行為一致。 |
+| `services/button_db.py` | 一個 action 一筆紀錄的 `button_bindings` 資料表（位於 `data/sensor_data.db`）。唯一部分索引強制一個 IEEE 對應一個動作。 |
+| `routers/buttons.py` | 5 個動作中心式的 REST 端點。`GET /api/button-bindings` 回傳完整狀態。 |
+| Frontend `js/buttons.js` | Settings 分頁 `.glass-panel`，3 秒輪詢、配對倒數、每列 Pair / Cancel / Test / Unpair。 |
+
+操作員配對與故障排除：[docs/buttons-manual.md](../buttons-manual.md)。
+
 ## 日誌系統
 
 每模組獨立的旋轉日誌檔案，位於 `data/logs/`：

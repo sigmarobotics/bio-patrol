@@ -278,6 +278,39 @@ Vanilla JavaScript SPA with Canvas-based map rendering:
 | History | Scan history table, statistics cards, CSV export |
 | Settings | Robot IP, MQTT, Telegram, scan timing, map management |
 
+## Zigbee Button Hub
+
+A physical button hub built on `zigbee2mqtt` lets nurses trigger common bio-patrol actions without the tablet. The bio-patrol container subscribes to the local Mosquitto broker via `aiomqtt`; SNZB-01P button presses arrive as MQTT messages and are dispatched to one of six fixed actions.
+
+```mermaid
+graph LR
+    subgraph Hardware
+        Btn["SNZB-01P"] -.->|"Zigbee"| Dongle["Zigbee Dongle V2<br/>(ezsp adapter)"]
+    end
+    subgraph EdgeHost["Edge host (Docker)"]
+        Dongle --> Z2M["zigbee2mqtt"]
+        Z2M -->|"MQTT"| Broker["mqtt-broker"]
+        Broker --> ZBM["services/zigbee_mqtt.py<br/>(aiomqtt)"]
+        ZBM --> BMG["services/button_manager.py"]
+        BMG --> REG["services/action_registry.py<br/>(6 fixed actions)"]
+        BMG --> BDB[(button_bindings<br/>in sensor_data.db)]
+        REG -->|"calls existing<br/>routers/services"| App["Patrol / Fleet handlers"]
+    end
+```
+
+### Key pieces
+
+| Module | Role |
+|--------|------|
+| `services/zigbee_mqtt.py` | aiomqtt subscriber on `zigbee2mqtt/#`. Parses `device_joined` / `device_announce` / `button_action`. Exposes `permit_join()` and `remove_device()`. |
+| `services/button_manager.py` | Pair lock + IEEE → action dispatch. Silent re-admit for already-bound devices (so the nurse never re-pairs after a deep-sleep cycle). 0.3 s debounce. |
+| `services/action_registry.py` | Closed enum of 6 action handlers. Each handler reuses an existing router/service so button behaviour matches UI behaviour. |
+| `services/button_db.py` | One-row-per-action table (`button_bindings`) inside `data/sensor_data.db`. Unique partial index enforces one IEEE per action. |
+| `routers/buttons.py` | 5 REST endpoints, action-centric. `GET /api/button-bindings` returns the full state (action list + binding + pair status). |
+| Frontend `js/buttons.js` | Settings-tab `.glass-panel`. 3 s polling, local pair countdown, per-row Pair / Cancel / Test / Unpair. |
+
+Operator pairing and troubleshooting: [docs/buttons-manual.md](buttons-manual.md).
+
 ## Logging
 
 Per-module rotating log files in `data/logs/`:
