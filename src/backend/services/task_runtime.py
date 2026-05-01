@@ -504,7 +504,17 @@ class TaskEngine:
                 else:
                     logger.warning(f"Bio scan failed - no valid data obtained for robot {self.robot_id}")
 
-                # Note: dispatcher hookup happens in Task 11 — leave outcome accessible.
+                # Anomaly notification: per-bed scan failure (IT-5).
+                # dispatcher.dispatch is fire-and-forget per sink — does not delay the step.
+                try:
+                    from services.notifications.dispatcher import dispatcher
+                    from services.notifications.evaluator import BioScanFailureEvaluator
+                    event = BioScanFailureEvaluator().evaluate(outcome)
+                    if event:
+                        await dispatcher.dispatch(event)
+                except Exception:
+                    logger.exception("Anomaly dispatch failed for bio_scan outcome")
+
                 return StepResult(
                     success=success,
                     error_code=0 if success else -1,
