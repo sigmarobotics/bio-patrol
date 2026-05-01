@@ -425,7 +425,7 @@
     initMini,
     openModal,
     closeModal,
-    getState: () => ({ img: _state.img, gMapDesc: _state.gMapDesc, tfROS2Canvas }),
+    getState: () => ({ img: _state.img, gMapDesc: { ..._state.gMapDesc }, tfROS2Canvas }),
     destroy,
   };
 })(window);
