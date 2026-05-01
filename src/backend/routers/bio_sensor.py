@@ -21,19 +21,6 @@ def _row_to_dict(row):
         "details": row[11],
     }
 
-@router.get("/latest")
-async def get_latest_bio_sensor_data():
-    """Get the latest bio-sensor data received via MQTT."""
-    try:
-        client = get_bio_sensor_client()
-        if client is None:
-            return {"status": "disabled", "message": "Bio-sensor MQTT is disabled"}
-        if client.latest_data is None:
-            return {"status": "no_data", "message": "No sensor data received yet"}
-        return {"status": "success", "data": client.latest_data}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
 @router.get("/scan-history")
 async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, location_id: str = None):
     """Get historical bio-sensor scan data from database.

@@ -134,11 +134,6 @@ class DataService {
   // BIO-SENSOR APIs
   // ═══════════════════════════════════════════════════════════════════════════
 
-  async getLatestBioSensor() {
-    const res = await axios.get('/api/bio-sensor/latest');
-    return res.data;
-  }
-
   async getLatestByBed() {
     const res = await axios.get('/api/bio-sensor/latest-by-bed');
     return res.data;

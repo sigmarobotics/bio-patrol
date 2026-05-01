@@ -478,23 +478,6 @@ function updateNextRunDisplay() {
   }
 }
 
-async function loadLatestBioSensor() {
-  try {
-    const res = await dataService.getLatestBioSensor();
-    if (res.status === 'success' && res.data) {
-      const d = res.data;
-      const bpmEl = document.getElementById('bio-bpm');
-      const rpmEl = document.getElementById('bio-rpm');
-      const statusEl = document.getElementById('bio-status');
-      if (bpmEl) bpmEl.textContent = d.bpm || '--';
-      if (rpmEl) rpmEl.textContent = d.rpm || '--';
-      if (statusEl) statusEl.textContent = d.status || '--';
-    }
-  } catch (e) {
-    console.error('Failed to load bio sensor:', e);
-  }
-}
-
 // Quick actions
 async function resetShelfSensor() {
   try {
