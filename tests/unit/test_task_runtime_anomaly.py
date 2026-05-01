@@ -1,4 +1,4 @@
-"""Verify the IT-6 migrated dispatch sites emit the right AnomalyEvent shape."""
+"""Unit tests for AnomalyEvent dispatch sites in task_runtime."""
 from __future__ import annotations
 
 import asyncio
@@ -31,7 +31,6 @@ def test_shelf_drop_dispatches_critical_event():
         task_id="t-1", robot_id="kachaka", steps=[], status=TaskStatus.IN_PROGRESS
     )
 
-    # trigger_step carries location_id and shelf_id so _handle_shelf_drop can derive them
     trigger_step = TaskStep(
         step_id="s-1",
         action="move_shelf",
@@ -53,17 +52,3 @@ def test_shelf_drop_dispatches_critical_event():
     assert "S_04" in event.body
     assert event.raw["shelf_id"] == "S_04"
     assert event.raw["remaining_beds"] == ["101-2", "101-3"]
-
-
-def test_task_summary_dispatches_info_event_completed():
-    """Verify the completed branch emits INFO/TASK_SUMMARY with cancelled=False."""
-    # The task-summary block lives inside run_task's finally — too heavy to set up
-    # without spinning the full engine. Instead, exercise the inline construction
-    # logic directly via a small extracted helper. If you prefer, this test can be
-    # promoted to a full HIL test with a real task run later.
-    # For now, we trust the code review of Task 3 and rely on the HIL anomaly tests.
-    pass
-
-
-def test_task_summary_dispatches_info_event_cancelled():
-    pass

@@ -3,7 +3,7 @@ import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from services.fleet_api import FleetAPI
-from services.notifications.dispatcher import dispatcher
+from services.notifications import AnomalyEvent, Severity, Source, dispatcher
 from services.notifications.evaluator import BioScanFailureEvaluator
 from common_types import Task, TaskStep, TaskStatus, StepStatus, StepResult, get_now
 from dependencies import get_bio_sensor_client
@@ -229,8 +229,6 @@ class TaskEngine:
         }
         task.status = TaskStatus.SHELF_DROPPED
 
-        # Anomaly notification (replaces direct-Telegram path)
-        from services.notifications.events import AnomalyEvent, Severity, Source
         await dispatcher.dispatch(AnomalyEvent(
             severity=Severity.CRITICAL,
             source=Source.SHELF_DROP,
@@ -412,9 +410,10 @@ class TaskEngine:
         finally:
             tag = f"Task {task.task_id}"
             await self._stop_shelf_monitor()
+            cancelled = task.status == TaskStatus.CANCELLED
 
             # Cancelled cleanup: return shelf and go home
-            if task.status == TaskStatus.CANCELLED and getattr(self, "_current_shelf_id", None):
+            if cancelled and getattr(self, "_current_shelf_id", None):
                 try:
                     await self.fleet.return_shelf(self.robot_id, self._current_shelf_id)
                     logger.info(f"[{tag}] Cancelled: returned shelf {self._current_shelf_id}")
@@ -424,11 +423,9 @@ class TaskEngine:
                     logger.error(f"[{tag}] Cancelled cleanup error: {e}")
 
             try:
-                from services.notifications.events import AnomalyEvent, Severity, Source
                 bio_steps = [s for s in task.steps if s.action == "bio_scan"]
                 total_beds = len(bio_steps)
                 success_beds = sum(1 for s in bio_steps if s.status == StepStatus.SUCCESS)
-                cancelled = task.status == TaskStatus.CANCELLED
                 title = "🚫 巡房已取消" if cancelled else "✅ 巡房完成"
                 body = (
                     f"本次巡房 {total_beds} 床\n"
