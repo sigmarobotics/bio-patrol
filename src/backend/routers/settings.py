@@ -23,6 +23,7 @@ from common_types import (
     Task, TaskStep, TaskStatus, StepStatus, generate_task_id,
 )
 from services.task_runtime import tasks_db, submit_task, engines, task_queues, task_worker, TaskEngine
+from services.bio_sensor_mqtt import is_valid_scan
 
 DEFAULT_ROBOT_PORT = 26400
 ROBOT_ID = "kachaka"
@@ -740,12 +741,12 @@ async def test_bio_scan():
             data_snapshot = latest_data.get("value")
             if data_snapshot and "records" in data_snapshot:
                 for record in data_snapshot["records"]:
-                    status = record.get("status")
-                    bpm = record.get("bpm", 0)
-                    rpm = record.get("rpm", 0)
-                    is_valid = (status == valid_status and bpm > 0 and rpm > 0)
+                    is_valid = is_valid_scan(record, valid_status)
                     label = "VALID" if is_valid else "invalid"
-                    yield _sse_event(f"  Status={status}, BPM={bpm}, RPM={rpm} -> {label}")
+                    yield _sse_event(
+                        f"  Status={record.get('status')}, "
+                        f"BPM={record.get('bpm', 0)}, RPM={record.get('rpm', 0)} -> {label}"
+                    )
                     if is_valid and valid_data is None:
                         valid_data = record
                 if valid_data:
