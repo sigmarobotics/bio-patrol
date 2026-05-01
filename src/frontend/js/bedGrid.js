@@ -1,14 +1,23 @@
 // IT-9 Slice 2: bed-grid + drawer logic.
 (function (global) {
+  const POLL_INTERVAL_MS = 10000;
+  const DEFAULT_STALE_HOURS = 24;
+  const BED_STATE = Object.freeze({
+    VALID: 'valid',
+    STALE: 'stale',
+    INVALID: 'invalid',
+    UNSCHEDULED: 'unscheduled',
+  });
+
   function classifyBedState(bed, latest, isPatrolEnabled, staleHours, now = Date.now()) {
-    if (!isPatrolEnabled) return 'unscheduled';
-    if (!latest) return 'stale';
-    if (!latest.is_valid) return 'invalid';
+    if (!isPatrolEnabled) return BED_STATE.UNSCHEDULED;
+    if (!latest) return BED_STATE.STALE;
+    if (!latest.is_valid) return BED_STATE.INVALID;
     const ts = Date.parse(latest.timestamp);
-    if (Number.isNaN(ts)) return 'stale';
+    if (Number.isNaN(ts)) return BED_STATE.STALE;
     const ageMs = now - ts;
     const thresholdMs = staleHours * 3600 * 1000;
-    return ageMs > thresholdMs ? 'stale' : 'valid';
+    return ageMs > thresholdMs ? BED_STATE.STALE : BED_STATE.VALID;
   }
 
   function formatRelativeTime(timestamp, now = Date.now()) {
@@ -32,9 +41,9 @@
     let ts = '無資料';
     let extra = '';
 
-    if (state === 'unscheduled') {
+    if (state === BED_STATE.UNSCHEDULED) {
       ts = '未排程';
-    } else if (state === 'invalid' && latest) {
+    } else if (state === BED_STATE.INVALID && latest) {
       extra = latest.details || (latest.status != null ? `status=${latest.status}` : '');
       ts = `${formatRelativeTime(latest.timestamp, now)} 失敗`;
     } else if (latest) {
@@ -107,7 +116,7 @@
   // Module-level state for polling + caches.
   const _pollState = { intervalId: null, visibilityHandler: null };
   let _lastData = null;             // cached for re-render on collapse + 5xx tolerance
-  let _staleHoursCache = 24;        // cached at init; only refreshed when settings change
+  let _staleHoursCache = DEFAULT_STALE_HOURS;  // cached at init; only refreshed when settings change
   let _bedsCache = null;            // cached at init
   let _patrolCache = null;          // cached at init
 
@@ -138,7 +147,7 @@
     ]);
     _bedsCache = bedsConfig;
     _patrolCache = patrolConfig;
-    _staleHoursCache = settings?.bed_card_stale_hours ?? 24;
+    _staleHoursCache = settings?.bed_card_stale_hours ?? DEFAULT_STALE_HOURS;
   }
 
   async function init() {
@@ -147,7 +156,7 @@
     await loadBedGrid();
     _pollState.intervalId = setInterval(() => {
       if (!document.hidden) loadBedGrid();
-    }, 10000);
+    }, POLL_INTERVAL_MS);
     _pollState.visibilityHandler = () => {
       if (!document.hidden) loadBedGrid();  // resume immediately on visibility-restore
     };
