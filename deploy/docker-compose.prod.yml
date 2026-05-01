@@ -38,19 +38,27 @@ services:
     image: koenkk/zigbee2mqtt:latest
     container_name: bio-patrol-z2m
     restart: unless-stopped
-    # privileged + /dev:/dev so the host's udev rule (99-zigbee.rules)
-    # SYMLINK+="zigbee" → /dev/zigbee survives dongle unplug + replug
-    # without operator intervention. Static `devices:` mapping was stuck
-    # at the old inode after replug — see CORNER-008.
+    # privileged + /dev:/dev so the host udev rule (99-zigbee.rules)
+    # SYMLINK+="zigbee" survives a dongle unplug+replug without operator
+    # intervention. Static `devices:` mapping was stuck at the old inode
+    # after replug — see CORNER-008. Trade-off: full host-device access;
+    # acceptable on a single-tenant appliance. See docs/buttons-manual.md §2.2.
     privileged: true
     volumes:
       - ./zigbee2mqtt:/app/data
       - /dev:/dev
     environment:
       - TZ=Asia/Taipei
-      - ZIGBEE_SERIAL_PORT=/dev/zigbee
     ports:
       - "8080:8080"
+    healthcheck:
+      # Surfaces missing udev symlink as `unhealthy` in `docker ps` so a fresh
+      # host without the rule installed doesn't masquerade as healthy.
+      test: ["CMD-SHELL", "test -e /dev/zigbee"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     depends_on:
       - mqtt-broker
     networks:

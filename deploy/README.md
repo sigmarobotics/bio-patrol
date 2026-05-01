@@ -68,29 +68,17 @@ The bundled Mosquitto broker runs on port 1883. Set in `settings.json`:
 
 ### Zigbee Dongle (one-time host setup)
 
-The `zigbee2mqtt` service uses a host udev rule to map the SONOFF SNZB
-Zigbee dongle to a stable `/dev/zigbee` symlink. Combined with
-`privileged: true` + `/dev:/dev` in the compose file, this lets the
-container survive a dongle unplug + replug **without operator
-intervention** — udev re-creates the symlink and z2m reconnects
-automatically (CORNER-008).
+The `zigbee2mqtt` service requires a host-side udev rule that pins the
+SONOFF dongle to `/dev/zigbee`. Combined with the compose file's
+`privileged: true` + `/dev:/dev` mount, this lets the container
+auto-recover from a dongle unplug+replug without operator intervention
+(see CORNER-008).
 
-Install once on the host:
+The full setup procedure — including which udev rule to install for
+each dongle revision (CP210x `10c4:ea60` vs CH340 `1a86:55d4`) and the
+security trade-off of running z2m privileged — is documented in:
 
-```bash
-sudo tee /etc/udev/rules.d/99-zigbee.rules > /dev/null <<'EOF'
-SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="zigbee"
-EOF
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-```
-
-Verify with the dongle plugged in:
-
-```bash
-ls -l /dev/zigbee   # → symlink to /dev/ttyUSB0 or similar
-lsusb | grep '10c4:ea60'   # → Silicon Labs CP210x UART Bridge
-```
+→ [docs/buttons-manual.md §2.1–2.2](../docs/buttons-manual.md#21-udev-rule-for-devzigbee)
 
 ## Commands
 

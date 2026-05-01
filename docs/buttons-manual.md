@@ -26,12 +26,20 @@ Run on the host (not inside any container):
 
 ```bash
 # Find the dongle's idVendor / idProduct
-lsusb | grep -i sonoff
-# Typical output:
-#   ID 1a86:55d4 QinHeng Electronics Sonoff Zigbee 3.0 USB Dongle Plus V2
+lsusb | grep -iE 'sonoff|silicon labs|qinheng'
+# Typical outputs (one of):
+#   ID 10c4:ea60 Silicon Labs CP210x UART Bridge          (older Plus, CP210x bridge)
+#   ID 1a86:55d4 QinHeng Electronics Sonoff Plus V2/V3    (newer EFR32-native)
+```
 
+Match the line you got and install the matching rule:
+
+```bash
+# Pick ONE block matching your dongle's idVendor:idProduct.
 sudo tee /etc/udev/rules.d/99-zigbee.rules >/dev/null <<'EOF'
-# SONOFF Zigbee 3.0 USB Dongle Plus V2
+# SONOFF Plus (CP210x bridge — VID:PID 10c4:ea60)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="zigbee"
+# SONOFF Plus V2/V3 (CH340 — VID:PID 1a86:55d4)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", SYMLINK+="zigbee"
 EOF
 
@@ -40,7 +48,15 @@ sudo udevadm trigger
 ls -l /dev/zigbee  # should symlink to /dev/ttyUSB0 (or similar)
 ```
 
-> Match `idVendor` / `idProduct` against your own `lsusb` output — the values above are for the V2 dongle. If you swap to a different dongle, update the rule.
+You can keep both rules in the file — only the matching one fires. If you later swap dongle revisions, no host re-config is needed.
+
+### 2.2 Why the compose uses `privileged: true` + `/dev:/dev`
+
+The `zigbee2mqtt` service in `docker-compose.yml` deliberately runs privileged with the full `/dev` tree mounted, instead of a narrower `devices: [/dev/zigbee:/dev/zigbee]` mapping. This is required for **automatic recovery from a dongle unplug+replug** (CORNER-008): the static `devices:` mapping pins the container to one inode, so a replug leaves the container talking to a gone device until an operator manually restarts the service. With `privileged: true` + `/dev:/dev`, the container shares a live view of the host's `/dev` and udev's symlink follows the new device transparently — operators don't need to do anything.
+
+**Security trade-off:** `privileged: true` grants the container all Linux capabilities and access to every host device. Only acceptable on a single-tenant appliance host where the only attack surface is the upstream `koenkk/zigbee2mqtt` image itself. Treat the z2m web UI on `:8080` as trusted-LAN-only.
+
+A future tightening could replace `privileged: true` with `device_cgroup_rules: ["c 188:* rmw", "c 166:* rmw"]` (USB-serial + ACM only) plus `/dev:/dev:rslave`. Verify replug behaviour before adopting — see `.sigma/alpha-site-checklist.md` if relevant.
 
 ### 2.2 Bring up the stack
 
