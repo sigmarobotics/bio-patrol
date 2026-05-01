@@ -4,28 +4,11 @@ from dependencies import get_bio_sensor_client
 router = APIRouter(prefix='/api/bio-sensor', tags=['Bio Sensor'])
 
 
-def _row_to_dict(row):
-    """Convert a sensor_scan_data SELECT row to a dict (IT-9: shared by /scan-history + /latest-by-bed)."""
-    return {
-        "id": row[0],
-        "task_id": row[1],
-        "location_id": row[2],
-        "bed_name": row[3],
-        "timestamp": row[4],
-        "retry_count": row[5],
-        "status": row[6],
-        "bpm": row[7],
-        "rpm": row[8],
-        "is_valid": bool(row[9]),
-        "data_json": row[10],
-        "details": row[11],
-    }
-
 @router.get("/scan-history")
 async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, location_id: str = None):
     """Get historical bio-sensor scan data from database.
 
-    IT-9: location_id filter added (canonical join key, not bed_name which is free-text).
+    location_id is the canonical join key, not bed_name which is free-text.
     """
     try:
         client = get_bio_sensor_client()
@@ -34,6 +17,7 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
         import sqlite3
 
         conn = sqlite3.connect(client.db_path)
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
         clauses = []
@@ -61,14 +45,14 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
         rows = cursor.fetchall()
         conn.close()
 
-        data = [_row_to_dict(row) for row in rows]
+        data = [{**dict(r), "is_valid": bool(r["is_valid"])} for r in rows]
         return {"status": "success", "data": data, "count": len(data)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 @router.get("/latest-by-bed")
 async def get_latest_by_bed():
-    """IT-9: Return one row per bed (location_id) — the latest scan record."""
+    """Return one row per bed (location_id) — the latest scan record."""
     try:
         client = get_bio_sensor_client()
         if client is None:
@@ -76,6 +60,7 @@ async def get_latest_by_bed():
         import sqlite3
 
         conn = sqlite3.connect(client.db_path)
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -92,7 +77,7 @@ async def get_latest_by_bed():
         )
         rows = cursor.fetchall()
         conn.close()
-        data = [_row_to_dict(row) for row in rows]
+        data = [{**dict(r), "is_valid": bool(r["is_valid"])} for r in rows]
         return {"status": "success", "data": data, "count": len(data)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
