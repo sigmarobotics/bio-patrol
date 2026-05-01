@@ -139,6 +139,18 @@ class DataService {
     return res.data;
   }
 
+  async getLatestByBed() {
+    const res = await axios.get('/api/bio-sensor/latest-by-bed');
+    return res.data;
+  }
+
+  async getScanHistoryByLocation(locationId, limit = 5) {
+    const res = await axios.get('/api/bio-sensor/scan-history', {
+      params: { location_id: locationId, limit }
+    });
+    return res.data;
+  }
+
   async getSensorHistory(params = {}) {
     const query = new URLSearchParams(params).toString();
     const res = await axios.get(`/api/bio-sensor/scan-history?${query}`);
