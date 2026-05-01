@@ -163,6 +163,73 @@
     _pollState.visibilityHandler = null;
   }
 
+  function openDrawer(bedKey) {
+    const drawer = document.getElementById('bed-drawer');
+    const title = document.getElementById('bed-drawer-title');
+    const body = document.getElementById('bed-drawer-body');
+    const histLink = document.getElementById('bed-drawer-history-link');
+    if (!drawer || !title || !body) return;
+
+    // Resolve bedKey → location_id (canonical key) via cached beds config
+    const bed = _bedsCache?.beds?.[bedKey];
+    const locationId = bed?.location_id;
+    if (!locationId) {
+      console.warn(`openDrawer: bedKey ${bedKey} has no location_id in beds.json`);
+      return;
+    }
+
+    title.textContent = `Bed ${bedKey}`;
+    body.innerHTML = '<p style="color:var(--text-muted);font-size:11px;">Loading…</p>';
+    drawer.removeAttribute('hidden');
+
+    if (histLink) {
+      histLink.onclick = (ev) => {
+        ev.preventDefault();
+        closeDrawer();
+        if (typeof switchTab === 'function') switchTab('sensor');
+        // Could prefilter History tab; YAGNI for now
+      };
+    }
+
+    dataService.getScanHistoryByLocation(locationId, 5).then(res => {
+      if (res.status !== 'success') {
+        body.innerHTML = `<p style="color:var(--accent-red);font-size:11px;">載入失敗：${res.message ?? '未知'}</p>`;
+        return;
+      }
+      if (!res.data.length) {
+        body.innerHTML = '<p style="color:var(--text-muted);font-size:11px;">尚無掃描記錄</p>';
+        return;
+      }
+      body.innerHTML = res.data.map(d => `
+      <div class="drawer-row drawer-row--${d.is_valid ? 'valid' : 'invalid'}">
+        <div class="drawer-row__time">${new Date(d.timestamp).toLocaleString()}</div>
+        <div class="drawer-row__vit">BPM ${d.bpm ?? '--'} · RPM ${d.rpm ?? '--'} · status=${d.status ?? '--'}</div>
+        ${d.details ? `<div class="drawer-row__detail">${d.details}</div>` : ''}
+      </div>
+    `).join('');
+    }).catch(err => {
+      body.innerHTML = `<p style="color:var(--accent-red);font-size:11px;">載入失敗：${err.message}</p>`;
+    });
+
+    // Backdrop click + ESC close
+    const backdrop = drawer.querySelector('.bed-drawer-backdrop');
+    if (backdrop) backdrop.onclick = closeDrawer;
+    const closeBtn = document.getElementById('bed-drawer-close');
+    if (closeBtn) closeBtn.onclick = closeDrawer;
+    drawer._escHandler = (e) => { if (e.key === 'Escape') closeDrawer(); };
+    document.addEventListener('keydown', drawer._escHandler);
+  }
+
+  function closeDrawer() {
+    const drawer = document.getElementById('bed-drawer');
+    if (!drawer) return;
+    drawer.setAttribute('hidden', '');
+    if (drawer._escHandler) {
+      document.removeEventListener('keydown', drawer._escHandler);
+      drawer._escHandler = null;
+    }
+  }
+
   global.bedGrid = {
     init,
     teardown,
@@ -172,7 +239,7 @@
     renderBedCard,
     renderBedGrid,
     toggleRoom,
-    openDrawer() {},   // populated in Task 2.7
-    closeDrawer() {},  // populated in Task 2.7
+    openDrawer,
+    closeDrawer,
   };
 })(window);
