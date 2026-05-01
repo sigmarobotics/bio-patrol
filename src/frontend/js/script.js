@@ -12,26 +12,7 @@ let shelfDropPose = null;  // {x, y, theta} or null — set by checkShelfDrop()
 let _cancelledDismissed = new Set();  // task IDs dismissed after showing "cancelled"
 let _cancelHideTimer = null;
 
-// Map description (VAC map)
-const gMapDesc = {
-  w: 1060, h: 827,
-  origin: { x: -29.4378, y: -26.3988 },
-  resolution: 0.05,
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// COORDINATE TRANSFORM
-// ═══════════════════════════════════════════════════════════════════════════
-
-function tfROS2Canvas(mapDesc, rosPt) {
-  if (!mapDesc || !mapDesc.origin || !mapDesc.resolution || !mapDesc.h) return {};
-  const xRosOffset = mapDesc.origin.x / mapDesc.resolution;
-  const yRosOffset = mapDesc.origin.y / mapDesc.resolution;
-  const xCanvas = (rosPt.x / mapDesc.resolution - xRosOffset).toFixed(4);
-  let yCanvas = (rosPt.y / mapDesc.resolution - yRosOffset);
-  yCanvas = (mapDesc.h - yCanvas).toFixed(4);
-  return { x: parseFloat(xCanvas), y: parseFloat(yCanvas) };
-}
+// IT-9: gMapDesc + tfROS2Canvas moved to mapView.js (use mapView.getState() if needed)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TAB NAVIGATION
@@ -113,8 +94,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   const btnCancel = document.getElementById('btn-cancel-command');
   if (btnCancel) btnCancel.addEventListener('click', returnHome);
 
-  // Initialize map
-  initMap();
+  // Initialize map (IT-9: via mapView module; animation loop starts internally)
+  if (window.mapView) {
+    mapView.init('map-canvas', { interactive: true });
+  }
 
   // Load initial data
   await loadDashboardData();
@@ -125,9 +108,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Start header clock
   updateHeaderClock();
   setInterval(updateHeaderClock, 1000);
-
-  // Start map animation
-  animateMap();
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -315,7 +295,9 @@ function checkShelfDrop() {
 
 function drawShelfDropMiniMap() {
   const canvas = document.getElementById('shelf-drop-map-canvas');
-  if (!canvas || !mapState.img) return;
+  const mvState = window.mapView?.getState?.();
+  if (!canvas || !mvState || !mvState.img) return;
+  const { img, gMapDesc, tfROS2Canvas } = mvState;
 
   const wrap = canvas.parentElement;
   canvas.width = wrap.clientWidth;
@@ -337,7 +319,7 @@ function drawShelfDropMiniMap() {
   ctx.scale(scale, scale);
 
   // Draw map image
-  ctx.drawImage(mapState.img, 0, 0, gMapDesc.w, gMapDesc.h);
+  ctx.drawImage(img, 0, 0, gMapDesc.w, gMapDesc.h);
 
   // Draw shelf drop marker
   if (shelfDropPose) {
@@ -581,288 +563,10 @@ async function manualControl(direction) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MAP RENDERING
+// MAP RENDERING — extracted to mapView.js (IT-9 Slice 0)
 // ═══════════════════════════════════════════════════════════════════════════
-
-let mapState = {
-  canvas: null, ctx: null, img: null,
-  view: { tx: 0, ty: 0, scale: 1, minScale: 0.3, maxScale: 5, dragging: false, lastX: 0, lastY: 0 },
-  robotPos: null, robotTheta: 0, targetTheta: 0,
-};
-
-async function loadMapConfig() {
-  try {
-    const res = await dataService.getActiveMapInfo();
-    if (res.status === 'ok') {
-      gMapDesc.w = res.width;
-      gMapDesc.h = res.height;
-      gMapDesc.origin = res.origin;
-      gMapDesc.resolution = res.resolution;
-      return `/api/maps/${res.map_id}/image`;
-    }
-  } catch (e) {
-    // No active map or error — use fallback
-  }
-  return 'vac_map.png';
-}
-
-function initMap() {
-  const container = document.getElementById('map-container');
-  const canvas = document.getElementById('map-canvas');
-  if (!canvas || !container) return;
-
-  const w = container.clientWidth || 800;
-  const h = container.clientHeight || 600;
-  canvas.width = w;
-  canvas.height = h;
-  mapState.canvas = canvas;
-  mapState.ctx = canvas.getContext('2d');
-  mapState.view.tx = w / 2 - gMapDesc.w / 2;
-  mapState.view.ty = h / 2 - gMapDesc.h / 2;
-
-  // Load map image (from active map or fallback)
-  loadMapConfig().then(mapSrc => {
-    const img = new Image();
-    img.src = mapSrc;
-    img.onload = () => {
-      // Update view centering with possibly-updated gMapDesc
-      mapState.view.tx = w / 2 - gMapDesc.w / 2;
-      mapState.view.ty = h / 2 - gMapDesc.h / 2;
-      mapState.img = img;
-      const loading = document.getElementById('map-loading');
-      if (loading) loading.style.display = 'none';
-      drawMap();
-    };
-    img.onerror = () => {
-      // If active map image fails, try fallback
-      if (mapSrc !== 'vac_map.png') {
-        img.src = 'vac_map.png';
-      }
-    };
-  });
-
-  // Pan & zoom events
-  canvas.style.cursor = 'grab';
-
-  canvas.addEventListener('mousedown', e => {
-    mapState.view.dragging = true;
-    mapState.view.lastX = e.clientX;
-    mapState.view.lastY = e.clientY;
-    canvas.style.cursor = 'grabbing';
-  });
-  window.addEventListener('mousemove', e => {
-    if (!mapState.view.dragging) return;
-    mapState.view.tx += e.clientX - mapState.view.lastX;
-    mapState.view.ty += e.clientY - mapState.view.lastY;
-    mapState.view.lastX = e.clientX;
-    mapState.view.lastY = e.clientY;
-    drawMap();
-  });
-  window.addEventListener('mouseup', () => {
-    mapState.view.dragging = false;
-    canvas.style.cursor = 'grab';
-  });
-
-  canvas.addEventListener('wheel', e => {
-    e.preventDefault();
-    const mx = e.offsetX, my = e.offsetY;
-    const mapX = (mx - mapState.view.tx) / mapState.view.scale;
-    const mapY = (my - mapState.view.ty) / mapState.view.scale;
-    let s = mapState.view.scale * (e.deltaY < 0 ? 1.1 : 0.9);
-    s = Math.max(mapState.view.minScale, Math.min(mapState.view.maxScale, s));
-    mapState.view.tx = mx - mapX * s;
-    mapState.view.ty = my - mapY * s;
-    mapState.view.scale = s;
-    drawMap();
-  }, { passive: false });
-
-  canvas.addEventListener('dblclick', () => {
-    mapState.view.tx = w / 2 - gMapDesc.w / 2;
-    mapState.view.ty = h / 2 - gMapDesc.h / 2;
-    mapState.view.scale = 1;
-    drawMap();
-  });
-
-  // Touch events
-  let touchState = { lastDist: 0, lastCenter: { x: 0, y: 0 } };
-
-  canvas.addEventListener('touchstart', e => {
-    e.preventDefault();
-    if (e.touches.length === 1) {
-      mapState.view.dragging = true;
-      mapState.view.lastX = e.touches[0].clientX;
-      mapState.view.lastY = e.touches[0].clientY;
-    } else if (e.touches.length === 2) {
-      mapState.view.dragging = false;
-      const dx = e.touches[1].clientX - e.touches[0].clientX;
-      const dy = e.touches[1].clientY - e.touches[0].clientY;
-      touchState.lastDist = Math.sqrt(dx * dx + dy * dy);
-      touchState.lastCenter = {
-        x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
-        y: (e.touches[0].clientY + e.touches[1].clientY) / 2
-      };
-    }
-  }, { passive: false });
-
-  canvas.addEventListener('touchmove', e => {
-    e.preventDefault();
-    if (e.touches.length === 1 && mapState.view.dragging) {
-      const t = e.touches[0];
-      mapState.view.tx += t.clientX - mapState.view.lastX;
-      mapState.view.ty += t.clientY - mapState.view.lastY;
-      mapState.view.lastX = t.clientX;
-      mapState.view.lastY = t.clientY;
-      drawMap();
-    } else if (e.touches.length === 2) {
-      const dx = e.touches[1].clientX - e.touches[0].clientX;
-      const dy = e.touches[1].clientY - e.touches[0].clientY;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const center = {
-        x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
-        y: (e.touches[0].clientY + e.touches[1].clientY) / 2
-      };
-      const rect = canvas.getBoundingClientRect();
-      const cx = center.x - rect.left;
-      const cy = center.y - rect.top;
-      const mapX = (cx - mapState.view.tx) / mapState.view.scale;
-      const mapY = (cy - mapState.view.ty) / mapState.view.scale;
-      let s = mapState.view.scale * (dist / touchState.lastDist);
-      s = Math.max(mapState.view.minScale, Math.min(mapState.view.maxScale, s));
-      mapState.view.tx = cx - mapX * s;
-      mapState.view.ty = cy - mapY * s;
-      mapState.view.scale = s;
-      touchState.lastDist = dist;
-      touchState.lastCenter = center;
-      drawMap();
-    }
-  }, { passive: false });
-
-  canvas.addEventListener('touchend', e => {
-    e.preventDefault();
-    if (e.touches.length === 0) {
-      mapState.view.dragging = false;
-    } else if (e.touches.length === 1) {
-      mapState.view.dragging = true;
-      mapState.view.lastX = e.touches[0].clientX;
-      mapState.view.lastY = e.touches[0].clientY;
-    }
-  }, { passive: false });
-
-  // Resize observer
-  new ResizeObserver(() => {
-    const nw = container.clientWidth;
-    const nh = container.clientHeight;
-    if (nw > 0 && nh > 0) {
-      canvas.width = nw;
-      canvas.height = nh;
-      drawMap();
-    }
-  }).observe(container);
-}
-
-function drawMap() {
-  const { canvas, ctx, img, view } = mapState;
-  if (!ctx || !canvas) return;
-
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.translate(view.tx, view.ty);
-  ctx.scale(view.scale, view.scale);
-
-  // Draw map image
-  if (img) {
-    ctx.drawImage(img, 0, 0, gMapDesc.w, gMapDesc.h);
-  }
-
-  // Draw robot
-  if (robotData.pose) {
-    const pos = tfROS2Canvas(gMapDesc, robotData.pose);
-    if (pos.x && pos.y) {
-      ctx.save();
-      ctx.translate(pos.x, pos.y);
-      ctx.rotate(mapState.robotTheta || 0);
-
-      // Robot sprite
-      const sprite = mapState._robotSprite;
-      if (sprite && sprite.complete) {
-        ctx.drawImage(sprite, -8, -5, 16, 10);
-      } else {
-        // Fallback triangle
-        ctx.fillStyle = '#ff8800';
-        ctx.beginPath();
-        ctx.moveTo(0, -10);
-        ctx.lineTo(-7, 7);
-        ctx.lineTo(7, 7);
-        ctx.closePath();
-        ctx.fill();
-      }
-      ctx.restore();
-
-    }
-  }
-
-  // Draw shelf drop marker
-  if (shelfDropPose) {
-    const dropPos = tfROS2Canvas(gMapDesc, shelfDropPose);
-    if (dropPos.x && dropPos.y) {
-      ctx.save();
-      ctx.translate(dropPos.x, dropPos.y);
-
-      // Pulsing red circle
-      ctx.beginPath();
-      ctx.arc(0, 0, 10, 0, 2 * Math.PI);
-      ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(0, 0, 5, 0, 2 * Math.PI);
-      ctx.fillStyle = 'red';
-      ctx.fill();
-
-      // Cross mark
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(-3, -3); ctx.lineTo(3, 3);
-      ctx.moveTo(3, -3);  ctx.lineTo(-3, 3);
-      ctx.stroke();
-
-      ctx.restore();
-    }
-  }
-
-  ctx.restore();
-}
-
-function animateMap() {
-  // Smooth robot orientation interpolation
-  if (robotData.pose && robotData.pose.theta !== undefined) {
-    const target = -robotData.pose.theta; // Convert CCW to CW for canvas
-    const current = mapState.robotTheta || 0;
-    const diff = normalizeAngle(target - current);
-    if (Math.abs(diff) > 0.017) {
-      mapState.robotTheta = normalizeAngle(current + diff * 0.1);
-    } else {
-      mapState.robotTheta = target;
-    }
-  }
-
-  drawMap();
-  requestAnimationFrame(animateMap);
-}
-
-function normalizeAngle(a) {
-  while (a > Math.PI) a -= 2 * Math.PI;
-  while (a < -Math.PI) a += 2 * Math.PI;
-  return a;
-}
-
-// Load robot sprite
-(function () {
-  const sprite = new Image();
-  sprite.src = 'assets/icons/kachaka.png';
-  mapState._robotSprite = sprite;
-})();
+// All map state/init/drawing/pan-zoom/animation lives in js/mapView.js.
+// Use window.mapView.{init, refreshPose, getState, destroy}.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PATROL TAB
