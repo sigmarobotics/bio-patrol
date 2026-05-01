@@ -1643,3 +1643,33 @@ input[type="checkbox"]:checked::after {
     .bb-row { flex-direction: column; align-items: flex-start; }
     .bb-actions { width: 100%; justify-content: flex-end; }
 }
+
+/* Settings sub-tabs (IT-5) */
+.settings-subtabs {
+  display: flex;
+  gap: 8px;
+  padding: 16px 16px 0;
+  border-bottom: 1px solid var(--border-color, rgba(255,255,255,0.1));
+  margin-bottom: 16px;
+}
+.settings-subtab-btn {
+  padding: 8px 18px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  color: var(--text-muted, #888);
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.15s, color 0.15s;
+}
+.settings-subtab-btn:hover {
+  color: var(--text-primary, #eee);
+}
+.settings-subtab-btn.active {
+  background: var(--panel-bg, rgba(255,255,255,0.05));
+  border-color: var(--border-color, rgba(255,255,255,0.1));
+  color: var(--text-primary, #eee);
+}
+.settings-subtab-content { display: none; }
+.settings-subtab-content.active { display: block; }

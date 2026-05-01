@@ -76,21 +76,20 @@ async def get_bio_sensor_scan_data():
         client = get_bio_sensor_client()
         if client is None:
             return {"status": "disabled", "message": "Bio-sensor MQTT is disabled"}
-        scan_result = await client.get_valid_scan_data()
+        outcome = await client.get_valid_scan_data()
 
-        task_id = scan_result["task_id"]
-        valid_data = scan_result["data"]
-
-        if valid_data is None:
+        if outcome.valid_record is None:
             return {
                 "status": "no_valid_data",
                 "message": "No valid scan data received after all retries",
-                "task_id": task_id
+                "task_id": outcome.task_id,
+                "details": outcome.last_failure_reason,
+                "retry_count": outcome.retry_count,
             }
         return {
             "status": "success",
-            "task_id": task_id,
-            "data": valid_data
+            "task_id": outcome.task_id,
+            "data": outcome.valid_record,
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}

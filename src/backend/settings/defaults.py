@@ -27,6 +27,8 @@ DEFAULT_SETTINGS = {
     "zigbee_enabled": True,
     "zigbee_mqtt_host": "mqtt-broker",
     "zigbee_mqtt_port": 1883,
+    "enable_mqtt_egress": False,
+    "mqtt_egress_topic_prefix": "bio-patrol/anomaly",
 }
 
 DEFAULT_BEDS = {

@@ -93,6 +93,16 @@ async def lifespan(app: FastAPI):
     zigbee_mqtt = None
     button_manager = None
     try:
+        # Register notification sinks before any task_worker is started so an
+        # early-firing patrol sees a populated sink list.
+        from services.notifications.dispatcher import dispatcher
+        from services.notifications.recipients import StaticResolver
+        from services.notifications.sinks.telegram import TelegramSink
+        from services.notifications.sinks.mqtt import MqttSink
+        dispatcher.register(TelegramSink(StaticResolver()))
+        dispatcher.register(MqttSink())
+        logger.info("Anomaly dispatcher initialised: TelegramSink + MqttSink registered")
+
         # Bio-sensor MQTT client
         from settings.config import get_runtime_settings
         cfg = get_runtime_settings()
@@ -150,6 +160,14 @@ async def lifespan(app: FastAPI):
         yield
 
         # Cleanup
+        # Drain in-flight notifications first so a container restart does not
+        # silently cancel a Telegram POST mid-flight. 3-second cap trades
+        # shutdown latency against message durability.
+        try:
+            await dispatcher.drain(timeout=3.0)
+        except Exception:
+            logger.exception("Error during dispatcher drain")
+
         if zigbee_mqtt:
             try:
                 await zigbee_mqtt.stop()
