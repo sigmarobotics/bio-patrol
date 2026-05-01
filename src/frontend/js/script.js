@@ -19,6 +19,7 @@ let _cancelHideTimer = null;
 // ═══════════════════════════════════════════════════════════════════════════
 
 function switchTab(tabName) {
+  const prevTab = currentTab;  // IT-9: capture before switch
   currentTab = tabName;
 
   // Update tab buttons
@@ -42,6 +43,11 @@ function switchTab(tabName) {
   // Stop the buttons-panel polling when leaving settings.
   if (tabName !== 'settings' && typeof window.unloadButtons === 'function') {
     window.unloadButtons();
+  }
+
+  // IT-9: stop dashboard polling when leaving dashboard
+  if (prevTab === 'dashboard' && tabName !== 'dashboard') {
+    if (window.bedGrid?.teardown) bedGrid.teardown();
   }
 }
 
@@ -403,7 +409,9 @@ async function resumePatrol() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function loadDashboardData() {
-  loadLatestBioSensor();
+  // IT-9: bed-grid + robot mini frame (slices 2 + 3 fill these stubs)
+  if (window.bedGrid?.init) bedGrid.init();
+  if (window.mapView?.initMini) mapView.initMini();
   loadScheduleForDashboard();
 }
 
@@ -1148,6 +1156,7 @@ const SETTINGS_MAP = [
   { id: 'setting-mqtt-egress-topic-prefix', key: 'mqtt_egress_topic_prefix' },
   { id: 'setting-gemini-api-key', key: 'gemini_api_key' },
   { id: 'setting-timezone', key: 'timezone' },
+  { id: 'setting-bed-card-stale-hours', key: 'bed_card_stale_hours', type: 'number' },
 ];
 
 async function fetchShelves() {
