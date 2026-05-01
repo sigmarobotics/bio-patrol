@@ -282,7 +282,7 @@
     const robotData = global.robotData;
     if (robotData && robotData.pose) {
       const pos = tfROS2Canvas(_state.gMapDesc, robotData.pose);
-      if (pos.x && pos.y) {
+      if (Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
         ctx.save();
         ctx.translate(pos.x, pos.y);
         ctx.rotate(_state.robotTheta || 0);
@@ -307,7 +307,7 @@
     const shelfDropPose = global.shelfDropPose;
     if (shelfDropPose) {
       const dropPos = tfROS2Canvas(_state.gMapDesc, shelfDropPose);
-      if (dropPos.x && dropPos.y) {
+      if (Number.isFinite(dropPos.x) && Number.isFinite(dropPos.y)) {
         ctx.save();
         ctx.translate(dropPos.x, dropPos.y);
         ctx.beginPath();
