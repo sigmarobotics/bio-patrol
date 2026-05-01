@@ -117,3 +117,4 @@ tests/generated/
 
 # Playwright MCP browser session artifacts
 .playwright-mcp/
+src/data/
