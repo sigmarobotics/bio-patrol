@@ -495,20 +495,21 @@ class TaskEngine:
                         data={}, timestamp=get_now().isoformat()
                     )
                 bed_key = params.get("bed_key")
-                scan_result = await client.get_valid_scan_data(target_bed=self.target_bed, task_id=self.current_task_id, bed_name=bed_key)
-                logger.info(f"Bio scan result for robot {self.robot_id}: {scan_result}")
+                outcome = await client.get_valid_scan_data(target_bed=self.target_bed, task_id=self.current_task_id, bed_name=bed_key)
+                logger.info(f"Bio scan outcome for robot {self.robot_id}: valid={outcome.valid_record is not None} retry_count={outcome.retry_count}")
 
-                success = scan_result is not None and scan_result.get("data") is not None
+                success = outcome.valid_record is not None
                 if success:
                     logger.info(f"Bio scan completed successfully for robot {self.robot_id}")
                 else:
                     logger.warning(f"Bio scan failed - no valid data obtained for robot {self.robot_id}")
 
+                # Note: dispatcher hookup happens in Task 11 — leave outcome accessible.
                 return StepResult(
                     success=success,
                     error_code=0 if success else -1,
                     error_message="Bio scan completed successfully" if success else "No valid data obtained after all retries",
-                    data=scan_result or {},
+                    data=outcome.valid_record or {"task_id": outcome.task_id, "details": outcome.last_failure_reason},
                     timestamp=get_now().isoformat()
                 )
 
