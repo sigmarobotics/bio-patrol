@@ -1,4 +1,5 @@
-"""Unit tests for MqttSink — covers topic assembly, payload schema, is_enabled gating."""
+"""Unit tests for MqttSink — covers topic assembly, payload schema, is_enabled gating,
+and the long-lived ZigbeeMQTT client reuse path."""
 from __future__ import annotations
 
 import asyncio
@@ -104,6 +105,68 @@ def test_send_timeout_propagates_for_safe_send_to_handle():
     with patch("services.notifications.sinks.mqtt.get_runtime_settings",
                return_value=_settings()), \
          patch("services.notifications.sinks.mqtt.aiomqtt.Client", return_value=aenter), \
+         patch("services.notifications.sinks.mqtt.PUBLISH_TIMEOUT_S", 0.05):
+        try:
+            asyncio.run(sink.send(_event()))
+            raised = False
+        except asyncio.TimeoutError:
+            raised = True
+    assert raised is True
+
+
+def test_send_uses_shared_zigbee_client_when_injected():
+    """With ZigbeeMQTT injected, MqttSink delegates to its long-lived client and
+    does not open a fresh aiomqtt connection per event."""
+    zigbee = MagicMock()
+    zigbee.publish = AsyncMock(return_value=True)
+    sink = MqttSink(zigbee_mqtt=zigbee)
+    e = _event()
+
+    with patch("services.notifications.sinks.mqtt.get_runtime_settings",
+               return_value=_settings()), \
+         patch("services.notifications.sinks.mqtt.aiomqtt.Client") as mock_client_cls:
+        asyncio.run(sink.send(e))
+
+    mock_client_cls.assert_not_called()  # short-lived path must not run
+    zigbee.publish.assert_awaited_once()
+    topic, payload = zigbee.publish.await_args.args
+    kwargs = zigbee.publish.await_args.kwargs
+    assert topic == "bio-patrol/anomaly/warn/bio_scan_failure"
+    assert kwargs == {"qos": 1, "retain": False}
+    assert payload["event_id"] == e.event_id
+    assert payload["severity"] == "warn"
+    assert payload["source"] == "bio_scan_failure"
+
+
+def test_send_skips_when_shared_client_publish_returns_false():
+    """Shared client returns False (broker unreachable / mid-reconnect).
+    MqttSink logs + returns; it does NOT silently open a parallel short-lived
+    connection while the long-lived client is reconnecting."""
+    zigbee = MagicMock()
+    zigbee.publish = AsyncMock(return_value=False)
+    sink = MqttSink(zigbee_mqtt=zigbee)
+
+    with patch("services.notifications.sinks.mqtt.get_runtime_settings",
+               return_value=_settings()), \
+         patch("services.notifications.sinks.mqtt.aiomqtt.Client") as mock_client_cls:
+        asyncio.run(sink.send(_event()))
+
+    mock_client_cls.assert_not_called()
+    zigbee.publish.assert_awaited_once()
+
+
+def test_send_shared_client_publish_is_timeout_bounded():
+    """A hung shared client must surface asyncio.TimeoutError so the dispatcher
+    can isolate this sink and keep the others moving."""
+    async def hang_forever(*a, **kw):
+        await asyncio.sleep(60)
+
+    zigbee = MagicMock()
+    zigbee.publish = AsyncMock(side_effect=hang_forever)
+    sink = MqttSink(zigbee_mqtt=zigbee)
+
+    with patch("services.notifications.sinks.mqtt.get_runtime_settings",
+               return_value=_settings()), \
          patch("services.notifications.sinks.mqtt.PUBLISH_TIMEOUT_S", 0.05):
         try:
             asyncio.run(sink.send(_event()))

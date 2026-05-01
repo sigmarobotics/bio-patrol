@@ -93,6 +93,29 @@ async def lifespan(app: FastAPI):
     zigbee_mqtt = None
     button_manager = None
     try:
+        from settings.config import get_runtime_settings
+        cfg = get_runtime_settings()
+
+        # Zigbee MQTT first so the dispatcher's MqttSink can share its long-lived client.
+        try:
+            action_registry.init_default_actions()
+            button_db.init_schema()
+            button_db.seed_actions([a["key"] for a in action_registry.list_actions()])
+            if cfg.get("zigbee_enabled", True):
+                zigbee_mqtt = ZigbeeMQTT(
+                    host=cfg.get("zigbee_mqtt_host", "mqtt-broker"),
+                    port=int(cfg.get("zigbee_mqtt_port", 1883)),
+                )
+                button_manager = ButtonManager(zigbee_mqtt)
+                zigbee_mqtt.set_handler(button_manager.handle_event)
+                await zigbee_mqtt.start()
+                buttons_router.set_manager(button_manager)
+                logger.info("Zigbee button bindings initialised")
+            else:
+                logger.info("Zigbee bindings disabled (zigbee_enabled=false)")
+        except Exception as e:
+            logger.error(f"Failed to initialise zigbee button bindings: {e}")
+
         # Register notification sinks before any task_worker is started so an
         # early-firing patrol sees a populated sink list.
         from services.notifications.dispatcher import dispatcher
@@ -100,12 +123,8 @@ async def lifespan(app: FastAPI):
         from services.notifications.sinks.telegram import TelegramSink
         from services.notifications.sinks.mqtt import MqttSink
         dispatcher.register(TelegramSink(StaticResolver()))
-        dispatcher.register(MqttSink())
+        dispatcher.register(MqttSink(zigbee_mqtt=zigbee_mqtt))
         logger.info("Anomaly dispatcher initialised: TelegramSink + MqttSink registered")
-
-        # Bio-sensor MQTT client
-        from settings.config import get_runtime_settings
-        cfg = get_runtime_settings()
 
         if cfg.get("mqtt_enabled"):
             try:
@@ -138,25 +157,6 @@ async def lifespan(app: FastAPI):
         logger.info("Starting task scheduler...")
         await scheduler_service.start()
 
-        try:
-            action_registry.init_default_actions()
-            button_db.init_schema()
-            button_db.seed_actions([a["key"] for a in action_registry.list_actions()])
-            if cfg.get("zigbee_enabled", True):
-                zigbee_mqtt = ZigbeeMQTT(
-                    host=cfg.get("zigbee_mqtt_host", "mqtt-broker"),
-                    port=int(cfg.get("zigbee_mqtt_port", 1883)),
-                )
-                button_manager = ButtonManager(zigbee_mqtt)
-                zigbee_mqtt.set_handler(button_manager.handle_event)
-                await zigbee_mqtt.start()
-                buttons_router.set_manager(button_manager)
-                logger.info("Zigbee button bindings initialised")
-            else:
-                logger.info("Zigbee bindings disabled (zigbee_enabled=false)")
-        except Exception as e:
-            logger.error(f"Failed to initialise zigbee button bindings: {e}")
-
         yield
 
         # Cleanup
@@ -167,6 +167,12 @@ async def lifespan(app: FastAPI):
             await dispatcher.drain(timeout=3.0)
         except Exception:
             logger.exception("Error during dispatcher drain")
+
+        try:
+            from services import telegram_service
+            await telegram_service.aclose_client()
+        except Exception:
+            logger.exception("Error closing telegram HTTP client")
 
         if zigbee_mqtt:
             try:

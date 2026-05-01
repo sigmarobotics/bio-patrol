@@ -145,12 +145,12 @@ class ZigbeeMQTT:
                     pass
                 backoff = min(backoff * 2, 30.0)
 
-    async def publish(self, topic: str, payload: dict) -> bool:
+    async def publish(self, topic: str, payload: dict, qos: int = 0, retain: bool = False) -> bool:
         client = self._client
         if client is None or not self._connected:
             logger.warning("Cannot publish to %s — MQTT not connected", topic)
             return False
-        await client.publish(topic, json.dumps(payload))
+        await client.publish(topic, json.dumps(payload, ensure_ascii=False), qos=qos, retain=retain)
         return True
 
     async def permit_join(self, allow: bool, time_s: int = 120) -> bool:
