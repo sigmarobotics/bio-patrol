@@ -21,7 +21,9 @@ from services.zigbee_mqtt import ZigbeeMQTT
 logger = logging.getLogger("services.button_manager")
 
 SUPPORTED_TRIGGER = "single"
-DEBOUNCE_SECONDS = 2.0
+# z2m occasionally emits duplicate `single` events for one physical press;
+# 0.3 s catches those without eating deliberate rapid presses.
+DEBOUNCE_SECONDS = 0.3
 PAIR_WINDOW_SECONDS = 120
 
 
@@ -89,6 +91,17 @@ class ButtonManager:
         ieee = event.get("ieee_addr")
         if not ieee:
             return
+
+        # Already-bound devices that left and rejoined: silent re-admit. No
+        # pair_target needed; nurse never has to re-pair after a sleep cycle.
+        existing = button_db.get_binding_by_ieee(ieee, self._db_path)
+        if existing and existing.get("action_key"):
+            button_db.update_status(
+                ieee, event.get("battery"), get_now().isoformat(), self._db_path
+            )
+            logger.info("Bound device %s rejoined → %s", ieee, existing["action_key"])
+            return
+
         async with self._pair_lock:
             target = self._pair_target
             expired = time.monotonic() >= self._pair_expires_at
@@ -98,7 +111,12 @@ class ButtonManager:
             self._pair_target = None
             self._pair_expires_at = 0.0
         button_db.bind_action(target, ieee, event.get("friendly_name"), self._db_path)
-        await self.zigbee.permit_join(False, time_s=0)
+        # Do NOT close permit_join here. Zigbee pairing is multi-stage
+        # (device_joined → device_interview → success); SNZB-01P sleeps mid-
+        # interview and the coordinator drops subsequent steps if permit_join
+        # is closed. Let the original arm_pair() window expire naturally so
+        # z2m can finish the interview and persist the device to database.db.
+        # (Matches sigma-button-controller's behavior — diagnosed live.)
         logger.info("Paired %s → action %s", ieee, target)
 
     async def _on_button_action(self, event: dict) -> None:

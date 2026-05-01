@@ -75,11 +75,15 @@ def seed_actions(action_keys: list[str], db_path: str | None = None) -> None:
     conn.commit()
 
 
+_SELECT_COLUMNS = (
+    "action_key, ieee_addr, friendly_name, paired_at, battery, "
+    "last_seen, last_fired_at, fire_count"
+)
+
+
 def list_bindings(db_path: str | None = None) -> list[dict[str, Any]]:
     rows = _conn(db_path).execute(
-        f"SELECT action_key, ieee_addr, friendly_name, paired_at, battery, "
-        f"last_seen, last_fired_at, fire_count FROM {TABLE_NAME} "
-        f"ORDER BY action_key"
+        f"SELECT {_SELECT_COLUMNS} FROM {TABLE_NAME} ORDER BY action_key"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -87,9 +91,7 @@ def list_bindings(db_path: str | None = None) -> list[dict[str, Any]]:
 def get_binding_by_ieee(ieee_addr: str,
                         db_path: str | None = None) -> dict[str, Any] | None:
     row = _conn(db_path).execute(
-        f"SELECT action_key, ieee_addr, friendly_name, paired_at, battery, "
-        f"last_seen, last_fired_at, fire_count FROM {TABLE_NAME} "
-        f"WHERE ieee_addr = ?",
+        f"SELECT {_SELECT_COLUMNS} FROM {TABLE_NAME} WHERE ieee_addr = ?",
         (ieee_addr,),
     ).fetchone()
     return dict(row) if row else None
