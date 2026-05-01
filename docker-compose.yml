@@ -27,11 +27,14 @@ services:
     image: koenkk/zigbee2mqtt:latest
     container_name: bio-patrol-z2m
     restart: unless-stopped
+    # privileged + /dev:/dev so the host's udev rule (99-zigbee.rules)
+    # SYMLINK+="zigbee" → /dev/zigbee survives dongle unplug + replug
+    # without operator intervention. Static `devices:` mapping was stuck
+    # at the old inode after replug — see CORNER-008.
+    privileged: true
     volumes:
       - ./zigbee2mqtt:/app/data
-      - /run/udev:/run/udev:ro
-    devices:
-      - "${ZIGBEE_SERIAL_PORT:-/dev/zigbee}:/dev/zigbee"
+      - /dev:/dev
     environment:
       - TZ=Asia/Taipei
       - ZIGBEE_SERIAL_PORT=/dev/zigbee

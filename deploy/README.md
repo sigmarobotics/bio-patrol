@@ -66,6 +66,32 @@ The bundled Mosquitto broker runs on port 1883. Set in `settings.json`:
 }
 ```
 
+### Zigbee Dongle (one-time host setup)
+
+The `zigbee2mqtt` service uses a host udev rule to map the SONOFF SNZB
+Zigbee dongle to a stable `/dev/zigbee` symlink. Combined with
+`privileged: true` + `/dev:/dev` in the compose file, this lets the
+container survive a dongle unplug + replug **without operator
+intervention** — udev re-creates the symlink and z2m reconnects
+automatically (CORNER-008).
+
+Install once on the host:
+
+```bash
+sudo tee /etc/udev/rules.d/99-zigbee.rules > /dev/null <<'EOF'
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="zigbee"
+EOF
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+Verify with the dongle plugged in:
+
+```bash
+ls -l /dev/zigbee   # → symlink to /dev/ttyUSB0 or similar
+lsusb | grep '10c4:ea60'   # → Silicon Labs CP210x UART Bridge
+```
+
 ## Commands
 
 ```bash
