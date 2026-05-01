@@ -4,6 +4,10 @@ from fastapi.staticfiles import StaticFiles
 import routers.kachaka as kachaka
 import routers.tasks as tasks
 import routers.settings as settings_router
+import routers.beds as beds_router
+import routers.patrol as patrol_router
+import routers.schedule as schedule_router
+import routers.maps as maps_router
 import routers.bio_sensor as bio_sensor
 import routers.buttons as buttons_router
 from contextlib import asynccontextmanager
@@ -60,7 +64,9 @@ def _setup_logging():
     routing = {
         "app.log": [
             "bio_patrol", "services.fleet_api",
-            "services.telegram_service", "routers.settings", "utils",
+            "services.telegram_service", "utils",
+            "routers.settings", "routers.beds", "routers.patrol",
+            "routers.schedule", "routers.maps",
         ],
         "task.log": [
             "kachaka", "routers.tasks", "routers.kachaka",
@@ -210,6 +216,10 @@ async def _robot_not_registered_handler(_request: Request, exc: RobotNotRegister
 app.include_router(tasks.router)
 app.include_router(kachaka.router)
 app.include_router(settings_router.router)
+app.include_router(beds_router.router)
+app.include_router(patrol_router.router)
+app.include_router(schedule_router.router)
+app.include_router(maps_router.router)
 app.include_router(bio_sensor.router)
 app.include_router(buttons_router.router)
 
