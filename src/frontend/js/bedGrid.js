@@ -11,10 +11,24 @@
     return ageMs > thresholdMs ? 'stale' : 'valid';
   }
 
+  function formatRelativeTime(timestamp, now = Date.now()) {
+    if (!timestamp) return '--';
+    const ts = Date.parse(timestamp);
+    if (Number.isNaN(ts)) return '--';
+    const diffSec = Math.max(0, Math.floor((now - ts) / 1000));
+    if (diffSec < 60) return '剛剛';
+    const min = Math.floor(diffSec / 60);
+    if (min < 60) return `${min} 分前`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr} 小時前`;
+    const day = Math.floor(hr / 24);
+    return `${day} 天前`;
+  }
+
   global.bedGrid = {
     init() {},
     teardown() {},
     classifyBedState,
-    formatRelativeTime() { return '--'; },
+    formatRelativeTime,
   };
 })(window);

@@ -64,3 +64,35 @@ test.describe('bedGrid pure functions (via page.evaluate)', () => {
     expect(result).toBe('stale');
   });
 });
+
+test.describe('formatRelativeTime', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto(`${BASE_URL}/`);
+  });
+
+  test('< 1 minute → 剛剛', async ({ page }) => {
+    const r = await page.evaluate(() => window.bedGrid.formatRelativeTime(
+      '2026-05-01T11:59:30Z', new Date('2026-05-01T12:00:00Z').getTime()));
+    expect(r).toBe('剛剛');
+  });
+  test('5 min → 5 分前', async ({ page }) => {
+    const r = await page.evaluate(() => window.bedGrid.formatRelativeTime(
+      '2026-05-01T11:55:00Z', new Date('2026-05-01T12:00:00Z').getTime()));
+    expect(r).toBe('5 分前');
+  });
+  test('59 min → 59 分前', async ({ page }) => {
+    const r = await page.evaluate(() => window.bedGrid.formatRelativeTime(
+      '2026-05-01T11:01:00Z', new Date('2026-05-01T12:00:00Z').getTime()));
+    expect(r).toBe('59 分前');
+  });
+  test('60 min → 1 小時前', async ({ page }) => {
+    const r = await page.evaluate(() => window.bedGrid.formatRelativeTime(
+      '2026-05-01T11:00:00Z', new Date('2026-05-01T12:00:00Z').getTime()));
+    expect(r).toBe('1 小時前');
+  });
+  test('25 hours → 1 天前', async ({ page }) => {
+    const r = await page.evaluate(() => window.bedGrid.formatRelativeTime(
+      '2026-04-30T11:00:00Z', new Date('2026-05-01T12:00:00Z').getTime()));
+    expect(r).toBe('1 天前');
+  });
+});
