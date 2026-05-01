@@ -35,8 +35,11 @@ async def get_latest_bio_sensor_data():
         return {"status": "error", "message": str(e)}
 
 @router.get("/scan-history")
-async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None):
-    """Get historical bio-sensor scan data from database."""
+async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, location_id: str = None):
+    """Get historical bio-sensor scan data from database.
+
+    IT-9: location_id filter added (canonical join key, not bed_name which is free-text).
+    """
     try:
         client = get_bio_sensor_client()
         if client is None:
@@ -46,23 +49,28 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None):
         conn = sqlite3.connect(client.db_path)
         cursor = conn.cursor()
 
+        clauses = []
+        params = []
         if task_id:
-            search_pattern = f'{task_id}%'
-            cursor.execute('''
-                SELECT id, task_id, location_id, bed_name, timestamp, retry_count, status, bpm, rpm, is_valid, data_json, details
-                FROM sensor_scan_data
-                WHERE task_id LIKE ?
-                ORDER BY timestamp DESC, retry_count ASC
-                LIMIT ?
-            ''', (search_pattern, limit))
-        else:
-            cursor.execute('''
-                SELECT id, task_id, location_id, bed_name, timestamp, retry_count, status, bpm, rpm, is_valid, data_json, details
-                FROM sensor_scan_data
-                ORDER BY timestamp DESC, retry_count ASC
-                LIMIT ?
-            ''', (limit,))
+            clauses.append("task_id LIKE ?")
+            params.append(f"{task_id}%")
+        if location_id:
+            clauses.append("location_id = ?")
+            params.append(location_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
+        params.append(limit)
+        cursor.execute(
+            f"""
+            SELECT id, task_id, location_id, bed_name, timestamp, retry_count,
+                   status, bpm, rpm, is_valid, data_json, details
+            FROM sensor_scan_data
+            {where}
+            ORDER BY timestamp DESC, retry_count ASC
+            LIMIT ?
+            """,
+            params,
+        )
         rows = cursor.fetchall()
         conn.close()
 
