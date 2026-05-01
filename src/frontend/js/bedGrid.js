@@ -49,10 +49,73 @@
   </div>`;
   }
 
+  const _collapsedRooms = new Set();  // module-level: persists during session
+
+  function renderBedGrid(bedsConfig, patrolConfig, latestByBedList, staleHours) {
+    const beds = bedsConfig?.beds || {};
+    const orderLookup = {};
+    (patrolConfig?.beds_order || []).forEach(e => { orderLookup[e.bed_key] = e; });
+    const latestByLocId = {};
+    (latestByBedList || []).forEach(r => { latestByLocId[r.location_id] = r; });
+
+    // Group beds by room
+    const roomGroups = {};
+    for (const [bedKey, bed] of Object.entries(beds)) {
+      const room = bed.room || bedKey.split('-')[0];
+      if (!roomGroups[room]) roomGroups[room] = [];
+      roomGroups[room].push({ bed_key: bedKey, ...bed });
+    }
+
+    const now = Date.now();
+    const sortedRooms = Object.keys(roomGroups).sort((a, b) => parseInt(a) - parseInt(b));
+    let html = '';
+    for (const room of sortedRooms) {
+      const bedsInRoom = roomGroups[room].sort((a, b) => (a.bed || 0) - (b.bed || 0));
+      const enabledCount = bedsInRoom.filter(b => orderLookup[b.bed_key]?.enabled).length;
+      const isCollapsed = _collapsedRooms.has(room);
+
+      html += `<section class="room-section${isCollapsed ? ' room-section--collapsed' : ''}" data-room="${room}">
+      <header class="room-header" onclick="bedGrid.toggleRoom('${room}')">
+        <span class="room-header__caret">${isCollapsed ? '▶' : '▼'}</span>
+        <span class="room-header__label">ROOM ${room}</span>
+        <span class="room-header__count">${enabledCount}/${bedsInRoom.length}</span>
+      </header>
+      <div class="bed-grid">
+        ${bedsInRoom.map(b => renderBedCard(
+          b,
+          latestByLocId[b.location_id],
+          !!orderLookup[b.bed_key]?.enabled,
+          staleHours,
+          now
+        )).join('')}
+      </div>
+    </section>`;
+    }
+    return html;
+  }
+
+  function toggleRoom(room) {
+    if (_collapsedRooms.has(room)) _collapsedRooms.delete(room);
+    else _collapsedRooms.add(room);
+    // Re-render (loadBedGrid caches lastSuccessfulData; just call render again)
+    if (_lastData) {
+      document.getElementById('bed-grid-main').innerHTML =
+        renderBedGrid(_lastData.beds, _lastData.patrol, _lastData.latest, _lastData.staleHours);
+    }
+  }
+
+  // _lastData is populated by loadBedGrid (Task 2.6).
+  let _lastData = null;
+
   global.bedGrid = {
     init() {},
     teardown() {},
     classifyBedState,
     formatRelativeTime,
+    renderBedCard,
+    renderBedGrid,
+    toggleRoom,
+    openDrawer() {},   // populated in Task 2.7
+    closeDrawer() {},  // populated in Task 2.7
   };
 })(window);
