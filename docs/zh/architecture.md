@@ -266,7 +266,7 @@ Vanilla JavaScript SPA，使用 Canvas 渲染地圖：
 | 歷史紀錄 | 掃描歷史表格、統計卡片、CSV 匯出 |
 | Settings | 機器人 IP、MQTT、Telegram、掃描參數、地圖管理 |
 
-## Zigbee 按鈕中樞（IT-4）
+## Zigbee 按鈕中樞
 
 基於 `zigbee2mqtt` 的實體按鈕中樞，讓護理人員不需操作平板就能觸發常用的 bio-patrol 動作。bio-patrol 容器透過 `aiomqtt` 訂閱本機 Mosquitto broker；SNZB-01P 的按壓事件以 MQTT 訊息送達，並轉發至六個固定動作之一。
 
@@ -297,16 +297,7 @@ graph LR
 | `routers/buttons.py` | 5 個動作中心式的 REST 端點。`GET /api/button-bindings` 回傳完整狀態。 |
 | Frontend `js/buttons.js` | Settings 分頁 `.glass-panel`，3 秒輪詢、配對倒數、每列 Pair / Cancel / Test / Unpair。 |
 
-### 關鍵硬體限制
-
-- **adapter 必須是 `ezsp`**（不是 `ember`）。SONOFF V2 dongle + SNZB-01P 的組合，目前只有 `ezsp` 能正確處理裝置的深度睡眠 / TC-Rejoin 序列。完整原因見 [it-4-design-notes.md](../it-4-design-notes.md)。
-- **`_on_device_event` 不會關閉 permit_join**。SNZB-01P 在 interview 中途會睡著；初次綁定後若立刻關閉 permit_join，interview 會被中斷。原本的 `arm_pair()` 120 秒視窗必須自然到期。
-- **`Mgmt_Leave_req` 不是真的離線**。按壓之間裝置看起來「離線」是設計如此（深度睡眠），不是故障。
-
-完整診斷、設計理由、復原流程請見：
-
-- [docs/it-4-design-notes.md](../it-4-design-notes.md) — 架構決策、SNZB-01P 韌體特性、為何使用 `ezsp`。
-- [docs/buttons-manual.md](../buttons-manual.md) — 操作員配對與故障排除手冊。
+操作員配對與故障排除：[docs/buttons-manual.md](../buttons-manual.md)。
 
 ## 日誌系統
 

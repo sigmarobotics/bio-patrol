@@ -278,7 +278,7 @@ Vanilla JavaScript SPA with Canvas-based map rendering:
 | History | Scan history table, statistics cards, CSV export |
 | Settings | Robot IP, MQTT, Telegram, scan timing, map management |
 
-## Zigbee Button Hub (IT-4)
+## Zigbee Button Hub
 
 A physical button hub built on `zigbee2mqtt` lets nurses trigger common bio-patrol actions without the tablet. The bio-patrol container subscribes to the local Mosquitto broker via `aiomqtt`; SNZB-01P button presses arrive as MQTT messages and are dispatched to one of six fixed actions.
 
@@ -309,16 +309,7 @@ graph LR
 | `routers/buttons.py` | 5 REST endpoints, action-centric. `GET /api/button-bindings` returns the full state (action list + binding + pair status). |
 | Frontend `js/buttons.js` | Settings-tab `.glass-panel`. 3 s polling, local pair countdown, per-row Pair / Cancel / Test / Unpair. |
 
-### Critical hardware constraints
-
-- **Adapter must be `ezsp`** (not `ember`). The SONOFF V2 dongle + SNZB-01P combination only handles the device's deep-sleep / TC-Rejoin sequence correctly under `ezsp`. The full reasoning is in [it-4-design-notes.md](it-4-design-notes.md).
-- **`_on_device_event` does not close permit_join.** SNZB-01P falls asleep mid-interview; closing permit_join after the initial bind aborts the interview. The original `arm_pair()` 120 s window must expire naturally.
-- **`Mgmt_Leave_req` is not a real leave.** Devices appear "offline" between presses by design; this is deep-sleep, not a fault.
-
-For the full diagnosis story, design rationale, and recovery procedures, see:
-
-- [docs/it-4-design-notes.md](it-4-design-notes.md) — architecture decisions, SNZB-01P firmware quirks, why `ezsp`.
-- [docs/buttons-manual.md](buttons-manual.md) — operator pairing + troubleshooting.
+Operator pairing and troubleshooting: [docs/buttons-manual.md](buttons-manual.md).
 
 ## Logging
 
