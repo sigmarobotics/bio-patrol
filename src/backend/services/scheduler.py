@@ -109,54 +109,28 @@ class TaskSchedulerService:
             from settings.config import PATROL_FILE, BEDS_FILE, get_runtime_settings
             from settings.defaults import DEFAULT_PATROL, DEFAULT_BEDS
             from utils.json_io import load_json
-            from common_types import Task, TaskStep, TaskStatus, StepStatus, generate_task_id
-            from services.task_runtime import tasks_db, submit_task
+            from common_types import Task, TaskStatus, generate_task_id
+            from services.task_runtime import submit_task
+            from routers.patrol import build_patrol_steps
 
             patrol_cfg = load_json(PATROL_FILE, DEFAULT_PATROL)
             beds_cfg = load_json(BEDS_FILE, DEFAULT_BEDS)
-            cfg = get_runtime_settings()
-            shelf_id = cfg.get("shelf_id", "S_04")
-            beds_order = patrol_cfg.get("beds_order", [])
+            shelf_id = get_runtime_settings().get("shelf_id", "S_04")
             beds_map = beds_cfg.get("beds", {})
 
-            enabled_beds = [b for b in beds_order if b.get("enabled", False)]
-            if not enabled_beds:
+            enabled = [b for b in patrol_cfg.get("beds_order", []) if b.get("enabled", False)]
+            if not enabled:
                 logger.warning(f"Scheduled patrol '{schedule_id}' skipped: no enabled beds")
                 return
 
-            steps = []
-            step_counter = 0
-
-            for bed_entry in enabled_beds:
-                bed_key = bed_entry["bed_key"]
-                bed_info = beds_map.get(bed_key, {})
-                location_id = bed_info.get("location_id", bed_key)
-
-                move_step_id = f"move_{step_counter}"
-                action_step_id = f"action_{step_counter}"
-
-                steps.append(TaskStep(
-                    step_id=move_step_id,
-                    action="move_shelf",
-                    params={"shelf_id": shelf_id, "location_id": location_id},
-                    status=StepStatus.PENDING,
-                    skip_on_failure=[action_step_id],
-                ))
-                steps.append(TaskStep(
-                    step_id=action_step_id,
-                    action="bio_scan",
-                    params={},
-                    status=StepStatus.PENDING,
-                ))
-                step_counter += 1
-
-            # Final return_shelf
-            steps.append(TaskStep(
-                step_id=f"return_{step_counter}",
-                action="return_shelf",
-                params={"shelf_id": shelf_id},
-                status=StepStatus.PENDING,
-            ))
+            beds = [
+                {
+                    "bed_key": b["bed_key"],
+                    "location_id": beds_map.get(b["bed_key"], {}).get("location_id", b["bed_key"]),
+                }
+                for b in enabled
+            ]
+            steps = build_patrol_steps(beds, shelf_id, mode="patrol")
 
             task = Task(
                 task_id=generate_task_id(),
@@ -167,7 +141,7 @@ class TaskSchedulerService:
             await submit_task(task)
             logger.info(
                 f"Scheduled patrol '{schedule_id}' created task {task.task_id} "
-                f"with {len(enabled_beds)} beds"
+                f"with {len(enabled)} beds"
             )
 
         except Exception as e:

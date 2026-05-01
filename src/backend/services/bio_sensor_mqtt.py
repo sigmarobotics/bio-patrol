@@ -11,6 +11,20 @@ from common_types import get_now
 
 logger = logging.getLogger("BioSensorMQTTClient")
 
+
+def is_valid_scan(record: dict, valid_status: int) -> bool:
+    """Return True when a sensor record is a usable bio-scan reading.
+
+    A reading is valid only when status matches the configured `valid_status`
+    and both bpm/rpm are positive. Treats missing fields as invalid.
+    """
+    return (
+        record.get("status") == valid_status
+        and (record.get("bpm") or 0) > 0
+        and (record.get("rpm") or 0) > 0
+    )
+
+
 class BioSensorMQTTClient:
     def __init__(self, broker="localhost", port=1803, topic="/my/default/channel", db_path=None):
         self.broker = broker
@@ -158,7 +172,7 @@ class BioSensorMQTTClient:
                 has_any_data = True
                 for data in self.latest_data['records']:
                     logger.debug("scan_data: %s", data)
-                    is_valid = data['status'] == VALID_STATUS and data['bpm'] > 0 and data['rpm'] > 0
+                    is_valid = is_valid_scan(data, VALID_STATUS)
                     data['details'] = '量測正常' if is_valid else '無有效量測數値'
                     data['location_id'] = target_bed
                     data['bed_name'] = bed_name

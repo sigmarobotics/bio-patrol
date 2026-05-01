@@ -13,13 +13,12 @@ def load_json(filepath: str, default=None):
     if default is None:
         default = {}
     try:
-        if os.path.exists(filepath):
-            with open(filepath, "r", encoding="utf-8") as f:
-                return json.load(f)
-        else:
-            logger.info(f"JSON file not found: {filepath}, using default")
-            return default
-    except (json.JSONDecodeError, IOError) as e:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logger.info(f"JSON file not found: {filepath}, using default")
+        return default
+    except (json.JSONDecodeError, OSError) as e:
         logger.error(f"Error loading JSON from {filepath}: {e}")
         return default
 

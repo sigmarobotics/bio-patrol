@@ -1,6 +1,8 @@
 """TelegramSink — formats AnomalyEvent as HTML and posts via telegram_service."""
 from __future__ import annotations
 
+import asyncio
+
 from services.notifications.events import AnomalyEvent
 from services.notifications.recipients import RecipientResolver
 from services.telegram_service import send_telegram_message
@@ -19,8 +21,10 @@ class TelegramSink:
         if not chat_ids:
             return
         message = self._format(event)
-        for chat_id in chat_ids:
-            await send_telegram_message(message, chat_id=chat_id)
+        await asyncio.gather(
+            *(send_telegram_message(message, chat_id=cid) for cid in chat_ids),
+            return_exceptions=True,
+        )
 
     def _format(self, event: AnomalyEvent) -> str:
         # event_id last-8 footer lets a recipient cross-reference MQTT logs

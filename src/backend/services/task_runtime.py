@@ -5,7 +5,10 @@ from datetime import datetime
 from services.fleet_api import FleetAPI
 from services.notifications import AnomalyEvent, Severity, Source, dispatcher
 from services.notifications.evaluator import BioScanFailureEvaluator
-from common_types import Task, TaskStep, TaskStatus, StepStatus, StepResult, get_now
+from common_types import (
+    Task, TaskStep, TaskStatus, StepStatus, StepResult, StepAction,
+    NON_CRITICAL_ACTIONS, get_now,
+)
 from dependencies import get_bio_sensor_client
 
 logger = logging.getLogger("kachaka.task_runtime")
@@ -43,16 +46,30 @@ class TaskEngine:
         self._shelf_dropped = False
         self._shelf_monitor_stop = False
         self._shelf_monitor_task: Optional[asyncio.Task] = None
+        self._action_handlers: Dict[str, Any] = {
+            StepAction.SPEAK.value: self._do_speak,
+            StepAction.MOVE_TO_POSE.value: self._do_move_to_pose,
+            StepAction.MOVE_TO_LOCATION.value: self._do_move_to_location,
+            StepAction.DOCK_SHELF.value: self._do_dock_shelf,
+            StepAction.UNDOCK_SHELF.value: self._do_undock_shelf,
+            StepAction.MOVE_SHELF.value: self._do_move_shelf,
+            StepAction.RETURN_SHELF.value: self._do_return_shelf,
+            StepAction.RETURN_HOME.value: self._do_return_home,
+            StepAction.BIO_SCAN.value: self._do_bio_scan,
+            StepAction.WAIT.value: self._do_wait,
+        }
 
     async def _refresh_name_cache(self):
         """Fetch shelf/location names from robot for readable logs"""
         try:
-            result = await self.fleet.get_shelves(self.robot_id)
-            if result.get("ok"):
-                self._shelf_names = {s["id"]: s["name"] for s in result.get("shelves", [])}
-            result = await self.fleet.get_locations(self.robot_id)
-            if result.get("ok"):
-                self._location_names = {loc["id"]: loc["name"] for loc in result.get("locations", [])}
+            shelves_res, locations_res = await asyncio.gather(
+                self.fleet.get_shelves(self.robot_id),
+                self.fleet.get_locations(self.robot_id),
+            )
+            if shelves_res.get("ok"):
+                self._shelf_names = {s["id"]: s["name"] for s in shelves_res.get("shelves", [])}
+            if locations_res.get("ok"):
+                self._location_names = {loc["id"]: loc["name"] for loc in locations_res.get("locations", [])}
         except Exception as e:
             logger.warning(f"Failed to refresh name cache: {e}")
 
@@ -136,18 +153,18 @@ class TaskEngine:
         if trigger_step and trigger_step.skip_on_failure:
             for skip_id in trigger_step.skip_on_failure:
                 step = next((s for s in task.steps if s.step_id == skip_id), None)
-                if step and step.action == "bio_scan":
+                if step and step.action == StepAction.BIO_SCAN:
                     remaining.append({"bed_key": step.params.get("bed_key", ""), "location_id": location_id})
                     collected.add(skip_id)
 
         # Future unprocessed bio_scan steps
         for future in task.steps[step_index + 1:]:
-            if (future.action == "bio_scan"
+            if (future.action == StepAction.BIO_SCAN
                     and future.status in (StepStatus.PENDING, StepStatus.SKIPPED)
                     and future.step_id not in collected):
                 future_loc = ""
                 for ms in task.steps:
-                    if ms.action == "move_shelf" and ms.skip_on_failure and future.step_id in ms.skip_on_failure:
+                    if ms.action == StepAction.MOVE_SHELF and ms.skip_on_failure and future.step_id in ms.skip_on_failure:
                         future_loc = ms.params.get("location_id", "")
                         break
                 remaining.append({"bed_key": future.params.get("bed_key", ""), "location_id": future_loc})
@@ -155,7 +172,7 @@ class TaskEngine:
         # If no trigger step (polling detection), include current executing bio_scan
         if not trigger_step:
             current = task.steps[step_index] if step_index < len(task.steps) else None
-            if current and current.action == "bio_scan" and current.status == StepStatus.EXECUTING:
+            if current and current.action == StepAction.BIO_SCAN and current.status == StepStatus.EXECUTING:
                 remaining.insert(0, {
                     "bed_key": current.params.get("bed_key", ""),
                     "location_id": getattr(self, "target_bed", ""),
@@ -248,10 +265,10 @@ class TaskEngine:
         if trigger_step and trigger_step.skip_on_failure:
             for skip_id in trigger_step.skip_on_failure:
                 s = next((s for s in task.steps if s.step_id == skip_id), None)
-                if s and s.action == "bio_scan":
+                if s and s.action == StepAction.BIO_SCAN:
                     steps_to_skip.append(s)
         for future in task.steps[step_index + 1:]:
-            if future.action == "bio_scan" and future.status == StepStatus.PENDING and future not in steps_to_skip:
+            if future.action == StepAction.BIO_SCAN and future.status == StepStatus.PENDING and future not in steps_to_skip:
                 steps_to_skip.append(future)
 
         for s in steps_to_skip:
@@ -301,7 +318,7 @@ class TaskEngine:
                     step.status = StepStatus.SKIPPED
                     skip_reason = skip_reasons.get(step.step_id, {})
 
-                    if step.action == "bio_scan":
+                    if step.action == StepAction.BIO_SCAN:
                         self._record_skipped_scan(step, "機器人無法移動到床邊", extra_data={
                             "error_source": skip_reason.get("failed_step_id"),
                             "original_error_code": skip_reason.get("error_code"),
@@ -327,8 +344,7 @@ class TaskEngine:
                 step.status = StepStatus.EXECUTING
 
                 try:
-                    skip_reason = skip_reasons.get(step.step_id) if step.step_id in skip_reasons else None
-                    step_result = await self._execute_step(step, skip_reason)
+                    step_result = await self._execute_step(step)
                     step.result = step_result
                     step.status = StepStatus.SUCCESS if step_result.success else StepStatus.FAIL
 
@@ -352,7 +368,7 @@ class TaskEngine:
                                     "error_message": step_result.error_message,
                                     "original_error": step_result.data,
                                 }
-                        elif step.action in ("bio_scan", "wait", "speak", "return_shelf"):
+                        elif step.action in NON_CRITICAL_ACTIONS:
                             logger.warning(f"[NON-CRITICAL] Step {step.step_id} ({step.action}) failed, continuing to next step")
                         else:
                             if task.status != TaskStatus.CANCELLED:
@@ -379,7 +395,7 @@ class TaskEngine:
                                 "error_message": step.result.error_message,
                                 "original_error": step.result.data,
                             }
-                    elif step.action in ("bio_scan", "wait", "speak", "return_shelf"):
+                    elif step.action in NON_CRITICAL_ACTIONS:
                         logger.warning(f"[NON-CRITICAL] Step {step.step_id} ({step.action}) exception, continuing to next step")
                     else:
                         if task.status != TaskStatus.CANCELLED:
@@ -423,7 +439,7 @@ class TaskEngine:
                     logger.error(f"[{tag}] Cancelled cleanup error: {e}")
 
             try:
-                bio_steps = [s for s in task.steps if s.action == "bio_scan"]
+                bio_steps = [s for s in task.steps if s.action == StepAction.BIO_SCAN]
                 total_beds = len(bio_steps)
                 success_beds = sum(1 for s in bio_steps if s.status == StepStatus.SUCCESS)
                 title = "🚫 巡房已取消" if cancelled else "✅ 巡房完成"
@@ -461,118 +477,130 @@ class TaskEngine:
             timestamp=get_now().isoformat(),
         )
 
-    async def _execute_step(self, step: TaskStep, skip_reason=None) -> StepResult:
+    async def _execute_step(self, step: TaskStep) -> StepResult:
         action = step.action
-        params = step.params
+        handler = self._action_handlers.get(action)
+        if handler is None:
+            logger.error(f"Unknown action: {action} for robot {self.robot_id}")
+            return StepResult(
+                success=False, error_code=-1,
+                error_message=f"Unknown action: {action}",
+                data={"action": action}, timestamp=get_now().isoformat(),
+            )
         try:
-            if action == "speak":
-                result = await self.fleet.speak(self.robot_id, params["speak_text"])
-                return self._make_result(result, action, {"speak_text": params["speak_text"]})
-
-            elif action == "move_to_pose":
-                result = await self.fleet.move_to_pose(self.robot_id, float(params["x"]), float(params["y"]), float(params["yaw"]))
-                return self._make_result(result, action, {"x": float(params["x"]), "y": float(params["y"]), "yaw": float(params["yaw"])})
-
-            elif action == "move_to_location":
-                result = await self.fleet.move_to_location(self.robot_id, params["location_id"])
-                return self._make_result(result, action, {"location_id": params["location_id"]})
-
-            elif action == "dock_shelf":
-                result = await self.fleet.dock_shelf(self.robot_id)
-                return self._make_result(result, action, {})
-
-            elif action == "undock_shelf":
-                result = await self.fleet.undock_shelf(self.robot_id)
-                return self._make_result(result, action, {})
-
-            elif action == "move_shelf":
-                self.target_bed = params["location_id"]
-
-                result = await self.fleet.move_shelf(self.robot_id, params["shelf_id"], params["location_id"])
-
-                # Start shelf monitor after first successful move_shelf
-                if result.get("ok") and self._shelf_monitor_task is None:
-                    self._current_shelf_id = params["shelf_id"]
-                    self._shelf_monitor_stop = False
-                    self._shelf_dropped = False
-                    self._shelf_monitor_task = asyncio.create_task(self._monitor_shelf())
-
-                return self._make_result(result, action, {"shelf_id": params["shelf_id"], "location_id": params["location_id"]})
-
-            elif action == "return_shelf":
-                # Stop shelf monitor before return_shelf — no longer needed
-                await self._stop_shelf_monitor()
-
-                result = await self.fleet.return_shelf(self.robot_id, params["shelf_id"])
-                return self._make_result(result, action, {"shelf_id": params["shelf_id"]})
-
-            elif action == "return_home":
-                result = await self.fleet.return_home(self.robot_id)
-                return self._make_result(result, action, {})
-
-            elif action == "bio_scan":
-                client = get_bio_sensor_client()
-                if client is None:
-                    return StepResult(
-                        success=False, error_code=-1,
-                        error_message="Bio-sensor MQTT client is not available (mqtt_enabled=false)",
-                        data={}, timestamp=get_now().isoformat()
-                    )
-                bed_key = params.get("bed_key")
-                outcome = await client.get_valid_scan_data(target_bed=self.target_bed, task_id=self.current_task_id, bed_name=bed_key)
-                logger.info(f"Bio scan outcome for robot {self.robot_id}: valid={outcome.valid_record is not None} retry_count={outcome.retry_count}")
-
-                success = outcome.valid_record is not None
-                if success:
-                    logger.info(f"Bio scan completed successfully for robot {self.robot_id}")
-                else:
-                    logger.warning(f"Bio scan failed - no valid data obtained for robot {self.robot_id}")
-
-                event = _bio_scan_evaluator.evaluate(outcome)
-                if event:
-                    await dispatcher.dispatch(event)
-
-                return StepResult(
-                    success=success,
-                    error_code=0 if success else -1,
-                    error_message="Bio scan completed successfully" if success else "No valid data obtained after all retries",
-                    data=outcome.valid_record or {"task_id": outcome.task_id, "details": outcome.last_failure_reason},
-                    timestamp=get_now().isoformat()
-                )
-
-            elif action == "wait":
-                seconds = float(params.get("seconds", "1.0"))
-                await asyncio.sleep(seconds)
-                return StepResult(
-                    success=True, error_code=0,
-                    error_message="Wait completed successfully",
-                    data={"seconds": seconds}, timestamp=get_now().isoformat()
-                )
-
-            else:
-                logger.error(f"Unknown action: {action} for robot {self.robot_id}")
-                return StepResult(
-                    success=False, error_code=-1,
-                    error_message=f"Unknown action: {action}",
-                    data={"action": action}, timestamp=get_now().isoformat()
-                )
-
+            return await handler(step)
         except ValueError as e:
             logger.error(f"[!] Robot {self.robot_id} not found: {str(e)}")
             return StepResult(
                 success=False, error_code=-1,
                 error_message=f"Robot {self.robot_id} not found: {str(e)}",
-                data={"action": action, "params": params},
-                timestamp=get_now().isoformat()
+                data={"action": action, "params": step.params},
+                timestamp=get_now().isoformat(),
             )
         except Exception as e:
             logger.error(f"[X] Unexpected error during action {action} for robot {self.robot_id}: {str(e)}", exc_info=True)
             return StepResult(
                 success=False, error_code=-1,
                 error_message=f"Unexpected error: {str(e)}",
-                data={"action": action, "params": params},
-                timestamp=get_now().isoformat()
+                data={"action": action, "params": step.params},
+                timestamp=get_now().isoformat(),
             )
+
+    # ── Action handlers ───────────────────────────────────────────────
+
+    async def _do_speak(self, step: TaskStep) -> StepResult:
+        text = step.params["speak_text"]
+        result = await self.fleet.speak(self.robot_id, text)
+        return self._make_result(result, step.action, {"speak_text": text})
+
+    async def _do_move_to_pose(self, step: TaskStep) -> StepResult:
+        x, y, yaw = float(step.params["x"]), float(step.params["y"]), float(step.params["yaw"])
+        result = await self.fleet.move_to_pose(self.robot_id, x, y, yaw)
+        return self._make_result(result, step.action, {"x": x, "y": y, "yaw": yaw})
+
+    async def _do_move_to_location(self, step: TaskStep) -> StepResult:
+        location_id = step.params["location_id"]
+        result = await self.fleet.move_to_location(self.robot_id, location_id)
+        return self._make_result(result, step.action, {"location_id": location_id})
+
+    async def _do_dock_shelf(self, step: TaskStep) -> StepResult:
+        result = await self.fleet.dock_shelf(self.robot_id)
+        return self._make_result(result, step.action, {})
+
+    async def _do_undock_shelf(self, step: TaskStep) -> StepResult:
+        result = await self.fleet.undock_shelf(self.robot_id)
+        return self._make_result(result, step.action, {})
+
+    async def _do_move_shelf(self, step: TaskStep) -> StepResult:
+        shelf_id = step.params["shelf_id"]
+        location_id = step.params["location_id"]
+        self.target_bed = location_id
+
+        result = await self.fleet.move_shelf(self.robot_id, shelf_id, location_id)
+
+        # Start shelf monitor after the first successful move_shelf.
+        if result.get("ok") and self._shelf_monitor_task is None:
+            self._current_shelf_id = shelf_id
+            self._shelf_monitor_stop = False
+            self._shelf_dropped = False
+            self._shelf_monitor_task = asyncio.create_task(self._monitor_shelf())
+
+        return self._make_result(result, step.action, {"shelf_id": shelf_id, "location_id": location_id})
+
+    async def _do_return_shelf(self, step: TaskStep) -> StepResult:
+        # Stop shelf monitor before return_shelf — no longer needed.
+        await self._stop_shelf_monitor()
+        shelf_id = step.params["shelf_id"]
+        result = await self.fleet.return_shelf(self.robot_id, shelf_id)
+        return self._make_result(result, step.action, {"shelf_id": shelf_id})
+
+    async def _do_return_home(self, step: TaskStep) -> StepResult:
+        result = await self.fleet.return_home(self.robot_id)
+        return self._make_result(result, step.action, {})
+
+    async def _do_bio_scan(self, step: TaskStep) -> StepResult:
+        client = get_bio_sensor_client()
+        if client is None:
+            return StepResult(
+                success=False, error_code=-1,
+                error_message="Bio-sensor MQTT client is not available (mqtt_enabled=false)",
+                data={}, timestamp=get_now().isoformat(),
+            )
+        bed_key = step.params.get("bed_key")
+        outcome = await client.get_valid_scan_data(
+            target_bed=self.target_bed, task_id=self.current_task_id, bed_name=bed_key,
+        )
+        success = outcome.valid_record is not None
+        logger.info(
+            f"Bio scan outcome for robot {self.robot_id}: valid={success} "
+            f"retry_count={outcome.retry_count}"
+        )
+
+        event = _bio_scan_evaluator.evaluate(outcome)
+        if event:
+            await dispatcher.dispatch(event)
+
+        return StepResult(
+            success=success,
+            error_code=0 if success else -1,
+            error_message=(
+                "Bio scan completed successfully" if success
+                else "No valid data obtained after all retries"
+            ),
+            data=outcome.valid_record or {
+                "task_id": outcome.task_id, "details": outcome.last_failure_reason,
+            },
+            timestamp=get_now().isoformat(),
+        )
+
+    async def _do_wait(self, step: TaskStep) -> StepResult:
+        seconds = float(step.params.get("seconds", "1.0"))
+        await asyncio.sleep(seconds)
+        return StepResult(
+            success=True, error_code=0,
+            error_message="Wait completed successfully",
+            data={"seconds": seconds}, timestamp=get_now().isoformat(),
+        )
 
 
 async def task_worker(robot_id: str):

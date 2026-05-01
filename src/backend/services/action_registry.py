@@ -66,17 +66,17 @@ async def fire(key: str, params: dict | None = None) -> dict:
 
 
 async def _action_demo_run(_params: dict) -> dict:
-    from routers.settings import PatrolStartRequest, start_patrol
+    from routers.patrol import PatrolStartRequest, start_patrol
     return await start_patrol(PatrolStartRequest(mode="demo"))
 
 
 async def _action_shelf_resume(_params: dict) -> dict:
-    from routers.settings import resume_latest_shelf_drop
+    from routers.patrol import resume_latest_shelf_drop
     return await resume_latest_shelf_drop()
 
 
 async def _action_patrol_start(_params: dict) -> dict:
-    from routers.settings import PatrolStartRequest, start_patrol
+    from routers.patrol import PatrolStartRequest, start_patrol
     return await start_patrol(PatrolStartRequest(mode="patrol"))
 
 

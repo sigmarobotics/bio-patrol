@@ -72,7 +72,53 @@ def test_send_multiple_recipients_one_call_each():
                new_callable=AsyncMock) as mock_send:
         asyncio.run(sink.send(_event()))
         chat_ids = [call.kwargs["chat_id"] for call in mock_send.await_args_list]
-        assert chat_ids == ["111", "222"]
+        assert sorted(chat_ids) == ["111", "222"]
+
+
+def test_send_fans_out_recipients_concurrently():
+    """N chat_ids should be dispatched in parallel via asyncio.gather, not awaited
+    sequentially. Verified by giving each call a 50 ms sleep and asserting wall-clock
+    well under N x 50 ms."""
+    class ThreeIds:
+        async def resolve(self, event, channel):
+            return ["111", "222", "333"]
+
+    async def slow_send(message, chat_id):
+        await asyncio.sleep(0.05)
+
+    sink = TelegramSink(ThreeIds())
+
+    async def _run():
+        import time
+        with patch("services.notifications.sinks.telegram.send_telegram_message",
+                   side_effect=slow_send):
+            t0 = time.monotonic()
+            await sink.send(_event())
+            return time.monotonic() - t0
+
+    elapsed = asyncio.run(_run())
+    # Sequential would be ~0.15s; parallel should be ~0.05s (allow generous slack).
+    assert elapsed < 0.12, f"TelegramSink fan-out is sequential ({elapsed:.3f}s)"
+
+
+def test_send_one_recipient_failure_does_not_block_others():
+    """With return_exceptions=True in gather, one chat_id raising must not stop others."""
+    class TwoIds:
+        async def resolve(self, event, channel):
+            return ["good", "bad"]
+
+    calls: list[str] = []
+
+    async def fake_send(message, chat_id):
+        calls.append(chat_id)
+        if chat_id == "bad":
+            raise RuntimeError("network fail")
+
+    sink = TelegramSink(TwoIds())
+    with patch("services.notifications.sinks.telegram.send_telegram_message",
+               side_effect=fake_send):
+        asyncio.run(sink.send(_event()))
+    assert sorted(calls) == ["bad", "good"]
 
 
 def test_format_skips_body_separator_when_body_empty():
