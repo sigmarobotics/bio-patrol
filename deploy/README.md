@@ -66,6 +66,20 @@ The bundled Mosquitto broker runs on port 1883. Set in `settings.json`:
 }
 ```
 
+### Zigbee Dongle (one-time host setup)
+
+The `zigbee2mqtt` service requires a host-side udev rule that pins the
+SONOFF dongle to `/dev/zigbee`. Combined with the compose file's
+`privileged: true` + `/dev:/dev` mount, this lets the container
+auto-recover from a dongle unplug+replug without operator intervention
+(see CORNER-008).
+
+The full setup procedure — including which udev rule to install for
+each dongle revision (CP210x `10c4:ea60` vs CH340 `1a86:55d4`) and the
+security trade-off of running z2m privileged — is documented in:
+
+→ [docs/buttons-manual.md §2.1–2.2](../docs/buttons-manual.md#21-udev-rule-for-devzigbee)
+
 ## Commands
 
 ```bash
