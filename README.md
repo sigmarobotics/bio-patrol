@@ -115,7 +115,7 @@ stateDiagram-v2
 
 ## Hardware Topology
 
-Bio Patrol is a multi-machine system. The bio-patrol container runs on an edge host (typically a Raspberry Pi 5) that is on the same WiFi as the Kachaka robot and the WiSleep bio-sensor. The same host also owns a Zigbee coordinator that talks to SNZB-01P buttons.
+Bio Patrol is a multi-machine system. The bio-patrol container runs on an edge host (typically a Raspberry Pi 5) that is on the same WiFi as the Kachaka robot and the WiSleep bio-sensor. From IT-4 onward the same host also owns a Zigbee coordinator that talks to SNZB-01P buttons.
 
 ```mermaid
 graph TB
@@ -155,7 +155,7 @@ Key points:
 - The bio-patrol container talks to **two** MQTT brokers: the local `mqtt-broker` (for Zigbee buttons via `zigbee2mqtt`) and the upstream WiSleep broker (for bio-sensor data). They are independent.
 - The operator tablet is a plain browser — all UI is served by the bio-patrol container.
 
-## Zigbee Button Hub
+## Zigbee Button Hub (IT-4)
 
 Nurses and visitors can trigger common bio-patrol actions from a physical button instead of opening the tablet UI. Up to six SONOFF SNZB-01P buttons can be paired, one per action:
 
@@ -172,9 +172,11 @@ Nurses and visitors can trigger common bio-patrol actions from a physical button
 
 | Component | Notes |
 |-----------|-------|
-| SONOFF Zigbee 3.0 USB Dongle Plus **V2** | Itead, EmberZNet 7.4.4 (EZSP v13) firmware. Use the `ezsp` adapter — see "Adapter: ezsp" below. |
+| SONOFF Zigbee 3.0 USB Dongle Plus **V2** | Itead, EmberZNet 7.4.4 (EZSP v13) firmware. The `ezsp` adapter is required — see "Adapter must be ezsp" below. |
 | SONOFF SNZB-01P button(s) | Battery-powered, sleepy end-device. CR2477 battery. Up to 6 paired (one per action). |
 | Edge host | Raspberry Pi 5 (or any Linux box with USB + Docker). |
+
+> **Important — adapter must be `ezsp`.** The `zigbee2mqtt/configuration.yaml` shipped with this repo pins `adapter: ezsp`. Do not change it to `ember`, even though z2m's deprecation banner suggests doing so — the `ember` adapter does not handle the SNZB-01P deep-sleep / TC-Rejoin sequence correctly on the SONOFF V2 dongle. Recovery procedure if someone has already switched is documented in the operator manual.
 
 ### Pairing a button (operator workflow)
 
@@ -349,6 +351,7 @@ cd deploy && docker compose -f docker-compose.prod.yml up -d
 | [Bio Sensor](docs/BIO_SENSOR.md) | MQTT sensor integration |
 | [gRPC Error Handling](docs/GRPC_ERROR_FIX_SUMMARY.md) | Retry logic & shelf drop detection |
 | [Zigbee Button Hub — Operator Manual](docs/buttons-manual.md) | 配對 / 故障排除 / udev 設定 |
+| [Zigbee Button Hub — Design Notes](docs/it-4-design-notes.md) | IT-4 architecture decisions, SNZB-01P quirks, why `ezsp` |
 
 ## License
 
