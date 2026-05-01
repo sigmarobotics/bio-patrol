@@ -40,7 +40,7 @@
     <!-- ==================== TAB 1: DASHBOARD ==================== -->
     <div id="view-dashboard" class="tab-content no-padding active">
       <div class="dashboard-grid">
-        <!-- LEFT: Bed Grid Main (filled by bedGrid.js in Slice 2) -->
+        <!-- LEFT: Bed grid (rendered by bedGrid.js) -->
         <main class="bed-grid-main" id="bed-grid-main">
           <div class="bed-grid-empty" id="bed-grid-empty">
             <p>Loading beds…</p>
@@ -51,7 +51,7 @@
         <aside class="right-panel">
           <div class="header"><h2>Monitor</h2></div>
 
-          <!-- IT-9: Robot Mini Frame (filled by Slice 3) -->
+          <!-- Robot mini frame -->
           <div class="monitor-frame" id="robot-frame">
             <div class="frame-header" onclick="mapView.openModal && mapView.openModal()">
               <h4>🤖 Robot <span class="toggle-icon">↗</span></h4>
@@ -64,7 +64,7 @@
             </div>
           </div>
 
-          <!-- Patrol Schedule (UNCHANGED) -->
+          <!-- Patrol Schedule -->
           <div class="monitor-frame" id="schedule-frame">
             <div class="frame-header" onclick="toggleFrame('schedule-frame')">
               <h4>Patrol Schedule <span class="toggle-icon">▼</span></h4>
@@ -88,7 +88,7 @@
             </div>
           </div>
 
-          <!-- Quick Actions (UNCHANGED) -->
+          <!-- Quick Actions -->
           <div class="monitor-frame" id="quick-actions-frame">
             <div class="frame-header" onclick="toggleFrame('quick-actions-frame')">
               <h4>Quick Actions <span class="toggle-icon">▼</span></h4>
@@ -455,7 +455,7 @@
     </div>
   </div>
 
-    <!-- IT-9: Robot full-view modal (filled by Slice 3) -->
+    <!-- Robot full-view modal -->
     <div id="robot-modal" class="robot-modal" hidden>
       <div class="robot-modal-backdrop"></div>
       <div class="robot-modal-box" id="robot-modal-box">
@@ -483,7 +483,7 @@
       </div>
     </div>
 
-    <!-- IT-9: Bed history drawer (filled by Slice 2) -->
+    <!-- Bed history drawer -->
     <div id="bed-drawer" class="bed-drawer" hidden>
       <div class="bed-drawer-backdrop"></div>
       <aside class="bed-drawer-panel">
@@ -492,7 +492,7 @@
           <button class="bed-drawer-close" id="bed-drawer-close" aria-label="Close">×</button>
         </header>
         <div class="bed-drawer-body" id="bed-drawer-body">
-          <!-- Slice 2 fills: list of recent scans -->
+          <!-- Filled at runtime: list of recent scans -->
         </div>
         <footer class="bed-drawer-footer">
           <a href="#" class="bed-drawer-footer-link" id="bed-drawer-history-link">→ 看完整歷史</a>

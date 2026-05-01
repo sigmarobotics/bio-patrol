@@ -1,4 +1,4 @@
-// IT-9 Slice 2: bed-grid + drawer logic.
+// Bed-grid + drawer logic for the dashboard.
 (function (global) {
   const POLL_INTERVAL_MS = 10000;
   const DEFAULT_STALE_HOURS = 24;

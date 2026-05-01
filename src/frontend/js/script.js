@@ -12,14 +12,14 @@ let shelfDropPose = null;  // {x, y, theta} or null — set by checkShelfDrop()
 let _cancelledDismissed = new Set();  // task IDs dismissed after showing "cancelled"
 let _cancelHideTimer = null;
 
-// IT-9: gMapDesc + tfROS2Canvas moved to mapView.js (use mapView.getState() if needed)
+// gMapDesc + tfROS2Canvas live in mapView.js — use mapView.getState() if needed.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TAB NAVIGATION
 // ═══════════════════════════════════════════════════════════════════════════
 
 function switchTab(tabName) {
-  const prevTab = currentTab;  // IT-9: capture before switch
+  const prevTab = currentTab;  // capture before switch so we can teardown the previous tab
   currentTab = tabName;
 
   // Update tab buttons
@@ -45,7 +45,7 @@ function switchTab(tabName) {
     window.unloadButtons();
   }
 
-  // IT-9: stop dashboard polling when leaving dashboard
+  // Stop dashboard polling when leaving the dashboard tab
   if (prevTab === 'dashboard' && tabName !== 'dashboard') {
     if (window.bedGrid?.teardown) bedGrid.teardown();
   }
@@ -100,13 +100,13 @@ window.addEventListener('DOMContentLoaded', async () => {
   const btnCancel = document.getElementById('btn-cancel-command');
   if (btnCancel) btnCancel.addEventListener('click', returnHome);
 
-  // IT-9 Slice 3: modal-twin button wires (Home / Stop in robot full-view modal)
+  // Modal-twin button wires (Home / Stop in the robot full-view modal)
   const modalHome = document.getElementById('modal-btn-home');
   if (modalHome) modalHome.addEventListener('click', returnHome);
   const modalStop = document.getElementById('modal-btn-stop');
   if (modalStop) modalStop.addEventListener('click', cancelPatrol);
 
-  // Initialize map (IT-9: via mapView module; animation loop starts internally)
+  // Initialize map via mapView module — animation loop starts internally
   if (window.mapView) {
     mapView.init('map-canvas', { interactive: true });
   }
@@ -165,7 +165,7 @@ async function fetchRobotStatus() {
       if (poseEl) {
         poseEl.textContent = `X: ${pose.x.toFixed(2)} Y: ${pose.y.toFixed(2)} θ: ${(pose.theta || 0).toFixed(2)}`;
       }
-      // IT-9 Slice 3: mirror pose into mini-frame label and modal controls label
+      // Mirror pose into the mini-frame label and the modal controls label
       const miniPose = document.getElementById('robot-mini-pose');
       if (miniPose) miniPose.textContent = `X: ${pose.x.toFixed(2)} Y: ${pose.y.toFixed(2)} θ: ${(pose.theta || 0).toFixed(2)}`;
       const modalPose = document.getElementById('modal-controls-pose');
@@ -420,7 +420,7 @@ async function resumePatrol() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function loadDashboardData() {
-  // IT-9: bed-grid + robot mini frame (slices 2 + 3 fill these stubs)
+  // Bed-grid + robot mini frame; modules manage their own polling/teardown.
   if (window.bedGrid?.init) bedGrid.init();
   if (window.mapView?.initMini) mapView.initMini();
   loadScheduleForDashboard();
@@ -565,7 +565,7 @@ async function manualControl(direction) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MAP RENDERING — extracted to mapView.js (IT-9 Slice 0)
+// MAP RENDERING
 // ═══════════════════════════════════════════════════════════════════════════
 // All map state/init/drawing/pan-zoom/animation lives in js/mapView.js.
 // Use window.mapView.{init, refreshPose, getState, destroy}.

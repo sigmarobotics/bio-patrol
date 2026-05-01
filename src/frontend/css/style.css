@@ -1675,7 +1675,7 @@ input[type="checkbox"]:checked::after {
 .settings-subtab-content.active { display: block; }
 
 /* ═══════════════════════════════════════════════════════════════════════
-   IT-9 — DASHBOARD-GRID BASE LAYOUT
+   DASHBOARD-GRID BASE LAYOUT
    ═══════════════════════════════════════════════════════════════════════ */
 
 .dashboard-grid {
@@ -1825,7 +1825,7 @@ input[type="checkbox"]:checked::after {
 .bed-drawer-footer-link { color: var(--teal); font-size: 11px; text-decoration: none; }
 
 /* ═══════════════════════════════════════════════════════════════════════
-   IT-9 SLICE 3 — ROBOT MINI FRAME + ROBOT MODAL
+   ROBOT MINI FRAME + ROBOT MODAL
    ═══════════════════════════════════════════════════════════════════════ */
 
 /* Robot mini frame */

@@ -1,8 +1,8 @@
-// IT-9 Slice 0: extracted map rendering. Slice 3 extends this with mini-frame + modal.
+// Map rendering module — supports the dashboard mini-frame and the full-view modal.
 // API:
 //   mapView.init(canvasId, opts)  — initialize a canvas (opts.interactive = pan/zoom)
 //   mapView.refreshPose(pose)     — update robot pose; redraws all active canvases
-//   mapView.getState()            — returns { img, gMapDesc } (read-only)
+//   mapView.getState()            — returns { img, gMapDesc, tfROS2Canvas } (read-only)
 //   mapView.destroy(canvasId)     — tear down a canvas registration
 //
 // State:
@@ -357,7 +357,7 @@
 
   function refreshPose(_pose) { drawAll(); }
 
-  // ───── IT-9 Slice 3: mini-canvas + full-view modal ─────
+  // ───── Mini-canvas + full-view modal ─────
   function initMini() {
     init('robot-mini-canvas', { interactive: false });
   }
