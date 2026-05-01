@@ -1440,6 +1440,8 @@ const SETTINGS_MAP = [
   { id: 'setting-enable-telegram', key: 'enable_telegram', type: 'checkbox' },
   { id: 'setting-telegram-bot-token', key: 'telegram_bot_token' },
   { id: 'setting-telegram-user-id', key: 'telegram_user_id' },
+  { id: 'setting-enable-mqtt-egress', key: 'enable_mqtt_egress', type: 'checkbox' },
+  { id: 'setting-mqtt-egress-topic-prefix', key: 'mqtt_egress_topic_prefix' },
   { id: 'setting-gemini-api-key', key: 'gemini_api_key' },
   { id: 'setting-timezone', key: 'timezone' },
 ];
@@ -1518,6 +1520,15 @@ function applyShelfSelection() {
   if (select.value) {
     document.getElementById('setting-shelf-id').value = select.value;
   }
+}
+
+function switchSettingsSubTab(name) {
+  document.querySelectorAll('.settings-subtab-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.settingsSubtab === name);
+  });
+  document.querySelectorAll('.settings-subtab-content').forEach(panel => {
+    panel.classList.toggle('active', panel.dataset.settingsSubtabContent === name);
+  });
 }
 
 async function loadSettings() {

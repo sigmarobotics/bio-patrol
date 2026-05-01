@@ -274,153 +274,184 @@
 
     <!-- ==================== TAB 5: SETTINGS ==================== -->
     <div id="view-settings" class="tab-content">
-      <div class="settings-two-column">
-        <!-- LEFT COLUMN -->
-        <div>
-          <div class="glass-panel">
-            <h3>Robot Connection</h3>
-            <div class="form-group">
-              <label>Robot IP Address</label>
-              <div class="input-with-btn">
-                <input type="text" id="setting-robot-ip" placeholder="192.168.204.37:26400">
-                <button type="button" class="btn-secondary" id="btn-reconnect-robot" onclick="reconnectRobot()">Reconnect</button>
+      <div class="settings-subtabs">
+        <button class="settings-subtab-btn active" data-settings-subtab="hardware"
+                onclick="switchSettingsSubTab('hardware')">硬體設定</button>
+        <button class="settings-subtab-btn" data-settings-subtab="notifications"
+                onclick="switchSettingsSubTab('notifications')">通報設定</button>
+      </div>
+
+      <!-- HARDWARE SUB-TAB -->
+      <div data-settings-subtab-content="hardware" class="settings-subtab-content active">
+        <div class="settings-two-column">
+          <div>
+            <div class="glass-panel">
+              <h3>Robot Connection</h3>
+              <div class="form-group">
+                <label>Robot IP Address</label>
+                <div class="input-with-btn">
+                  <input type="text" id="setting-robot-ip" placeholder="192.168.204.37:26400">
+                  <button type="button" class="btn-secondary" id="btn-reconnect-robot" onclick="reconnectRobot()">Reconnect</button>
+                </div>
+                <div id="reconnect-status" class="reconnect-status"></div>
               </div>
-              <div id="reconnect-status" class="reconnect-status"></div>
+              <div class="form-group">
+                <label>Shelf ID</label>
+                <div class="input-with-btn">
+                  <input type="text" id="setting-shelf-id" placeholder="e.g. S_04">
+                  <button type="button" class="btn-secondary" id="btn-fetch-shelves" onclick="fetchShelves()">Get Shelves</button>
+                </div>
+                <select id="shelf-select" class="shelf-dropdown" style="display:none;" onchange="applyShelfSelection()"></select>
+              </div>
             </div>
-            <div class="form-group">
-              <label>Shelf ID</label>
-              <div class="input-with-btn">
-                <input type="text" id="setting-shelf-id" placeholder="e.g. S_04">
-                <button type="button" class="btn-secondary" id="btn-fetch-shelves" onclick="fetchShelves()">Get Shelves</button>
+
+            <div class="glass-panel">
+              <h3>MQTT Configuration</h3>
+              <div class="form-group">
+                <label>MQTT Broker</label>
+                <input type="text" id="setting-mqtt-broker" placeholder="localhost">
               </div>
-              <select id="shelf-select" class="shelf-dropdown" style="display:none;" onchange="applyShelfSelection()"></select>
+              <div class="form-group">
+                <label>MQTT Port</label>
+                <input type="number" id="setting-mqtt-port" placeholder="1883">
+              </div>
+              <div class="form-group">
+                <label>MQTT Topic</label>
+                <input type="text" id="setting-mqtt-topic" placeholder="/data-test/demo/wisleep-eck/org/201906078">
+              </div>
+              <div class="form-group" style="display:flex;align-items:center;gap:12px;">
+                <input type="checkbox" id="setting-mqtt-enabled" style="width:auto;">
+                <label for="setting-mqtt-enabled" style="margin:0;cursor:pointer;">Enable MQTT</label>
+              </div>
+              <button class="btn-secondary" id="btn-test-mqtt" onclick="testMQTT()">Test Connection</button>
+              <div class="log-display" id="mqtt-test-log"></div>
+            </div>
+
+            <div class="glass-panel">
+              <h3>Bio-Sensor Timing</h3>
+              <div class="form-group">
+                <label>Scan Wait Time (seconds)</label>
+                <input type="number" id="setting-bio-scan-wait-time" placeholder="10">
+              </div>
+              <div class="form-group">
+                <label>Retry Count</label>
+                <input type="number" id="setting-bio-scan-retry-count" placeholder="19">
+              </div>
+              <div class="form-group">
+                <label>Initial Wait Time (seconds)</label>
+                <input type="number" id="setting-bio-scan-initial-wait" placeholder="120">
+              </div>
+              <div class="form-group">
+                <label>Valid Status Code</label>
+                <input type="number" id="setting-bio-scan-valid-status" placeholder="4">
+              </div>
+              <button class="btn-secondary" id="btn-test-bioscan" onclick="testBioScan()">Test Bio-Scan</button>
+              <p class="test-note">Uses saved settings. Save before testing.</p>
+              <div class="log-display" id="bioscan-test-log"></div>
             </div>
           </div>
 
-          <div class="glass-panel">
-            <h3>MQTT Configuration</h3>
-            <div class="form-group">
-              <label>MQTT Broker</label>
-              <input type="text" id="setting-mqtt-broker" placeholder="localhost">
+          <div>
+            <div class="glass-panel">
+              <h3>Robot Retry Settings</h3>
+              <div class="form-group">
+                <label>Max Retries</label>
+                <input type="number" id="setting-robot-max-retries" placeholder="3">
+              </div>
+              <div class="form-group">
+                <label>Retry Base Delay (seconds)</label>
+                <input type="number" id="setting-robot-retry-base-delay" placeholder="2.0" step="0.1">
+              </div>
+              <div class="form-group">
+                <label>Retry Max Delay (seconds)</label>
+                <input type="number" id="setting-robot-retry-max-delay" placeholder="10.0" step="0.1">
+              </div>
             </div>
-            <div class="form-group">
-              <label>MQTT Port</label>
-              <input type="number" id="setting-mqtt-port" placeholder="1883">
-            </div>
-            <div class="form-group">
-              <label>MQTT Topic</label>
-              <input type="text" id="setting-mqtt-topic" placeholder="/data-test/demo/wisleep-eck/org/201906078">
-            </div>
-            <div class="form-group" style="display:flex;align-items:center;gap:12px;">
-              <input type="checkbox" id="setting-mqtt-enabled" style="width:auto;">
-              <label for="setting-mqtt-enabled" style="margin:0;cursor:pointer;">Enable MQTT</label>
-            </div>
-            <button class="btn-secondary" id="btn-test-mqtt" onclick="testMQTT()">Test Connection</button>
-            <div class="log-display" id="mqtt-test-log"></div>
-          </div>
 
-          <div class="glass-panel">
-            <h3>Bio-Sensor Timing</h3>
-            <div class="form-group">
-              <label>Scan Wait Time (seconds)</label>
-              <input type="number" id="setting-bio-scan-wait-time" placeholder="10">
+            <div class="glass-panel">
+              <h3>General</h3>
+              <div class="form-group">
+                <label>Timezone</label>
+                <select id="setting-timezone">
+                  <option value="Asia/Taipei">Asia/Taipei (UTC+8)</option>
+                  <option value="Asia/Tokyo">Asia/Tokyo (UTC+9)</option>
+                  <option value="Asia/Shanghai">Asia/Shanghai (UTC+8)</option>
+                  <option value="Asia/Singapore">Asia/Singapore (UTC+8)</option>
+                  <option value="America/New_York">America/New_York (UTC-5)</option>
+                  <option value="America/Los_Angeles">America/Los_Angeles (UTC-8)</option>
+                  <option value="Europe/London">Europe/London (UTC+0)</option>
+                  <option value="UTC">UTC</option>
+                </select>
+              </div>
             </div>
-            <div class="form-group">
-              <label>Retry Count</label>
-              <input type="number" id="setting-bio-scan-retry-count" placeholder="19">
+
+            <div class="glass-panel">
+              <h3>Map Management</h3>
+              <button class="btn-secondary" id="btn-fetch-map" onclick="fetchMapFromRobot()">Fetch from Robot</button>
+              <div id="map-list-container" style="margin-top:10px;">
+                <p style="color:var(--text-muted);font-size:12px;">No saved maps</p>
+              </div>
             </div>
-            <div class="form-group">
-              <label>Initial Wait Time (seconds)</label>
-              <input type="number" id="setting-bio-scan-initial-wait" placeholder="120">
-            </div>
-            <div class="form-group">
-              <label>Valid Status Code</label>
-              <input type="number" id="setting-bio-scan-valid-status" placeholder="4">
-            </div>
-            <button class="btn-secondary" id="btn-test-bioscan" onclick="testBioScan()">Test Bio-Scan</button>
-            <p class="test-note">Uses saved settings. Save before testing.</p>
-            <div class="log-display" id="bioscan-test-log"></div>
           </div>
         </div>
 
-        <!-- RIGHT COLUMN -->
-        <div>
+        <div class="bb-panel-wrap" style="padding:0 16px 16px;">
           <div class="glass-panel">
-            <h3>Robot Retry Settings</h3>
-            <div class="form-group">
-              <label>Max Retries</label>
-              <input type="number" id="setting-robot-max-retries" placeholder="3">
+            <div class="bb-panel-header">
+              <h3>Zigbee Buttons</h3>
+              <span id="bb-mqtt-pill" class="bb-pill">MQTT —</span>
             </div>
-            <div class="form-group">
-              <label>Retry Base Delay (seconds)</label>
-              <input type="number" id="setting-robot-retry-base-delay" placeholder="2.0" step="0.1">
-            </div>
-            <div class="form-group">
-              <label>Retry Max Delay (seconds)</label>
-              <input type="number" id="setting-robot-retry-max-delay" placeholder="10.0" step="0.1">
-            </div>
-          </div>
-
-          <div class="glass-panel">
-            <h3>Telegram Notifications</h3>
-            <div class="form-group" style="display:flex;align-items:center;gap:12px;">
-              <input type="checkbox" id="setting-enable-telegram" style="width:auto;">
-              <label for="setting-enable-telegram" style="margin:0;cursor:pointer;">Enable Telegram</label>
-            </div>
-            <div class="form-group">
-              <label>Bot Token</label>
-              <input type="password" id="setting-telegram-bot-token" placeholder="Enter bot token">
-            </div>
-            <div class="form-group">
-              <label>User ID</label>
-              <input type="text" id="setting-telegram-user-id" placeholder="Enter user ID">
-            </div>
-          </div>
-
-          <div class="glass-panel">
-            <h3>General</h3>
-            <div class="form-group">
-              <label>Timezone</label>
-              <select id="setting-timezone">
-                <option value="Asia/Taipei">Asia/Taipei (UTC+8)</option>
-                <option value="Asia/Tokyo">Asia/Tokyo (UTC+9)</option>
-                <option value="Asia/Shanghai">Asia/Shanghai (UTC+8)</option>
-                <option value="Asia/Singapore">Asia/Singapore (UTC+8)</option>
-                <option value="America/New_York">America/New_York (UTC-5)</option>
-                <option value="America/Los_Angeles">America/Los_Angeles (UTC-8)</option>
-                <option value="Europe/London">Europe/London (UTC+0)</option>
-                <option value="UTC">UTC</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="glass-panel">
-            <h3>AI Integration</h3>
-            <div class="form-group">
-              <label>Gemini API Key</label>
-              <input type="password" id="setting-gemini-api-key" placeholder="Enter API key">
-            </div>
-          </div>
-
-          <div class="glass-panel">
-            <h3>Map Management</h3>
-            <button class="btn-secondary" id="btn-fetch-map" onclick="fetchMapFromRobot()">Fetch from Robot</button>
-            <div id="map-list-container" style="margin-top:10px;">
-              <p style="color:var(--text-muted);font-size:12px;">No saved maps</p>
+            <p class="bb-help">每個動作可配對一顆 SONOFF SNZB-01 按鈕（單擊觸發）。</p>
+            <div id="bb-list" class="bb-list">
+              <div class="bb-loading">載入中…</div>
             </div>
           </div>
         </div>
       </div>
 
-      <div class="bb-panel-wrap" style="padding:0 16px 16px;">
-        <div class="glass-panel">
-          <div class="bb-panel-header">
-            <h3>Zigbee Buttons</h3>
-            <span id="bb-mqtt-pill" class="bb-pill">MQTT —</span>
+      <!-- NOTIFICATIONS SUB-TAB -->
+      <div data-settings-subtab-content="notifications" class="settings-subtab-content">
+        <div class="settings-two-column">
+          <div>
+            <div class="glass-panel">
+              <h3>Telegram Notifications</h3>
+              <div class="form-group" style="display:flex;align-items:center;gap:12px;">
+                <input type="checkbox" id="setting-enable-telegram" style="width:auto;">
+                <label for="setting-enable-telegram" style="margin:0;cursor:pointer;">Enable Telegram</label>
+              </div>
+              <div class="form-group">
+                <label>Bot Token</label>
+                <input type="password" id="setting-telegram-bot-token" placeholder="Enter bot token">
+              </div>
+              <div class="form-group">
+                <label>User ID</label>
+                <input type="text" id="setting-telegram-user-id" placeholder="Enter user ID">
+              </div>
+            </div>
+
+            <div class="glass-panel">
+              <h3>MQTT 異常事件外送</h3>
+              <p class="test-note">將 anomaly event 以 JSON publish 到內部 mqtt-broker 供下游系統消費。</p>
+              <div class="form-group" style="display:flex;align-items:center;gap:12px;">
+                <input type="checkbox" id="setting-enable-mqtt-egress" style="width:auto;">
+                <label for="setting-enable-mqtt-egress" style="margin:0;cursor:pointer;">啟用 MQTT egress</label>
+              </div>
+              <div class="form-group">
+                <label>Topic 前綴</label>
+                <input type="text" id="setting-mqtt-egress-topic-prefix" placeholder="bio-patrol/anomaly">
+              </div>
+            </div>
           </div>
-          <p class="bb-help">每個動作可配對一顆 SONOFF SNZB-01 按鈕（單擊觸發）。</p>
-          <div id="bb-list" class="bb-list">
-            <div class="bb-loading">載入中…</div>
+
+          <div>
+            <div class="glass-panel">
+              <h3>AI Integration</h3>
+              <p class="test-note">未來的「依班表派送」recipient resolver 將使用此 API key。</p>
+              <div class="form-group">
+                <label>Gemini API Key</label>
+                <input type="password" id="setting-gemini-api-key" placeholder="Enter API key">
+              </div>
+            </div>
           </div>
         </div>
       </div>
