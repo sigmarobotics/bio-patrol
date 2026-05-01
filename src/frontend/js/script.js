@@ -165,6 +165,11 @@ async function fetchRobotStatus() {
       if (poseEl) {
         poseEl.textContent = `X: ${pose.x.toFixed(2)} Y: ${pose.y.toFixed(2)} θ: ${(pose.theta || 0).toFixed(2)}`;
       }
+      // IT-9 Slice 3: mirror pose into mini-frame label and modal controls label
+      const miniPose = document.getElementById('robot-mini-pose');
+      if (miniPose) miniPose.textContent = `X: ${pose.x.toFixed(2)} Y: ${pose.y.toFixed(2)} θ: ${(pose.theta || 0).toFixed(2)}`;
+      const modalPose = document.getElementById('modal-controls-pose');
+      if (modalPose) modalPose.textContent = miniPose ? miniPose.textContent : `X: ${pose.x.toFixed(2)} Y: ${pose.y.toFixed(2)} θ: ${(pose.theta || 0).toFixed(2)}`;
     }
 
     // Update connection indicator

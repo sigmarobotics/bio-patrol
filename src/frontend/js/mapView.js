@@ -350,6 +350,45 @@
 
   function refreshPose(_pose) { drawAll(); }
 
+  // ───── IT-9 Slice 3: mini-canvas + full-view modal ─────
+  function initMini() {
+    init('robot-mini-canvas', { interactive: false });
+  }
+
+  function openModal() {
+    const modal = document.getElementById('robot-modal');
+    if (!modal) return;
+    modal.removeAttribute('hidden');
+    // Init the modal canvas lazily on first open; redraw on subsequent opens
+    if (!_state.canvases.has('map-canvas')) {
+      init('map-canvas', { interactive: true });
+    } else {
+      drawAll();
+    }
+    // Wire close affordances (× button, backdrop click, ESC key)
+    const close = () => closeModal();
+    const closeBtn = document.getElementById('robot-modal-close');
+    if (closeBtn) closeBtn.onclick = close;
+    const backdrop = modal.querySelector('.robot-modal-backdrop');
+    if (backdrop) backdrop.onclick = close;
+    // Replace any previous handler so re-opening doesn't accumulate listeners
+    if (modal._escHandler) {
+      document.removeEventListener('keydown', modal._escHandler);
+    }
+    modal._escHandler = (e) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', modal._escHandler);
+  }
+
+  function closeModal() {
+    const modal = document.getElementById('robot-modal');
+    if (!modal) return;
+    modal.setAttribute('hidden', '');
+    if (modal._escHandler) {
+      document.removeEventListener('keydown', modal._escHandler);
+      modal._escHandler = null;
+    }
+  }
+
   function destroy(canvasId) {
     const entry = _state.canvases.get(canvasId);
     if (!entry) return;
@@ -374,6 +413,9 @@
   global.mapView = {
     init,
     refreshPose,
+    initMini,
+    openModal,
+    closeModal,
     getState: () => ({ img: _state.img, gMapDesc: _state.gMapDesc, tfROS2Canvas }),
     destroy,
   };
