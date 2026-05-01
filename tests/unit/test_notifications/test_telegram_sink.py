@@ -73,3 +73,18 @@ def test_send_multiple_recipients_one_call_each():
         asyncio.run(sink.send(_event()))
         chat_ids = [call.kwargs["chat_id"] for call in mock_send.await_args_list]
         assert chat_ids == ["111", "222"]
+
+
+def test_format_skips_body_separator_when_body_empty():
+    sink = TelegramSink(StaticResolver())
+    e = AnomalyEvent(
+        severity=Severity.CRITICAL,
+        source=Source.SHELF_DROP,
+        title="⚠️ 貨架掉落，請協助歸位",
+        body="",
+    )
+    rendered = sink._format(e)
+    # No double-blank line between title and footer when body is empty
+    assert "\n\n\n" not in rendered
+    assert rendered.startswith("<b>⚠️ 貨架掉落，請協助歸位</b>\n\n")
+    assert rendered.endswith(f"<code>{e.event_id[-8:]}</code>")
