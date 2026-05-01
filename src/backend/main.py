@@ -1,10 +1,11 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 import routers.kachaka as kachaka
 import routers.tasks as tasks
 import routers.settings as settings_router
 import routers.bio_sensor as bio_sensor
 import routers.buttons as buttons_router
-from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import asyncio
 import logging
@@ -17,6 +18,7 @@ from services.task_runtime import (
     engines, task_queues, task_worker, TaskEngine
 )
 from services.scheduler import scheduler_service
+from services.fleet_api import RobotNotRegistered
 from services import action_registry, button_db
 from services.zigbee_mqtt import ZigbeeMQTT
 from services.button_manager import ButtonManager
@@ -198,6 +200,11 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+
+@app.exception_handler(RobotNotRegistered)
+async def _robot_not_registered_handler(_request: Request, exc: RobotNotRegistered):
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
 
 # Include routers (before static files mount so API routes take priority)
 app.include_router(tasks.router)

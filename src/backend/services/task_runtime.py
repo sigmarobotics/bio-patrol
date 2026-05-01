@@ -62,12 +62,14 @@ class TaskEngine:
     async def _refresh_name_cache(self):
         """Fetch shelf/location names from robot for readable logs"""
         try:
-            result = await self.fleet.get_shelves(self.robot_id)
-            if result.get("ok"):
-                self._shelf_names = {s["id"]: s["name"] for s in result.get("shelves", [])}
-            result = await self.fleet.get_locations(self.robot_id)
-            if result.get("ok"):
-                self._location_names = {loc["id"]: loc["name"] for loc in result.get("locations", [])}
+            shelves_res, locations_res = await asyncio.gather(
+                self.fleet.get_shelves(self.robot_id),
+                self.fleet.get_locations(self.robot_id),
+            )
+            if shelves_res.get("ok"):
+                self._shelf_names = {s["id"]: s["name"] for s in shelves_res.get("shelves", [])}
+            if locations_res.get("ok"):
+                self._location_names = {loc["id"]: loc["name"] for loc in locations_res.get("locations", [])}
         except Exception as e:
             logger.warning(f"Failed to refresh name cache: {e}")
 

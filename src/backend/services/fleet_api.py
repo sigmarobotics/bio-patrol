@@ -27,6 +27,15 @@ from kachaka_core import (
 logger = logging.getLogger(__name__)
 
 
+class RobotNotRegistered(ValueError):
+    """Raised by FleetAPI when a robot_id has no registered slot.
+
+    Subclasses ValueError so existing ``except ValueError`` callers still match;
+    main.py registers a targeted exception_handler for this subclass to map it
+    to HTTP 404 without catching every other ValueError in the app.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Per-robot slot
 # ---------------------------------------------------------------------------
@@ -62,7 +71,7 @@ class FleetAPI:
     def _get_slot(self, robot_id: str) -> _RobotSlot:
         slot = self._robots.get(robot_id)
         if slot is None:
-            raise ValueError(f"Robot {robot_id} not registered")
+            raise RobotNotRegistered(f"Robot {robot_id} not registered")
         return slot
 
     # ── registration ─────────────────────────────────────────────────

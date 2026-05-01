@@ -203,13 +203,16 @@ async def save_patrol_preset(name: str):
     return {"status": "ok", "name": safe_name}
 
 
+_PRESET_MISSING = object()
+
+
 @router.post("/patrol/presets/{name}/load")
 async def load_patrol_preset(name: str):
     """Load a named preset into patrol.json."""
     fpath = os.path.join(PATROL_PRESETS_DIR, f"{name}.json")
-    if not os.path.isfile(fpath):
+    data = load_json(fpath, _PRESET_MISSING)
+    if data is _PRESET_MISSING:
         raise HTTPException(status_code=404, detail="Preset not found")
-    data = load_json(fpath, {})
     save_json(PATROL_FILE, data)
     return {"status": "ok", "data": data}
 
@@ -218,9 +221,10 @@ async def load_patrol_preset(name: str):
 async def delete_patrol_preset(name: str):
     """Delete a named patrol preset."""
     fpath = os.path.join(PATROL_PRESETS_DIR, f"{name}.json")
-    if not os.path.isfile(fpath):
+    try:
+        os.remove(fpath)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Preset not found")
-    os.remove(fpath)
     # Clear demo_preset if it was the deleted one
     cfg = get_runtime_settings()
     if cfg.get("demo_preset") == name:
@@ -234,7 +238,7 @@ async def delete_patrol_preset(name: str):
 async def set_demo_preset(name: str):
     """Set a named preset as the demo route."""
     fpath = os.path.join(PATROL_PRESETS_DIR, f"{name}.json")
-    if not os.path.isfile(fpath):
+    if load_json(fpath, _PRESET_MISSING) is _PRESET_MISSING:
         raise HTTPException(status_code=404, detail="Preset not found")
     current = load_json(SETTINGS_FILE, {})
     current["demo_preset"] = name
@@ -867,51 +871,47 @@ async def fetch_maps_from_robot():
         current_settings["active_map"] = ""
         save_json(SETTINGS_FILE, current_settings)
 
-    # 1. Get list of maps on robot (kachaka_core returns dict)
-    try:
-        map_res = await fleet.get_map_list("kachaka")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to get map list: {e}")
+    # 1. Get map list + locations in parallel — independent calls
+    map_res, loc_res = await asyncio.gather(
+        fleet.get_map_list("kachaka"),
+        fleet.get_locations("kachaka"),
+        return_exceptions=True,
+    )
+    if isinstance(map_res, Exception):
+        raise HTTPException(status_code=502, detail=f"Failed to get map list: {map_res}")
 
     maps = map_res.get("maps", [])
     if not maps:
         return {"status": "ok", "maps": [], "message": "No maps on robot"}
 
-    # 2. Get current map id (included in map_list response)
     current_map_id = map_res.get("current_map_id", "")
 
-    # 3. Get locations (for current map) — kachaka_core returns dict
+    # 2. Locations apply only to the current map (other maps render without overlays)
     locations = []
-    try:
-        loc_res = await fleet.get_locations("kachaka")
-        if loc_res.get("ok"):
-            for loc in loc_res.get("locations", []):
-                locations.append({
-                    "id": loc.get("id", ""),
-                    "name": loc.get("name", ""),
-                    "pose": loc.get("pose", {}),
-                })
-    except Exception:
-        pass
+    if not isinstance(loc_res, Exception) and loc_res.get("ok"):
+        for loc in loc_res.get("locations", []):
+            locations.append({
+                "id": loc.get("id", ""),
+                "name": loc.get("name", ""),
+                "pose": loc.get("pose", {}),
+            })
 
-    # 4. For each map, load preview via raw SDK and save PNG + metadata
-    saved = []
+    # 4. Load all map previews in parallel via raw SDK, then save PNG + metadata
     client = fleet.get_raw_client("kachaka")
-    for entry in maps:
-        robot_map_id = entry.get("id", "")
-        entry_name = entry.get("name", "")
-        if not robot_map_id:
-            continue
+    targets = [(e.get("id", ""), e.get("name", "")) for e in maps if e.get("id")]
+    previews = await asyncio.gather(
+        *(asyncio.to_thread(client.load_map_preview, rid) for rid, _ in targets),
+        return_exceptions=True,
+    )
 
-        try:
-            map_pb = await asyncio.to_thread(client.load_map_preview, robot_map_id)
-        except Exception as e:
-            logger.warning(f"load_map_preview error for {robot_map_id}: {e}")
+    saved = []
+    for (robot_map_id, entry_name), preview in zip(targets, previews):
+        if isinstance(preview, Exception):
+            logger.warning("load_map_preview error for %s", robot_map_id, exc_info=preview)
             continue
-
         # Attach locations only for the current map
         locs = locations if robot_map_id == current_map_id else []
-        meta = _save_map_png_and_meta(map_pb, robot_map_id, locs, entry_name)
+        meta = _save_map_png_and_meta(preview, robot_map_id, locs, entry_name)
         if meta:
             saved.append({
                 "id": meta["id"],
