@@ -121,8 +121,8 @@
     entry.resizeObserver = ro;
 
     // Start the animation loop once (any canvas)
-    if (!_state.gAnimStarted) {
-      _state.gAnimStarted = true;
+    if (!_state._animStarted) {
+      _state._animStarted = true;
       requestAnimationFrame(animateMap);
     }
   }
