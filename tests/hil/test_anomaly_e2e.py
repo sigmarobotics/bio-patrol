@@ -60,7 +60,6 @@ def _make_failure_event() -> AnomalyEvent:
         valid_record=None,
         retry_count=19,
         last_record_raw={"status": 2, "bpm": 0, "rpm": 0, "details": "無有效量測數值"},
-        last_status=2, last_bpm=0, last_rpm=0,
         last_failure_reason="無有效量測數值",
     )
     event = BioScanFailureEvaluator().evaluate(outcome)

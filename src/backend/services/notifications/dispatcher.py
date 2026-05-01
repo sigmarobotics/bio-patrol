@@ -26,17 +26,18 @@ class AnomalyDispatcher:
 
     async def drain(self, timeout: float) -> None:
         """Wait up to `timeout` seconds for all in-flight sends to complete."""
-        if not self._pending:
+        pending = list(self._pending)
+        if not pending:
             return
         try:
             await asyncio.wait_for(
-                asyncio.gather(*self._pending, return_exceptions=True),
+                asyncio.gather(*pending, return_exceptions=True),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
             logger.warning(
                 "Notification dispatcher drain timed out; %d tasks abandoned",
-                len(self._pending),
+                len(pending),
             )
 
     async def _safe_send(self, sink: Sink, event: AnomalyEvent) -> None:

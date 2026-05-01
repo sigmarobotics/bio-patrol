@@ -150,15 +150,14 @@ class BioSensorMQTTClient:
         valid_data: dict | None = None
         has_any_data = False
         last_record_processed: dict | None = None
-        final_retry_count = 0
+        retry_count = 0  # loop variable; pre-init covers the RETRY_COUNT == 0 edge
 
         await asyncio.sleep(INT_WAIT_TIME)
         for retry_count in range(RETRY_COUNT):
-            final_retry_count = retry_count
             if self.latest_data and 'records' in self.latest_data:
                 has_any_data = True
                 for data in self.latest_data['records']:
-                    print("scan_data: ", data, "\n")
+                    logger.debug("scan_data: %s", data)
                     is_valid = data['status'] == VALID_STATUS and data['bpm'] > 0 and data['rpm'] > 0
                     data['details'] = '量測正常' if is_valid else '無有效量測數値'
                     data['location_id'] = target_bed
@@ -175,9 +174,6 @@ class BioSensorMQTTClient:
                         valid_record=valid_data,
                         retry_count=retry_count,
                         last_record_raw=last_record_processed,
-                        last_status=last_record_processed.get('status') if last_record_processed else None,
-                        last_bpm=last_record_processed.get('bpm') if last_record_processed else None,
-                        last_rpm=last_record_processed.get('rpm') if last_record_processed else None,
                         last_failure_reason=None,
                     )
 
@@ -200,11 +196,8 @@ class BioSensorMQTTClient:
                 location_id=target_bed,
                 bed_name=bed_name,
                 valid_record=None,
-                retry_count=final_retry_count,
+                retry_count=retry_count,
                 last_record_raw=None,
-                last_status=None,
-                last_bpm=None,
-                last_rpm=None,
                 last_failure_reason="未收到感測器資料（MQTT無連線或無數據）",
             )
 
@@ -214,11 +207,8 @@ class BioSensorMQTTClient:
             location_id=target_bed,
             bed_name=bed_name,
             valid_record=None,
-            retry_count=final_retry_count,
+            retry_count=retry_count,
             last_record_raw=last_record_processed,
-            last_status=last_record_processed.get('status') if last_record_processed else None,
-            last_bpm=last_record_processed.get('bpm') if last_record_processed else None,
-            last_rpm=last_record_processed.get('rpm') if last_record_processed else None,
             last_failure_reason=last_record_processed.get('details') if last_record_processed else "無有效量測數値",
         )
 

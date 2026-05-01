@@ -3,10 +3,14 @@ import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from services.fleet_api import FleetAPI
+from services.notifications.dispatcher import dispatcher
+from services.notifications.evaluator import BioScanFailureEvaluator
 from common_types import Task, TaskStep, TaskStatus, StepStatus, StepResult, get_now
 from dependencies import get_bio_sensor_client
 
 logger = logging.getLogger("kachaka.task_runtime")
+
+_bio_scan_evaluator = BioScanFailureEvaluator()
 
 # --- global states ---
 tasks_db: Dict[str, Task] = {}
@@ -504,16 +508,9 @@ class TaskEngine:
                 else:
                     logger.warning(f"Bio scan failed - no valid data obtained for robot {self.robot_id}")
 
-                # Anomaly notification: per-bed scan failure (IT-5).
-                # dispatcher.dispatch is fire-and-forget per sink — does not delay the step.
-                try:
-                    from services.notifications.dispatcher import dispatcher
-                    from services.notifications.evaluator import BioScanFailureEvaluator
-                    event = BioScanFailureEvaluator().evaluate(outcome)
-                    if event:
-                        await dispatcher.dispatch(event)
-                except Exception:
-                    logger.exception("Anomaly dispatch failed for bio_scan outcome")
+                event = _bio_scan_evaluator.evaluate(outcome)
+                if event:
+                    await dispatcher.dispatch(event)
 
                 return StepResult(
                     success=success,

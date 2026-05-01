@@ -13,9 +13,6 @@ def _make_outcome(**overrides):
         valid_record=None,
         retry_count=19,
         last_record_raw={"status": 2, "bpm": 0, "rpm": 0, "details": "無有效量測數值"},
-        last_status=2,
-        last_bpm=0,
-        last_rpm=0,
         last_failure_reason="無有效量測數值",
     )
     base.update(overrides)
@@ -55,9 +52,6 @@ def test_evaluator_uses_location_id_when_bed_name_missing():
 def test_evaluator_no_data_path_uses_standing_failure_reason():
     outcome = _make_outcome(
         last_record_raw=None,
-        last_status=None,
-        last_bpm=None,
-        last_rpm=None,
         last_failure_reason="未收到感測器資料（MQTT無連線或無數據）",
     )
     event = BioScanFailureEvaluator().evaluate(outcome)

@@ -6,6 +6,7 @@ not worth keeping a long-running client.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 
@@ -19,6 +20,16 @@ logger = logging.getLogger("services.notifications.mqtt")
 PUBLISH_TIMEOUT_S = 10.0
 
 
+def _serialize_event(event: AnomalyEvent) -> str:
+    payload = dataclasses.asdict(event)
+    payload["timestamp"] = event.timestamp.isoformat()
+    # Severity / Source are str-Enums so they round-trip through JSON, but make the
+    # wire format explicit values rather than relying on str-enum identity.
+    payload["severity"] = event.severity.value
+    payload["source"] = event.source.value
+    return json.dumps(payload, ensure_ascii=False)
+
+
 class MqttSink:
     async def is_enabled(self) -> bool:
         return bool(get_runtime_settings().get("enable_mqtt_egress", False))
@@ -29,20 +40,11 @@ class MqttSink:
         port = cfg.get("zigbee_mqtt_port", 1883)
         prefix = cfg.get("mqtt_egress_topic_prefix", "bio-patrol/anomaly")
         topic = f"{prefix}/{event.severity.value}/{event.source.value}"
-        payload = json.dumps({
-            "event_id": event.event_id,
-            "timestamp": event.timestamp.isoformat(),
-            "severity": event.severity.value,
-            "source": event.source.value,
-            "bed_key": event.bed_key,
-            "task_id": event.task_id,
-            "title": event.title,
-            "body": event.body,
-            "raw": event.raw,
-        }, ensure_ascii=False)
+        payload = _serialize_event(event)
 
         async def _publish():
             async with aiomqtt.Client(hostname=host, port=port) as client:
                 await client.publish(topic, payload, qos=1, retain=False)
 
         await asyncio.wait_for(_publish(), timeout=PUBLISH_TIMEOUT_S)
+        logger.debug("Published anomaly %s to %s", event.event_id, topic)
