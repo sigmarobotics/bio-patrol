@@ -118,7 +118,12 @@ class ButtonManager:
             self._pair_target = None
             self._pair_expires_at = 0.0
         button_db.bind_action(target, ieee, event.get("friendly_name"), self._db_path)
-        await self.zigbee.permit_join(False, time_s=0)
+        # Do NOT close permit_join here. Zigbee pairing is multi-stage
+        # (device_joined → device_interview → success); SNZB-01P sleeps mid-
+        # interview and the coordinator drops subsequent steps if permit_join
+        # is closed. Let the original arm_pair() window expire naturally so
+        # z2m can finish the interview and persist the device to database.db.
+        # (Matches sigma-button-controller's behavior — diagnosed live.)
         logger.info("Paired %s → action %s", ieee, target)
 
     async def _on_device_leave(self, event: dict) -> None:
