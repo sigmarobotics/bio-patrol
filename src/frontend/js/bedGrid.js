@@ -25,6 +25,30 @@
     return `${day} 天前`;
   }
 
+  function renderBedCard(bed, latest, isPatrolEnabled, staleHours, now = Date.now()) {
+    const state = classifyBedState(bed, latest, isPatrolEnabled, staleHours, now);
+    const bedKey = bed.bed_key;
+    let vit = '— / —';
+    let ts = '無資料';
+    let extra = '';
+
+    if (state === 'unscheduled') {
+      ts = '未排程';
+    } else if (state === 'invalid' && latest) {
+      extra = latest.details || (latest.status != null ? `status=${latest.status}` : '');
+      ts = `${formatRelativeTime(latest.timestamp, now)} 失敗`;
+    } else if (latest) {
+      vit = `${latest.bpm ?? '--'}/${latest.rpm ?? '--'}`;
+      ts = formatRelativeTime(latest.timestamp, now);
+    }
+
+    return `<div class="bed-card bed-card--${state}" data-bed-key="${bedKey}" onclick="bedGrid.openDrawer('${bedKey}')">
+    <span class="bed-card__bk">${bedKey}</span>
+    <span class="bed-card__vit">${vit}</span>
+    <span class="bed-card__ts">${ts}${extra ? ' · ' + extra : ''}</span>
+  </div>`;
+  }
+
   global.bedGrid = {
     init() {},
     teardown() {},
