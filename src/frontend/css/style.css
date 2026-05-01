@@ -1699,12 +1699,13 @@ input[type="checkbox"]:checked::after {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
-   IT-9 SLICE 2 — BED GRID + ROOM SECTIONS + BED CARDS + DRAWER
+   DASHBOARD BED GRID — scoped to #bed-grid-main to avoid colliding with
+   the legacy Beds-tab styles further up that share the same class names.
    ═══════════════════════════════════════════════════════════════════════ */
-.room-section { margin-bottom: 12px; }
-.room-section--collapsed .bed-grid { display: none; }
+#bed-grid-main .room-section { margin-bottom: 12px; }
+#bed-grid-main .room-section--collapsed .bed-grid { display: none; }
 
-.room-header {
+#bed-grid-main .room-header {
   font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 1.5px;
@@ -1719,9 +1720,9 @@ input[type="checkbox"]:checked::after {
   gap: 6px;
   user-select: none;
 }
-.room-header__caret { font-size: 10px; opacity: 0.7; }
-.room-header__label { flex: 1; }
-.room-header__count {
+#bed-grid-main .room-header__caret { font-size: 10px; opacity: 0.7; }
+#bed-grid-main .room-header__label { flex: 1; }
+#bed-grid-main .room-header__count {
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-muted);
@@ -1730,13 +1731,13 @@ input[type="checkbox"]:checked::after {
   border-radius: 3px;
 }
 
-.bed-grid {
+#bed-grid-main .bed-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 6px;
 }
 
-.bed-card {
+#bed-grid-main .bed-card {
   background: var(--panel-mid);
   border: 1px solid var(--border-subtle);
   border-left: 3px solid var(--border-subtle);
@@ -1750,17 +1751,17 @@ input[type="checkbox"]:checked::after {
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s;
 }
-.bed-card:hover { background: var(--panel-hover); }
-.bed-card__bk { font-weight: 700; font-size: 12px; letter-spacing: 0.5px; }
-.bed-card__vit { font-family: var(--font-mono); font-size: 14px; color: var(--accent-amber); }
-.bed-card__ts { font-size: 10px; color: var(--text-muted); }
+#bed-grid-main .bed-card:hover { background: var(--panel-hover); }
+#bed-grid-main .bed-card__bk { font-weight: 700; font-size: 12px; letter-spacing: 0.5px; }
+#bed-grid-main .bed-card__vit { font-family: var(--font-mono); font-size: 14px; color: var(--accent-amber); }
+#bed-grid-main .bed-card__ts { font-size: 10px; color: var(--text-muted); }
 
-.bed-card--valid { border-left-color: var(--accent-green); }
-.bed-card--stale { border-left-color: var(--text-muted); opacity: 0.65; }
-.bed-card--invalid { border-left-color: var(--accent-red); }
-.bed-card--invalid .bed-card__vit { color: var(--accent-red); }
-.bed-card--unscheduled { border-left-color: var(--border-subtle); opacity: 0.4; }
-.bed-card--unscheduled .bed-card__vit { color: var(--text-muted); }
+#bed-grid-main .bed-card--valid { border-left-color: var(--accent-green); }
+#bed-grid-main .bed-card--stale { border-left-color: var(--text-muted); opacity: 0.65; }
+#bed-grid-main .bed-card--invalid { border-left-color: var(--accent-red); }
+#bed-grid-main .bed-card--invalid .bed-card__vit { color: var(--accent-red); }
+#bed-grid-main .bed-card--unscheduled { border-left-color: var(--border-subtle); opacity: 0.4; }
+#bed-grid-main .bed-card--unscheduled .bed-card__vit { color: var(--text-muted); }
 
 /* Drawer */
 .bed-drawer {
