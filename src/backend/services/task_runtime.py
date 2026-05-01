@@ -246,19 +246,23 @@ class TaskEngine:
         }
         task.status = TaskStatus.SHELF_DROPPED
 
-        await dispatcher.dispatch(AnomalyEvent(
-            severity=Severity.CRITICAL,
-            source=Source.SHELF_DROP,
-            bed_key=location_id,
-            task_id=task.task_id,
-            title="⚠️ 貨架掉落，請協助歸位",
-            body=(
-                f"床位：{location_id}\n"
-                f"貨架：{shelf_id}\n"
-                f"剩餘 {len(remaining_beds)} 床尚未巡視"
-            ),
-            raw={"shelf_id": shelf_id, "remaining_beds": remaining_beds},
-        ))
+        try:
+            await dispatcher.dispatch(AnomalyEvent(
+                severity=Severity.CRITICAL,
+                source=Source.SHELF_DROP,
+                bed_key=location_id,
+                task_id=task.task_id,
+                title="⚠️ 貨架掉落，請協助歸位",
+                body=(
+                    f"床位：{location_id}\n"
+                    f"貨架：{shelf_id}\n"
+                    f"剩餘 {len(remaining_beds)} 床尚未巡視"
+                ),
+                raw={"shelf_id": shelf_id, "remaining_beds": remaining_beds},
+            ))
+        except Exception:
+            # Operator-critical path — must keep going even if dispatcher breaks.
+            logger.exception("Failed to dispatch shelf-drop anomaly")
 
         # Record all skipped bio_scan steps to DB
         steps_to_skip = []
