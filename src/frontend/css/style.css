@@ -1673,3 +1673,37 @@ input[type="checkbox"]:checked::after {
 }
 .settings-subtab-content { display: none; }
 .settings-subtab-content.active { display: block; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   IT-9 — DASHBOARD-GRID BASE LAYOUT
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  height: 100%;
+  gap: 0;
+}
+
+.bed-grid-main {
+  overflow-y: auto;
+  padding: 12px 14px;
+  min-width: 0;
+}
+
+.bed-grid-empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 40px;
+  font-size: 12px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   IT-9 SLICE 2 — BED GRID + ROOM SECTIONS + BED CARDS + DRAWER
+   ═══════════════════════════════════════════════════════════════════════ */
+/* Filled by Slice 2 */
+
+/* ═══════════════════════════════════════════════════════════════════════
+   IT-9 SLICE 3 — ROBOT MINI FRAME + ROBOT MODAL
+   ═══════════════════════════════════════════════════════════════════════ */
+/* Filled by Slice 3 */
