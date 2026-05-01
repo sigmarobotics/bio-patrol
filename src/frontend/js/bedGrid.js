@@ -216,6 +216,10 @@
     if (backdrop) backdrop.onclick = closeDrawer;
     const closeBtn = document.getElementById('bed-drawer-close');
     if (closeBtn) closeBtn.onclick = closeDrawer;
+    // Drop any previous handler so re-opening doesn't accumulate listeners
+    if (drawer._escHandler) {
+      document.removeEventListener('keydown', drawer._escHandler);
+    }
     drawer._escHandler = (e) => { if (e.key === 'Escape') closeDrawer(); };
     document.addEventListener('keydown', drawer._escHandler);
   }
