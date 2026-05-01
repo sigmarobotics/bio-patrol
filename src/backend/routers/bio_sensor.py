@@ -71,6 +71,37 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@router.get("/latest-by-bed")
+async def get_latest_by_bed():
+    """IT-9: Return one row per bed (location_id) — the latest scan record."""
+    try:
+        client = get_bio_sensor_client()
+        if client is None:
+            return {"status": "disabled", "data": [], "count": 0}
+        import sqlite3
+
+        conn = sqlite3.connect(client.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, task_id, location_id, bed_name, timestamp, retry_count,
+                   status, bpm, rpm, is_valid, data_json, details
+            FROM (
+                SELECT *,
+                       ROW_NUMBER() OVER (PARTITION BY location_id ORDER BY timestamp DESC) AS rn
+                FROM sensor_scan_data
+                WHERE location_id IS NOT NULL
+            )
+            WHERE rn = 1
+            """
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        data = [_row_to_dict(row) for row in rows]
+        return {"status": "success", "data": data, "count": len(data)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @router.get("/scan")
 async def get_bio_sensor_scan_data():
     """Execute a bio-sensor scan task and return all collected data."""
