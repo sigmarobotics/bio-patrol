@@ -229,12 +229,21 @@ class TaskEngine:
         }
         task.status = TaskStatus.SHELF_DROPPED
 
-        # Telegram notification
-        try:
-            from services.telegram_service import send_telegram_message
-            await send_telegram_message("⚠️ 貨架掉落，請協助歸位")
-        except Exception as tg_err:
-            logger.error(f"Failed to send shelf-drop Telegram: {tg_err}")
+        # Anomaly notification (replaces direct-Telegram path)
+        from services.notifications.events import AnomalyEvent, Severity, Source
+        await dispatcher.dispatch(AnomalyEvent(
+            severity=Severity.CRITICAL,
+            source=Source.SHELF_DROP,
+            bed_key=location_id,
+            task_id=task.task_id,
+            title="⚠️ 貨架掉落，請協助歸位",
+            body=(
+                f"床位：{location_id}\n"
+                f"貨架：{shelf_id}\n"
+                f"剩餘 {len(remaining_beds)} 床尚未巡視"
+            ),
+            raw={"shelf_id": shelf_id, "remaining_beds": remaining_beds},
+        ))
 
         # Record all skipped bio_scan steps to DB
         steps_to_skip = []
