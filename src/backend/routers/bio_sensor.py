@@ -3,6 +3,24 @@ from dependencies import get_bio_sensor_client
 
 router = APIRouter(prefix='/api/bio-sensor', tags=['Bio Sensor'])
 
+
+def _row_to_dict(row):
+    """Convert a sensor_scan_data SELECT row to a dict (IT-9: shared by /scan-history + /latest-by-bed)."""
+    return {
+        "id": row[0],
+        "task_id": row[1],
+        "location_id": row[2],
+        "bed_name": row[3],
+        "timestamp": row[4],
+        "retry_count": row[5],
+        "status": row[6],
+        "bpm": row[7],
+        "rpm": row[8],
+        "is_valid": bool(row[9]),
+        "data_json": row[10],
+        "details": row[11],
+    }
+
 @router.get("/latest")
 async def get_latest_bio_sensor_data():
     """Get the latest bio-sensor data received via MQTT."""
@@ -48,23 +66,7 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None):
         rows = cursor.fetchall()
         conn.close()
 
-        data = []
-        for row in rows:
-            data.append({
-                "id": row[0],
-                "task_id": row[1],
-                "location_id": row[2],
-                "bed_name": row[3],
-                "timestamp": row[4],
-                "retry_count": row[5],
-                "status": row[6],
-                "bpm": row[7],
-                "rpm": row[8],
-                "is_valid": bool(row[9]),
-                "data_json": row[10],
-                "details": row[11]
-            })
-
+        data = [_row_to_dict(row) for row in rows]
         return {"status": "success", "data": data, "count": len(data)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
