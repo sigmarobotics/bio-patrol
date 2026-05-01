@@ -333,6 +333,13 @@
 
   // ───── Animation loop ─────
   function animateMap() {
+    // Skip drawing when no registered canvas is currently attached/visible —
+    // avoids per-frame draws against detached or hidden canvases.
+    const anyVisible = [..._state.canvases.values()].some(e => e.canvas?.offsetParent !== null);
+    if (!anyVisible) {
+      requestAnimationFrame(animateMap);
+      return;
+    }
     const robotData = global.robotData;
     if (robotData && robotData.pose && robotData.pose.theta !== undefined) {
       const target = -robotData.pose.theta;
@@ -383,6 +390,8 @@
     const modal = document.getElementById('robot-modal');
     if (!modal) return;
     modal.setAttribute('hidden', '');
+    // Drop the modal canvas from the per-frame draw set; openModal re-inits it.
+    destroy('map-canvas');
     if (modal._escHandler) {
       document.removeEventListener('keydown', modal._escHandler);
       modal._escHandler = null;
