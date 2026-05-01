@@ -123,13 +123,19 @@ class BioSensorMQTTClient:
         conn.close()
 
     async def get_valid_scan_data(self, task_id=None, target_bed=None, bed_name=None):
+        """Run the bio-scan window and return a ScanOutcome.
+
+        Replaces the legacy ``{"task_id", "data"}`` return. Callers read
+        ``outcome.valid_record`` (None when retries exhausted).
+        """
+        from services.notifications.evaluator import ScanOutcome
+
         if task_id is None:
             task_id = get_now().strftime("%Y%m%d%H%M%S")
 
         if not self.connected:
             logger.warning("MQTT broker is not connected, will wait for reconnection during scan retries")
 
-        # Read configurable magic numbers from runtime settings
         try:
             from settings.config import get_runtime_settings
             cfg = get_runtime_settings()
@@ -140,32 +146,45 @@ class BioSensorMQTTClient:
         RETRY_COUNT = cfg.get("bio_scan_retry_count", 19)
         INT_WAIT_TIME = cfg.get("bio_scan_initial_wait", 120)
         VALID_STATUS = cfg.get("bio_scan_valid_status", 4)
-        valid_data = None
-        has_any_data = False  # Track whether we received any MQTT data
+
+        valid_data: dict | None = None
+        has_any_data = False
+        last_record_processed: dict | None = None
+        final_retry_count = 0
 
         await asyncio.sleep(INT_WAIT_TIME)
         for retry_count in range(RETRY_COUNT):
+            final_retry_count = retry_count
             if self.latest_data and 'records' in self.latest_data:
                 has_any_data = True
                 for data in self.latest_data['records']:
                     print("scan_data: ", data, "\n")
                     is_valid = data['status'] == VALID_STATUS and data['bpm'] > 0 and data['rpm'] > 0
-                    data['details'] = '量測正常' if is_valid else '無有效量測數值'
+                    data['details'] = '量測正常' if is_valid else '無有效量測數値'
                     data['location_id'] = target_bed
                     data['bed_name'] = bed_name
                     self._save_scan_data(task_id, data, retry_count, is_valid)
-
+                    last_record_processed = data
                     if is_valid and valid_data is None:
                         valid_data = data
-
                 if valid_data is not None:
-                    return {"task_id": task_id, "data": valid_data}
+                    return ScanOutcome(
+                        task_id=task_id,
+                        location_id=target_bed,
+                        bed_name=bed_name,
+                        valid_record=valid_data,
+                        retry_count=retry_count,
+                        last_record_raw=last_record_processed,
+                        last_status=last_record_processed.get('status') if last_record_processed else None,
+                        last_bpm=last_record_processed.get('bpm') if last_record_processed else None,
+                        last_rpm=last_record_processed.get('rpm') if last_record_processed else None,
+                        last_failure_reason=None,
+                    )
 
-            # the last retry should not wait for extra interval
-            if(retry_count + 1 < RETRY_COUNT):
+            if retry_count + 1 < RETRY_COUNT:
                 await asyncio.sleep(WAIT_TIME)
 
-        # Record a failed scan entry when no MQTT data was ever received
+        # All retries exhausted without a valid record.
         if not has_any_data:
             no_data = {
                 "location_id": target_bed,
@@ -176,7 +195,31 @@ class BioSensorMQTTClient:
                 "details": "未收到感測器資料（MQTT無連線或無數據）",
             }
             self._save_scan_data(task_id, no_data, RETRY_COUNT, is_valid=False)
+            return ScanOutcome(
+                task_id=task_id,
+                location_id=target_bed,
+                bed_name=bed_name,
+                valid_record=None,
+                retry_count=final_retry_count,
+                last_record_raw=None,
+                last_status=None,
+                last_bpm=None,
+                last_rpm=None,
+                last_failure_reason="未收到感測器資料（MQTT無連線或無數據）",
+            )
 
-        return {"task_id": task_id, "data": None}
+        # has_any_data but no valid hit — use the last processed record's details.
+        return ScanOutcome(
+            task_id=task_id,
+            location_id=target_bed,
+            bed_name=bed_name,
+            valid_record=None,
+            retry_count=final_retry_count,
+            last_record_raw=last_record_processed,
+            last_status=last_record_processed.get('status') if last_record_processed else None,
+            last_bpm=last_record_processed.get('bpm') if last_record_processed else None,
+            last_rpm=last_record_processed.get('rpm') if last_record_processed else None,
+            last_failure_reason=last_record_processed.get('details') if last_record_processed else "無有效量測數値",
+        )
 
 
