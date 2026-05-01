@@ -57,7 +57,10 @@
               <h4>🤖 Robot <span class="toggle-icon">↗</span></h4>
             </div>
             <div class="frame-content" id="robot-frame-content">
-              <!-- Slice 3 fills: <canvas id="robot-mini-canvas"> + pose -->
+              <div class="robot-mini-wrap">
+                <canvas id="robot-mini-canvas"></canvas>
+                <span class="robot-mini-pose" id="robot-mini-pose">X: -- Y: -- θ: --</span>
+              </div>
             </div>
           </div>
 
@@ -461,7 +464,21 @@
           <button class="robot-modal-close" id="robot-modal-close" aria-label="Close">×</button>
         </header>
         <div class="robot-modal-body" id="robot-modal-body">
-          <!-- Slice 3 fills: <canvas id="map-canvas"> + controls panel -->
+          <div class="robot-modal-map">
+            <canvas id="map-canvas"></canvas>
+          </div>
+          <div class="robot-modal-controls">
+            <button id="modal-btn-home" class="btn-premium">⌂ Return Home</button>
+            <button id="modal-btn-stop" class="btn-danger">■ Emergency Stop</button>
+            <div class="d-pad">
+              <button class="up" onclick="manualControl('forward')">▲</button>
+              <button class="left" onclick="manualControl('left')">◀</button>
+              <button class="down" onclick="manualControl('backward')">▼</button>
+              <button class="right" onclick="manualControl('right')">▶</button>
+            </div>
+            <p class="modal-controls-hint">Click to Move • Drag to Set Pose</p>
+            <p class="modal-controls-pose" id="modal-controls-pose">X: -- Y: -- θ: --</p>
+          </div>
         </div>
       </div>
     </div>

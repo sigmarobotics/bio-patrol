@@ -100,6 +100,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   const btnCancel = document.getElementById('btn-cancel-command');
   if (btnCancel) btnCancel.addEventListener('click', returnHome);
 
+  // IT-9 Slice 3: modal-twin button wires (Home / Stop in robot full-view modal)
+  const modalHome = document.getElementById('modal-btn-home');
+  if (modalHome) modalHome.addEventListener('click', returnHome);
+  const modalStop = document.getElementById('modal-btn-stop');
+  if (modalStop) modalStop.addEventListener('click', cancelPatrol);
+
   // Initialize map (IT-9: via mapView module; animation loop starts internally)
   if (window.mapView) {
     mapView.init('map-canvas', { interactive: true });
