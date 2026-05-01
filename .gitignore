@@ -118,3 +118,9 @@ tests/generated/
 # Playwright MCP browser session artifacts
 .playwright-mcp/
 src/data/
+
+# Playwright E2E artifacts
+tests/e2e/node_modules/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+tests/e2e/package-lock.json
