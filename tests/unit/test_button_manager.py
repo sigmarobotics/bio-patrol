@@ -116,25 +116,6 @@ def test_already_bound_device_rejoin_silent_readmit(mgr, db_path):
     assert permit_calls_for_pair == []
 
 
-def test_device_leave_for_bound_ieee_opens_permit_join(mgr, db_path):
-    """SNZB-01P sends Mgmt_Leave_req at end of every press session; z2m
-    rejects the rejoin without permit_join open (Option-A live test failed —
-    user long-pressed and device did not rejoin). Open permit_join window
-    unconditionally for any bound device that leaves."""
-    button_db.bind_action("demo_run", "0xAA", None, db_path)
-    event = {"type": "device_leave", "ieee_addr": "0xAA"}
-    asyncio.run(mgr.handle_event(event))
-    last_call = mgr.zigbee.permit_calls[-1]
-    assert last_call[0] is True
-    assert last_call[1] == button_manager.AUTO_REJOIN_WINDOW_SECONDS
-
-
-def test_device_leave_for_unknown_ieee_does_nothing(mgr):
-    event = {"type": "device_leave", "ieee_addr": "0xUNKNOWN"}
-    asyncio.run(mgr.handle_event(event))
-    assert mgr.zigbee.permit_calls == []
-
-
 def test_button_press_fires_bound_action(mgr, db_path, fired):
     button_db.bind_action("demo_run", "0xAA", "demo_btn", db_path)
     event = {"type": "button_action", "ieee_addr": "0xAA", "action": "single",
@@ -165,24 +146,6 @@ def test_repeat_press_within_debounce_window_dropped(mgr, db_path, fired):
     asyncio.run(mgr.handle_event(event))
     asyncio.run(mgr.handle_event(event))
     assert len(fired) == 1
-
-
-def test_device_leave_records_last_left_at(mgr, db_path):
-    button_db.bind_action("demo_run", "0xAA", None, db_path)
-    asyncio.run(mgr.handle_event({"type": "device_leave", "ieee_addr": "0xAA"}))
-    row = button_db.get_binding_by_ieee("0xAA", db_path)
-    assert row["last_left_at"] is not None
-
-
-def test_rejoin_after_leave_clears_last_left_at(mgr, db_path):
-    button_db.bind_action("demo_run", "0xAA", None, db_path)
-    asyncio.run(mgr.handle_event({"type": "device_leave", "ieee_addr": "0xAA"}))
-    assert button_db.get_binding_by_ieee("0xAA", db_path)["last_left_at"]
-    asyncio.run(mgr.handle_event({
-        "type": "device_joined", "ieee_addr": "0xAA", "friendly_name": "demo",
-        "battery": 90,
-    }))
-    assert button_db.get_binding_by_ieee("0xAA", db_path)["last_left_at"] is None
 
 
 def test_repeat_press_after_debounce_fires(mgr, db_path, fired, monkeypatch):

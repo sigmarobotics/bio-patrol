@@ -83,21 +83,6 @@ def test_update_status_preserves_battery_when_none(tmp_db):
     assert row["last_seen"] == "t2"
 
 
-def test_record_left_sets_last_left_at(tmp_db):
-    button_db.bind_action("demo_run", "0xAA", None, tmp_db)
-    button_db.record_left("0xAA", tmp_db)
-    row = button_db.get_binding_by_ieee("0xAA", tmp_db)
-    assert row["last_left_at"] is not None
-
-
-def test_update_status_clears_last_left_at(tmp_db):
-    button_db.bind_action("demo_run", "0xAA", None, tmp_db)
-    button_db.record_left("0xAA", tmp_db)
-    assert button_db.get_binding_by_ieee("0xAA", tmp_db)["last_left_at"]
-    button_db.update_status("0xAA", 80, "2026-04-30T10:00:00", tmp_db)
-    assert button_db.get_binding_by_ieee("0xAA", tmp_db)["last_left_at"] is None
-
-
 def test_record_fire_increments_counter(tmp_db):
     button_db.bind_action("demo_run", "0xAA", None, tmp_db)
     button_db.record_fire("demo_run", tmp_db)

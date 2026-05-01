@@ -1643,17 +1643,3 @@ input[type="checkbox"]:checked::after {
     .bb-row { flex-direction: column; align-items: flex-start; }
     .bb-actions { width: 100%; justify-content: flex-end; }
 }
-
-/* online/offline dot for paired buttons */
-.bb-dot {
-    display: inline-block;
-    width: 8px; height: 8px; border-radius: 50%;
-    margin-right: 6px;
-    vertical-align: middle;
-}
-.bb-dot--online  { background: var(--mint);  box-shadow: 0 0 6px rgba(40,167,69,0.6); }
-.bb-dot--offline { background: var(--coral); box-shadow: 0 0 6px rgba(220,53,69,0.6); }
-.bb-state-offline {
-    color: var(--coral);
-    font-weight: 600;
-}

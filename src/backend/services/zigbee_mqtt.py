@@ -47,10 +47,6 @@ def parse_zigbee_message(topic: str, payload: str) -> dict | None:
                     "ieee_addr": ieee,
                     "friendly_name": event_data.get("friendly_name", ieee),
                 }
-        if event_type == "device_leave":
-            ieee = event_data.get("ieee_address", "")
-            if ieee:
-                return {"type": "device_leave", "ieee_addr": ieee}
         return None
 
     if len(parts) >= 2 and parts[1] == "bridge":

@@ -25,11 +25,6 @@ SUPPORTED_TRIGGER = "single"
 # 0.3 s catches those without eating deliberate rapid presses.
 DEBOUNCE_SECONDS = 0.3
 PAIR_WINDOW_SECONDS = 120
-# When a bound device announces leave, hold permit_join open this long so the
-# next press auto-rejoins without nurse intervention. Live-verified: even
-# though z2m preserves the device record in database.db, it rejects rejoin
-# without permit_join open. z2m max is 254 (single-byte field).
-AUTO_REJOIN_WINDOW_SECONDS = 254
 
 
 class ButtonManager:
@@ -89,8 +84,6 @@ class ButtonManager:
         evt = event.get("type")
         if evt in ("device_joined", "device_announce"):
             await self._on_device_event(event)
-        elif evt == "device_leave":
-            await self._on_device_leave(event)
         elif evt == "button_action":
             await self._on_button_action(event)
 
@@ -125,20 +118,6 @@ class ButtonManager:
         # z2m can finish the interview and persist the device to database.db.
         # (Matches sigma-button-controller's behavior — diagnosed live.)
         logger.info("Paired %s → action %s", ieee, target)
-
-    async def _on_device_leave(self, event: dict) -> None:
-        ieee = event.get("ieee_addr")
-        if not ieee:
-            return
-        binding = button_db.get_binding_by_ieee(ieee, self._db_path)
-        if not (binding and binding.get("action_key")):
-            return
-        button_db.record_left(ieee, self._db_path)
-        ok = await self.zigbee.permit_join(True, time_s=AUTO_REJOIN_WINDOW_SECONDS)
-        logger.info(
-            "Bound device %s left network → permit_join open %ds for auto-rejoin (publish ok=%s)",
-            ieee, AUTO_REJOIN_WINDOW_SECONDS, ok,
-        )
 
     async def _on_button_action(self, event: dict) -> None:
         ieee = event.get("ieee_addr")

@@ -39,19 +39,6 @@ class TestParams(BaseModel):
     params: dict | None = None
 
 
-def _online_state(row: dict) -> str:
-    """unpaired | online | offline.
-
-    A bound device with last_left_at set (and not cleared by a subsequent
-    update_status) is considered offline — the SNZB-01P firmware sleeps after
-    each press session and announces a leave; the next press wakes it and
-    flips it back to online.
-    """
-    if not row.get("ieee_addr"):
-        return "unpaired"
-    return "offline" if row.get("last_left_at") else "online"
-
-
 @router.get("/button-bindings")
 async def list_bindings():
     rows = {b["action_key"]: b for b in button_db.list_bindings()}
@@ -65,10 +52,8 @@ async def list_bindings():
             "paired_at": row.get("paired_at"),
             "battery": row.get("battery"),
             "last_seen": row.get("last_seen"),
-            "last_left_at": row.get("last_left_at"),
             "last_fired_at": row.get("last_fired_at"),
             "fire_count": row.get("fire_count", 0),
-            "online_state": _online_state(row),
         })
     mgr = _button_manager
     pair_status = {

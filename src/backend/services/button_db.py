@@ -63,10 +63,6 @@ def init_schema(db_path: str | None = None) -> None:
         f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_NAME}_ieee "
         f"ON {TABLE_NAME}(ieee_addr) WHERE ieee_addr IS NOT NULL"
     )
-    # Migration: add last_left_at column on existing schemas.
-    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({TABLE_NAME})").fetchall()}
-    if "last_left_at" not in cols:
-        conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN last_left_at TEXT")
     conn.commit()
 
 
@@ -81,7 +77,7 @@ def seed_actions(action_keys: list[str], db_path: str | None = None) -> None:
 
 _SELECT_COLUMNS = (
     "action_key, ieee_addr, friendly_name, paired_at, battery, "
-    "last_seen, last_fired_at, fire_count, last_left_at"
+    "last_seen, last_fired_at, fire_count"
 )
 
 
@@ -142,22 +138,10 @@ def unbind_action(action_key: str, db_path: str | None = None) -> str | None:
 def update_status(ieee_addr: str, battery: int | None, last_seen: str,
                   db_path: str | None = None) -> None:
     conn = _conn(db_path)
-    # Clear last_left_at on every status update — any traffic from the device
-    # means it's back in the network. UI uses this to render online/offline.
     conn.execute(
-        f"UPDATE {TABLE_NAME} SET battery = COALESCE(?, battery), last_seen = ?, "
-        f"last_left_at = NULL WHERE ieee_addr = ?",
+        f"UPDATE {TABLE_NAME} SET battery = COALESCE(?, battery), last_seen = ? "
+        f"WHERE ieee_addr = ?",
         (battery, last_seen, ieee_addr),
-    )
-    conn.commit()
-
-
-def record_left(ieee_addr: str, db_path: str | None = None) -> None:
-    now = get_now().isoformat()
-    conn = _conn(db_path)
-    conn.execute(
-        f"UPDATE {TABLE_NAME} SET last_left_at = ? WHERE ieee_addr = ?",
-        (now, ieee_addr),
     )
     conn.commit()
 
