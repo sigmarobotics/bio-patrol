@@ -125,7 +125,7 @@ DEFAULT_ACTIONS: list[tuple[str, str, ActionHandler, dict]] = [
     ("patrol_start",  "Start patrol",              _action_patrol_start,  {}),
     ("patrol_cancel", "Cancel running patrol",     _action_patrol_cancel, {}),
     ("return_home",   "Return home",               _action_return_home,   {}),
-    ("speak",         "Speak (test announcement)", _action_speak,         {"text": "巡房系統測試"}),
+    ("speak",         "Speak (test announcement)", _action_speak,         {"text": "こんにちは、シグマです"}),
 ]
 
 
