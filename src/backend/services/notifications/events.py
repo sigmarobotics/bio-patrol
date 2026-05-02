@@ -21,6 +21,8 @@ class Source(str, Enum):
     SHELF_DROP = "shelf_drop"
     TASK_SUMMARY = "task_summary"
     VITALS_OUT_OF_BAND = "vitals_out_of_band"
+    ROBOT_OFFLINE = "robot_offline"
+    ROBOT_RECOVERED = "robot_recovered"
 
 
 @dataclass
