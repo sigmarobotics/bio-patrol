@@ -161,15 +161,11 @@ async function fetchRobotStatus() {
     const pose = poseRes;
     if (pose && pose.x !== undefined) {
       robotData.pose = pose;
+      const poseText = `X: ${pose.x.toFixed(2)} Y: ${pose.y.toFixed(2)} θ: ${(pose.theta || 0).toFixed(2)}`;
       const poseEl = document.getElementById('pose-display');
-      if (poseEl) {
-        poseEl.textContent = `X: ${pose.x.toFixed(2)} Y: ${pose.y.toFixed(2)} θ: ${(pose.theta || 0).toFixed(2)}`;
-      }
-      // Mirror pose into the mini-frame label and the modal controls label
-      const miniPose = document.getElementById('robot-mini-pose');
-      if (miniPose) miniPose.textContent = `X: ${pose.x.toFixed(2)} Y: ${pose.y.toFixed(2)} θ: ${(pose.theta || 0).toFixed(2)}`;
+      if (poseEl) poseEl.textContent = poseText;
       const modalPose = document.getElementById('modal-controls-pose');
-      if (modalPose) modalPose.textContent = miniPose ? miniPose.textContent : `X: ${pose.x.toFixed(2)} Y: ${pose.y.toFixed(2)} θ: ${(pose.theta || 0).toFixed(2)}`;
+      if (modalPose) modalPose.textContent = poseText;
     }
 
     // Update connection indicator
@@ -1404,6 +1400,7 @@ async function useMap(mapId) {
   try {
     await dataService.switchMap(mapId);
     await loadMapList();
+    if (window.mapView?.reload) await mapView.reload();
   } catch (e) {
     alert('Failed to switch map: ' + (e.response?.data?.detail || e.message || e));
   }
