@@ -225,6 +225,11 @@ app.include_router(buttons_router.router)
 
 frontend_path = get_resource_path("src/frontend")
 if os.path.exists(frontend_path):
-    app.mount("/", StaticFiles(directory=frontend_path, html=True), name="ui")
+    class NoCacheStaticFiles(StaticFiles):
+        async def get_response(self, path, scope):
+            response = await super().get_response(path, scope)
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return response
+    app.mount("/", NoCacheStaticFiles(directory=frontend_path, html=True), name="ui")
 else:
     logger.warning(f"Frontend directory not found at {frontend_path}, UI will not be available")
