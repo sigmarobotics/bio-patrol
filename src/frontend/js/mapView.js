@@ -362,7 +362,7 @@
       }
     }
 
-    if (typeof shelfDropPose !== 'undefined' && shelfDropPose) {
+    if (shelfDropPose) {
       const dropPos = tfROS2Canvas(_state.gMapDesc, shelfDropPose);
       if (Number.isFinite(dropPos.x) && Number.isFinite(dropPos.y)) {
         const sp = toScreen(dropPos);
