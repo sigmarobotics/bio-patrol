@@ -52,14 +52,13 @@
           <div class="header"><h2>Monitor</h2></div>
 
           <!-- Robot mini frame -->
-          <div class="monitor-frame" id="robot-frame">
-            <div class="frame-header" onclick="mapView.openModal && mapView.openModal()">
+          <div class="monitor-frame" id="robot-frame" onclick="mapView.openModal && mapView.openModal()">
+            <div class="frame-header">
               <h4>🤖 Robot <span class="toggle-icon">↗</span></h4>
             </div>
             <div class="frame-content" id="robot-frame-content">
               <div class="robot-mini-wrap">
                 <canvas id="robot-mini-canvas"></canvas>
-                <span class="robot-mini-pose" id="robot-mini-pose">X: -- Y: -- θ: --</span>
               </div>
             </div>
           </div>

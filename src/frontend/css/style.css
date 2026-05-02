@@ -1829,6 +1829,7 @@ input[type="checkbox"]:checked::after {
    ═══════════════════════════════════════════════════════════════════════ */
 
 /* Robot mini frame */
+#robot-frame { cursor: pointer; }
 .robot-mini-wrap {
   position: relative;
   height: 140px;
@@ -1840,20 +1841,7 @@ input[type="checkbox"]:checked::after {
   width: 100%;
   height: 100%;
   display: block;
-  cursor: pointer;
 }
-.robot-mini-pose {
-  position: absolute;
-  bottom: 4px;
-  right: 6px;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  color: var(--teal);
-  background: rgba(0, 0, 0, 0.5);
-  padding: 1px 6px;
-  border-radius: 2px;
-}
-
 /* Robot modal */
 .robot-modal {
   position: fixed;
