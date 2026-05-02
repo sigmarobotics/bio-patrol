@@ -29,6 +29,8 @@ DEFAULT_SETTINGS = {
     "zigbee_mqtt_port": 1883,
     "enable_mqtt_egress": False,
     "mqtt_egress_topic_prefix": "bio-patrol/anomaly",
+    # IT-9: Bed-card 進入 Stale 態的時數門檻
+    "bed_card_stale_hours": 24,
 }
 
 DEFAULT_BEDS = {

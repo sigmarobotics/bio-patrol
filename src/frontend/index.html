@@ -39,63 +39,26 @@
 
     <!-- ==================== TAB 1: DASHBOARD ==================== -->
     <div id="view-dashboard" class="tab-content no-padding active">
-      <div class="split-view">
-        <!-- LEFT: Map -->
-        <div class="left-panel">
-          <div class="map-container" id="map-container">
-            <div class="loading-overlay" id="map-loading">
-              <div class="spinner"></div>
-              <p>Initializing Map</p>
-            </div>
-            <canvas id="map-canvas"></canvas>
+      <div class="dashboard-grid">
+        <!-- LEFT: Bed grid (rendered by bedGrid.js) -->
+        <main class="bed-grid-main" id="bed-grid-main">
+          <div class="bed-grid-empty" id="bed-grid-empty">
+            <p>Loading beds…</p>
           </div>
-          <div class="controls-panel">
-            <div style="display:flex;align-items:center;justify-content:space-between;width:100%;gap:16px;">
-              <div style="display:flex;flex:1;gap:8px;">
-                <button id="btn-home" class="btn-premium" style="flex:1;">
-                  <span>⌂</span> Return Home
-                </button>
-                <button id="btn-cancel-command" class="btn-danger" style="flex:0 0 auto;padding:0 16px;" title="Emergency Stop">
-                  <span>■</span>
-                </button>
-              </div>
-              <div class="d-pad">
-                <button class="up" onclick="manualControl('forward')" title="Forward">▲</button>
-                <button class="left" onclick="manualControl('left')" title="Left">◀</button>
-                <button class="down" onclick="manualControl('backward')" title="Backward">▼</button>
-                <button class="right" onclick="manualControl('right')" title="Right">▶</button>
-              </div>
-            </div>
-            <div class="info-text">
-              <p>Click to Move • Drag to Set Pose</p>
-              <p id="pose-display">X: -- Y: -- θ: --</p>
-            </div>
-          </div>
-        </div>
+        </main>
 
-        <!-- RIGHT: Monitor Panel -->
-        <div class="right-panel">
+        <!-- RIGHT: Sidebar (sched/quick-actions unchanged; robot frame replaces bio-reading) -->
+        <aside class="right-panel">
           <div class="header"><h2>Monitor</h2></div>
 
-          <!-- Bio Sensor Reading (collapsible) -->
-          <div class="monitor-frame" id="bio-reading-frame">
-            <div class="frame-header" onclick="toggleFrame('bio-reading-frame')">
-              <h4>Latest Bio-Sensor <span class="toggle-icon">▼</span></h4>
+          <!-- Robot mini frame -->
+          <div class="monitor-frame" id="robot-frame" onclick="mapView.openModal && mapView.openModal()">
+            <div class="frame-header">
+              <h4>🤖 Robot <span class="toggle-icon">↗</span></h4>
             </div>
-            <div class="frame-content">
-              <div class="bio-reading">
-                <div class="reading-item">
-                  <div class="reading-value" id="bio-bpm">--</div>
-                  <div class="reading-label">BPM</div>
-                </div>
-                <div class="reading-item">
-                  <div class="reading-value" id="bio-rpm">--</div>
-                  <div class="reading-label">RPM</div>
-                </div>
-                <div class="reading-item">
-                  <div class="reading-value" id="bio-status">--</div>
-                  <div class="reading-label">Status</div>
-                </div>
+            <div class="frame-content" id="robot-frame-content">
+              <div class="robot-mini-wrap">
+                <canvas id="robot-mini-canvas"></canvas>
               </div>
             </div>
           </div>
@@ -153,7 +116,7 @@
               </div>
             </div>
           </div>
-        </div>
+        </aside>
       </div>
     </div>
 
@@ -414,6 +377,15 @@
         <div class="settings-two-column">
           <div>
             <div class="glass-panel">
+              <h3>Dashboard 床卡顯示</h3>
+              <div class="form-group">
+                <label for="setting-bed-card-stale-hours">床卡資料過期門檻（小時）</label>
+                <input type="number" id="setting-bed-card-stale-hours" min="1" max="720" step="1">
+                <p class="test-note">超過此時數未掃到該床，dashboard 上會轉為灰色「過期」狀態。預設 24 小時，最大 720（30 天）。</p>
+              </div>
+            </div>
+
+            <div class="glass-panel">
               <h3>Telegram Notifications</h3>
               <div class="form-group" style="display:flex;align-items:center;gap:12px;">
                 <input type="checkbox" id="setting-enable-telegram" style="width:auto;">
@@ -482,9 +454,56 @@
     </div>
   </div>
 
+    <!-- Robot full-view modal -->
+    <div id="robot-modal" class="robot-modal" hidden>
+      <div class="robot-modal-backdrop"></div>
+      <div class="robot-modal-box" id="robot-modal-box">
+        <header class="robot-modal-header">
+          <span class="robot-modal-title">🤖 ROBOT · FULL VIEW</span>
+          <button class="robot-modal-close" id="robot-modal-close" aria-label="Close">×</button>
+        </header>
+        <div class="robot-modal-body" id="robot-modal-body">
+          <div class="robot-modal-map">
+            <canvas id="map-canvas"></canvas>
+          </div>
+          <div class="robot-modal-controls">
+            <button id="modal-btn-home" class="btn-premium">⌂ Return Home</button>
+            <button id="modal-btn-stop" class="btn-danger">■ Emergency Stop</button>
+            <div class="d-pad">
+              <button class="up" onclick="manualControl('forward')">▲</button>
+              <button class="left" onclick="manualControl('left')">◀</button>
+              <button class="down" onclick="manualControl('backward')">▼</button>
+              <button class="right" onclick="manualControl('right')">▶</button>
+            </div>
+            <p class="modal-controls-hint">Click to Move • Drag to Set Pose</p>
+            <p class="modal-controls-pose" id="modal-controls-pose">X: -- Y: -- θ: --</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bed history drawer -->
+    <div id="bed-drawer" class="bed-drawer" hidden>
+      <div class="bed-drawer-backdrop"></div>
+      <aside class="bed-drawer-panel">
+        <header class="bed-drawer-header">
+          <span class="bed-drawer-title" id="bed-drawer-title">Bed —</span>
+          <button class="bed-drawer-close" id="bed-drawer-close" aria-label="Close">×</button>
+        </header>
+        <div class="bed-drawer-body" id="bed-drawer-body">
+          <!-- Filled at runtime: list of recent scans -->
+        </div>
+        <footer class="bed-drawer-footer">
+          <a href="#" class="bed-drawer-footer-link" id="bed-drawer-history-link">→ 看完整歷史</a>
+        </footer>
+      </aside>
+    </div>
+
   <!-- ========== SCRIPTS ========== -->
   <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
   <script src="js/dataService.js?v=2"></script>
+  <script src="js/mapView.js?v=1"></script>
+  <script src="js/bedGrid.js?v=1"></script>
   <script src="js/script.js?v=2"></script>
   <script src="js/buttons.js?v=1"></script>
 

@@ -134,8 +134,15 @@ class DataService {
   // BIO-SENSOR APIs
   // ═══════════════════════════════════════════════════════════════════════════
 
-  async getLatestBioSensor() {
-    const res = await axios.get('/api/bio-sensor/latest');
+  async getLatestByBed() {
+    const res = await axios.get('/api/bio-sensor/latest-by-bed');
+    return res.data;
+  }
+
+  async getScanHistoryByLocation(locationId, limit = 5) {
+    const res = await axios.get('/api/bio-sensor/scan-history', {
+      params: { location_id: locationId, limit }
+    });
     return res.data;
   }
 
