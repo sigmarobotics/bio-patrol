@@ -60,20 +60,36 @@
     return 'vac_map.png';
   }
 
-  // ───── Reload the active map (re-fetch metadata + image, redraw all canvases) ─────
-  function reload() {
-    _state.img = null;
-    return loadMapConfig().then(mapSrc => new Promise((resolve) => {
+  // ───── Load the map image, apply transforms to all canvases, then redraw.
+  //       Returns a Promise that resolves once the image is ready (or fails).
+  //       onError may reassign img.src to retry with a fallback — onload still
+  //       fires for the fallback before the Promise resolves. ─────
+  function loadMapImage(mapSrc, { onError } = {}) {
+    return new Promise((resolve) => {
       const img = new Image();
-      img.src = mapSrc;
       img.onload = () => {
         _state.img = img;
         for (const e of _state.canvases.values()) applyTransform(e);
         drawAll();
         resolve();
       };
-      img.onerror = () => resolve();
-    }));
+      img.onerror = () => {
+        if (onError) {
+          const prevSrc = img.src;
+          onError(img);
+          // If onError swapped to a different src, let onload/onerror fire again.
+          if (img.src !== prevSrc) return;
+        }
+        resolve();
+      };
+      img.src = mapSrc;
+    });
+  }
+
+  // ───── Reload the active map (re-fetch metadata + image, redraw all canvases) ─────
+  function reload() {
+    _state.img = null;
+    return loadMapConfig().then(mapSrc => loadMapImage(mapSrc));
   }
 
   // ───── Auto-fit transform: scales + centres the map to fill the canvas ─────
@@ -123,21 +139,11 @@
 
     if (!_state.img) {
       loadMapConfig().then(mapSrc => {
-        const img = new Image();
-        img.src = mapSrc;
-        img.onload = () => {
-          // Re-apply transforms for all canvases now that gMapDesc may have updated
-          for (const e of _state.canvases.values()) applyTransform(e);
-          _state.img = img;
-          const loading = document.getElementById('map-loading');
-          if (loading) loading.style.display = 'none';
-          drawAll();
-        };
-        img.onerror = () => {
-          if (mapSrc !== 'vac_map.png') {
-            img.src = 'vac_map.png';
-          }
-        };
+        const onError = (img) => { if (mapSrc !== 'vac_map.png') img.src = 'vac_map.png'; };
+        return loadMapImage(mapSrc, { onError });
+      }).then(() => {
+        const loading = document.getElementById('map-loading');
+        if (loading) loading.style.display = 'none';
       });
     } else {
       drawAll();
