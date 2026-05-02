@@ -31,6 +31,8 @@ DEFAULT_SETTINGS = {
     "mqtt_egress_topic_prefix": "bio-patrol/anomaly",
     # IT-9: Bed-card 進入 Stale 態的時數門檻
     "bed_card_stale_hours": 24,
+    # IT-10: 機器人連續斷線多久才推 OFFLINE 通知（秒）。預設 5 min — mesh 漫遊瞬斷不算事故。
+    "robot_offline_debounce_seconds": 300,
 }
 
 DEFAULT_BEDS = {
