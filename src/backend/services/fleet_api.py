@@ -3,19 +3,26 @@
 Every public method is ``async`` and delegates to sync kachaka_core objects
 via ``asyncio.to_thread()``, keeping the event loop unblocked.
 
-Replaces the old FleetAPI that used ``kachaka_api.aio.KachakaApiClient``
-directly.  All robot operations now flow through kachaka_core's
-KachakaConnection (pooled), RobotController (command_id verified),
-KachakaCommands (@with_retry), and KachakaQueries (@with_retry).
+IT-10 changes:
+- ``_RobotSlot`` owns the ``on_state_change`` callback (registered before
+  ``RobotController.start``, since ``start_monitoring`` is idempotent).
+- ``_on_state_change`` mirrors state to ``slot.status``, delegates to the
+  controller, and forwards to ``OfflineDebouncer`` via
+  ``run_coroutine_threadsafe``.
+- ``_on_shelf_dropped`` sets a slot-owned ``asyncio.Event`` consumed by
+  TaskEngine.
+- ``unregister_robot`` cancels any in-flight register-retry task and shuts
+  the debouncer down.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Dict, Optional
 
 from kachaka_core import (
     KachakaCommands,
@@ -23,6 +30,10 @@ from kachaka_core import (
     KachakaQueries,
     RobotController,
 )
+from kachaka_core.connection import ConnectionState
+
+from services.notifications import dispatcher
+from services.notifications.offline_debouncer import OfflineDebouncer
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +45,45 @@ class RobotNotRegistered(ValueError):
     main.py registers a targeted exception_handler for this subclass to map it
     to HTTP 404 without catching every other ValueError in the app.
     """
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _safe_run_coro_in_loop(coro, loop: asyncio.AbstractEventLoop) -> None:
+    """Schedule a coroutine onto another loop fire-and-forget; log any error.
+
+    This is invoked from the connection-monitor thread (not the event loop),
+    so we cannot ``await``. ``run_coroutine_threadsafe`` returns a
+    ``concurrent.futures.Future`` which we attach a logging callback to,
+    then forget.
+    """
+    if loop.is_closed():
+        try:
+            coro.close()
+        except Exception:
+            pass
+        return
+    try:
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    except RuntimeError as e:
+        try:
+            coro.close()
+        except Exception:
+            pass
+        logger.debug("run_coroutine_threadsafe raised %s; ignoring", e)
+        return
+
+    def _log_exc(f) -> None:
+        try:
+            exc = f.exception()
+        except Exception:
+            return
+        if exc is not None:
+            logger.exception("scheduled coroutine raised", exc_info=exc)
+
+    fut.add_done_callback(_log_exc)
 
 
 # ---------------------------------------------------------------------------
@@ -51,9 +101,16 @@ class _RobotSlot:
     ctrl: RobotController
     cmds: KachakaCommands
     queries: KachakaQueries
+    loop: asyncio.AbstractEventLoop
     status: str = "online"
     last_seen: float = field(default_factory=time.time)
     serial: str = ""
+    status_lock: threading.Lock = field(default_factory=threading.Lock)
+    debouncer: Optional[OfflineDebouncer] = None
+    shelf_drop_event: Optional[asyncio.Event] = None
+    last_dropped_shelf_id: Optional[str] = None
+    disconnected_at: Optional[float] = None
+    last_reconnect_at: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -74,54 +131,178 @@ class FleetAPI:
             raise RobotNotRegistered(f"Robot {robot_id} not registered")
         return slot
 
+    def get_slot_or_none(self, robot_id: str) -> Optional[_RobotSlot]:
+        """Return the slot for ``robot_id`` or ``None`` if not registered.
+
+        Used by callers that need to read slot state without raising
+        (e.g. connection-state endpoint).
+        """
+        return self._robots.get(robot_id)
+
     # ── registration ─────────────────────────────────────────────────
 
     async def register_robot(
         self, robot_id: str, ip: str, name: str = ""
     ) -> dict:
-        """Create a pooled connection, ping, start the controller."""
+        """Create a pooled connection, ping, build slot, then start monitoring.
 
-        def _register() -> dict:
+        Two-phase to avoid a slot/monitor race: build the slot and insert it
+        into ``self._robots`` BEFORE calling ``start_monitoring`` so the very
+        first state-change callback can find the slot. If Phase 4 raises,
+        the slot is popped and the debouncer is drained.
+        """
+        loop = asyncio.get_running_loop()
+
+        # Phase 1 — sync ping. Returns (conn, ping) on success, None on fail.
+        def _build_sync():
             conn = KachakaConnection.get(ip)
             ping = conn.ping()
             if not ping.get("ok"):
-                return {"ok": False, "error": ping.get("error", "ping failed")}
+                return None, {"ok": False, "error": ping.get("error", "ping failed")}
+            return (conn, ping), {"ok": True}
 
+        built, build_result = await asyncio.to_thread(_build_sync)
+        if built is None:
+            return build_result
+        conn, ping = built
+
+        # Phase 2 — define callbacks. They close over a slot that will be
+        # assigned in Phase 3 below. Both callbacks no-op if slot is None
+        # (defensive: should be impossible by the time monitoring starts).
+        slot: Optional[_RobotSlot] = None
+
+        def _on_state_change(state: ConnectionState) -> None:
+            if slot is None:
+                return
+            with slot.status_lock:
+                slot.status = (
+                    "online" if state == ConnectionState.CONNECTED else "offline"
+                )
+                slot.last_seen = time.time()
+                if state == ConnectionState.DISCONNECTED:
+                    slot.disconnected_at = time.time()
+                else:
+                    slot.last_reconnect_at = time.time()
+            try:
+                slot.ctrl._on_conn_state_change(state)
+            except Exception:
+                logger.exception("controller delegate failed")
+            if slot.debouncer is not None:
+                if state == ConnectionState.DISCONNECTED:
+                    _safe_run_coro_in_loop(
+                        _async_note_disconnected(slot), slot.loop
+                    )
+                else:
+                    _safe_run_coro_in_loop(
+                        _async_note_connected(slot), slot.loop
+                    )
+
+        def _on_shelf_dropped(shelf_id: str) -> None:
+            if slot is None or slot.shelf_drop_event is None:
+                return
+            slot.last_dropped_shelf_id = shelf_id
+            slot.loop.call_soon_threadsafe(slot.shelf_drop_event.set)
+
+        # Phase 3 — construct slot, build debouncer, INSERT into pool.
+        ctrl = RobotController(conn, on_shelf_dropped=_on_shelf_dropped)
+        cmds = KachakaCommands(conn)
+        queries = KachakaQueries(conn)
+        slot = _RobotSlot(
+            robot_id=robot_id,
+            ip=ip,
+            name=name or robot_id,
+            conn=conn,
+            ctrl=ctrl,
+            cmds=cmds,
+            queries=queries,
+            loop=loop,
+            serial=ping.get("serial", ""),
+        )
+        slot.shelf_drop_event = asyncio.Event()
+
+        def _patrol_running() -> bool:
+            from services.task_runtime import current_tasks
+            return current_tasks.get(robot_id) is not None
+
+        def _serial() -> str:
+            return slot.serial
+
+        def _debounce_seconds() -> float:
+            from settings.config import get_runtime_settings
+            return float(
+                get_runtime_settings().get("robot_offline_debounce_seconds", 300)
+            )
+
+        slot.debouncer = OfflineDebouncer(
+            robot_id=robot_id,
+            debounce_seconds_provider=_debounce_seconds,
+            is_patrol_running=_patrol_running,
+            emit=dispatcher.dispatch,
+            get_serial=_serial,
+        )
+        self._robots[robot_id] = slot
+
+        # Phase 4 — start monitoring + controller. interval=1.0 matches the
+        # controller's _fast_interval; the controller's internal
+        # start_monitoring call is then a no-op (idempotent).
+        def _start_sync() -> None:
+            conn.start_monitoring(interval=1.0, on_state_change=_on_state_change)
             conn.ensure_resolver()
-
-            ctrl = RobotController(conn)
             ctrl.start()
 
-            cmds = KachakaCommands(conn)
-            queries = KachakaQueries(conn)
+        try:
+            await asyncio.to_thread(_start_sync)
+        except Exception as exc:
+            self._robots.pop(robot_id, None)
+            try:
+                await slot.debouncer.shutdown()
+            except Exception:
+                logger.exception("debouncer shutdown after Phase 4 failure")
+            try:
+                await asyncio.to_thread(conn.stop_monitoring)
+            except Exception:
+                pass
+            logger.exception("register_robot Phase 4 raised: %s", exc)
+            return {"ok": False, "error": f"start failed: {exc}"}
 
-            slot = _RobotSlot(
-                robot_id=robot_id,
-                ip=ip,
-                name=name or robot_id,
-                conn=conn,
-                ctrl=ctrl,
-                cmds=cmds,
-                queries=queries,
-                serial=ping.get("serial", ""),
-            )
-            self._robots[robot_id] = slot
-            logger.info(
-                "Registered robot %s (%s) serial=%s", robot_id, ip, slot.serial
-            )
-            return {"ok": True, "serial": slot.serial}
-
-        return await asyncio.to_thread(_register)
+        logger.info(
+            "Registered robot %s (%s) serial=%s", robot_id, ip, slot.serial
+        )
+        return {"ok": True, "serial": slot.serial}
 
     async def unregister_robot(self, robot_id: str) -> bool:
-        """Stop the controller and remove the robot from the pool."""
+        """Stop the controller, drain the debouncer, remove from the pool."""
+        # Defensive cancellation of any in-flight retry task. The retry
+        # registry lives in lifespan_state (a future task creates it); the
+        # try/except ImportError makes this safe before that module exists.
+        try:
+            import lifespan_state
+            retry_task = lifespan_state._register_retry_tasks.pop(robot_id, None)
+            if retry_task is not None and not retry_task.done():
+                retry_task.cancel()
+                try:
+                    await retry_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        except ImportError:
+            pass
+
         slot = self._robots.pop(robot_id, None)
         if slot is None:
             return False
 
+        if slot.debouncer is not None:
+            await slot.debouncer.shutdown()
+
         def _teardown() -> None:
-            slot.ctrl.stop()
-            KachakaConnection.remove(slot.ip)
+            try:
+                slot.ctrl.stop()
+            finally:
+                try:
+                    slot.conn.stop_monitoring()
+                except Exception:
+                    pass
+                KachakaConnection.remove(slot.ip)
 
         await asyncio.to_thread(_teardown)
         logger.info("Unregistered robot %s", robot_id)
@@ -162,8 +343,9 @@ class FleetAPI:
         slot = self._robots.get(robot_id)
         if slot is None:
             return False
-        slot.status = status
-        slot.last_seen = time.time()
+        with slot.status_lock:
+            slot.status = status
+            slot.last_seen = time.time()
         return True
 
     # ── controller state / metrics ───────────────────────────────────
@@ -395,3 +577,17 @@ class FleetAPI:
         """
         slot = self._get_slot(robot_id)
         return slot.conn.client
+
+
+# ---------------------------------------------------------------------------
+# Module-level coroutines for slot-callback -> debouncer hop
+# ---------------------------------------------------------------------------
+
+async def _async_note_disconnected(slot: _RobotSlot) -> None:
+    if slot.debouncer is not None:
+        slot.debouncer.note_disconnected()
+
+
+async def _async_note_connected(slot: _RobotSlot) -> None:
+    if slot.debouncer is not None:
+        slot.debouncer.note_connected()
