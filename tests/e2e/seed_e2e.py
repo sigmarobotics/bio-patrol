@@ -86,6 +86,7 @@ cur.execute(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_id TEXT NOT NULL,
         location_id TEXT NOT NULL,
+        bed_name TEXT NULL,
         timestamp TEXT NOT NULL,
         retry_count INTEGER NOT NULL,
         status INTEGER,
@@ -97,6 +98,11 @@ cur.execute(
     )
     """
 )
+# Migration: add bed_name to pre-existing seed DBs that predate this column
+try:
+    cur.execute("ALTER TABLE sensor_scan_data ADD COLUMN bed_name TEXT NULL")
+except sqlite3.OperationalError:
+    pass  # column already exists
 
 # Wipe E2E rows from prior runs to make seed deterministic
 cur.execute("DELETE FROM sensor_scan_data WHERE task_id LIKE 'e2e-%'")

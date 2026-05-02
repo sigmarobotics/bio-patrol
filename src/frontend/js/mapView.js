@@ -390,6 +390,12 @@
 
   // ───── Animation loop ─────
   function animateMap() {
+    // Stop the loop entirely when no canvases are registered — so destroy()
+    // of the last canvas releases the rAF closure for GC. init() restarts it.
+    if (_state.canvases.size === 0) {
+      _state._animStarted = false;
+      return;
+    }
     // Skip drawing when no registered canvas is currently attached/visible —
     // avoids per-frame draws against detached or hidden canvases.
     const anyVisible = [..._state.canvases.values()].some(e => e.canvas?.offsetParent !== null);

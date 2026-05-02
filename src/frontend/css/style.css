@@ -41,6 +41,11 @@
     --warning: #e67e22;
     --warning-dim: #d35400;
 
+    /* IT-9 bed-card state aliases */
+    --accent-green: var(--mint);
+    --accent-red: var(--coral);
+    --accent-amber: var(--amber);
+
     /* ═══ TEXT HIERARCHY ═══ */
     --text-bright: #1a1a1a;
     --text-primary: #333333;

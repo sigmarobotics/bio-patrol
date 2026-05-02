@@ -10,12 +10,13 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
 
     location_id is the canonical join key, not bed_name which is free-text.
     """
-    try:
-        client = get_bio_sensor_client()
-        if client is None:
-            return {"status": "disabled", "message": "Bio-sensor MQTT is disabled"}
-        import sqlite3
+    client = get_bio_sensor_client()
+    if client is None:
+        return {"status": "disabled", "message": "Bio-sensor MQTT is disabled"}
+    import sqlite3
 
+    conn = None
+    try:
         conn = sqlite3.connect(client.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -43,22 +44,24 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
             params,
         )
         rows = cursor.fetchall()
-        conn.close()
-
         data = [{**dict(r), "is_valid": bool(r["is_valid"])} for r in rows]
         return {"status": "success", "data": data, "count": len(data)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    finally:
+        if conn is not None:
+            conn.close()
 
 @router.get("/latest-by-bed")
 async def get_latest_by_bed():
     """Return one row per bed (location_id) — the latest scan record."""
-    try:
-        client = get_bio_sensor_client()
-        if client is None:
-            return {"status": "disabled", "data": [], "count": 0}
-        import sqlite3
+    client = get_bio_sensor_client()
+    if client is None:
+        return {"status": "disabled", "data": [], "count": 0}
+    import sqlite3
 
+    conn = None
+    try:
         conn = sqlite3.connect(client.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -76,11 +79,13 @@ async def get_latest_by_bed():
             """
         )
         rows = cursor.fetchall()
-        conn.close()
         data = [{**dict(r), "is_valid": bool(r["is_valid"])} for r in rows]
         return {"status": "success", "data": data, "count": len(data)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    finally:
+        if conn is not None:
+            conn.close()
 
 @router.get("/scan")
 async def get_bio_sensor_scan_data():
