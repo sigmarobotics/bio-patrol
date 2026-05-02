@@ -27,6 +27,7 @@ from services import action_registry, button_db
 from services.zigbee_mqtt import ZigbeeMQTT
 from services.button_manager import ButtonManager
 from dependencies import get_fleet, get_bio_sensor_client
+import lifespan_state
 
 # ---------------------------------------------------------------------------
 # Logging setup: stdout + per-module log files under <project_root>/data/logs/
@@ -149,17 +150,28 @@ async def lifespan(app: FastAPI):
         robot_id = "kachaka"
 
         fleet_client = get_fleet()
-        try:
-            result = await fleet_client.register_robot(robot_id, robot_ip, "Kachaka Care")
-            if not result.get("ok"):
-                raise Exception(f"Registration failed: {result.get('error', 'unknown')}")
-            engines[robot_id] = TaskEngine(fleet_client, robot_id)
-            task_queues[robot_id] = asyncio.Queue()
-            asyncio.create_task(task_worker(robot_id))
+        engines[robot_id] = TaskEngine(fleet_client, robot_id)
+        task_queues[robot_id] = asyncio.Queue()
+        worker = asyncio.create_task(task_worker(robot_id))
+        lifespan_state._worker_tasks[robot_id] = worker
+
+        result = await fleet_client.register_robot(robot_id, robot_ip, "Kachaka Care")
+        if result.get("ok"):
             logger.info(f"Robot '{robot_id}' registered at {robot_ip}")
-        except Exception as e:
-            logger.error(f"Failed to register robot '{robot_id}': {e}")
-            logger.info(f"Continuing with graceful degradation for robot {robot_id}")
+        else:
+            logger.warning(
+                f"Robot '{robot_id}' initial register failed at {robot_ip}: "
+                f"{result.get('error', 'unknown')}; retrying in background"
+            )
+            retry = asyncio.create_task(
+                lifespan_state._register_retry_loop(
+                    fleet_client, robot_id, robot_ip, "Kachaka Care"
+                )
+            )
+            lifespan_state._register_retry_tasks[robot_id] = retry
+            retry.add_done_callback(
+                lambda t, rid=robot_id: lifespan_state._register_retry_tasks.pop(rid, None)
+            )
 
         # Start task scheduler
         logger.info("Starting task scheduler...")
@@ -190,10 +202,8 @@ async def lifespan(app: FastAPI):
         if bio_sensor_client:
             bio_sensor_client.stop()
         await scheduler_service.stop()
-        try:
-            await fleet_client.unregister_robot(robot_id)
-        except Exception:
-            pass
+        # Single helper drains retries → workers → unregister in order.
+        await lifespan_state.shutdown_robot_tasks(fleet_client)
         logger.info("Application shutdown: Clean up completed.")
     except Exception as e:
         logger.error(f"Error during application startup: {e}")
