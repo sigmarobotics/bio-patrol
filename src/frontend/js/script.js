@@ -1291,8 +1291,7 @@ async function saveSettings() {
 
 async function loadConnectionState() {
   try {
-    const res = await axios.get('/api/robot/connection-state');
-    const data = res.data;
+    const data = await dataService.getRobotConnectionState();
     const badge = document.getElementById('robot-connection-badge');
     if (!badge) return;
     badge.classList.remove('connected', 'disconnected', 'unregistered', 'unknown');

@@ -91,16 +91,3 @@ async def test_unregister_shuts_down_debouncer(monkeypatch):
     slot.debouncer.shutdown.assert_awaited()
 
 
-@pytest.mark.asyncio
-async def test_state_callback_swallows_loop_closed():
-    """If run_coroutine_threadsafe is called on a closed loop, do not raise."""
-    from services.fleet_api import _safe_run_coro_in_loop
-
-    closed = asyncio.new_event_loop()
-    closed.close()
-
-    async def _noop():
-        return None
-
-    # Should not raise.
-    _safe_run_coro_in_loop(_noop(), closed)

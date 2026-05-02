@@ -120,7 +120,9 @@ class TaskEngine:
             except Exception:
                 logger.debug("[STATE WATCHER] Transient error", exc_info=True)
             try:
-                await asyncio.sleep(1.0)
+                # 3s matches the legacy _monitor_shelf cadence; in-command
+                # drops are caught faster by the controller's on_shelf_dropped.
+                await asyncio.sleep(3.0)
             except asyncio.CancelledError:
                 break
 
@@ -292,8 +294,8 @@ class TaskEngine:
         current_tasks[task.robot_id] = task.task_id
         self.current_task_id = task.task_id
         self.task_start_time = get_now().strftime("%Y%m%d%H%M%S")
-        slot = self.fleet._robots.get(self.robot_id) if isinstance(self.fleet._robots, dict) else None
-        slot_evt = getattr(slot, "shelf_drop_event", None) if slot is not None else None
+        slot = self.fleet.get_slot_or_none(self.robot_id) if hasattr(self.fleet, "get_slot_or_none") else None
+        slot_evt = slot.shelf_drop_event if slot is not None else None
         self.shelf_drop_event = slot_evt if isinstance(slot_evt, asyncio.Event) else asyncio.Event()
         self.shelf_drop_event.clear()
         self._state_watcher_stop = False

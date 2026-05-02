@@ -76,7 +76,7 @@ async def test_state_watcher_fires_on_shelf_id_transition():
     eng._state_watcher_stop = False
 
     watcher = asyncio.create_task(eng._watch_shelf_state())
-    await asyncio.sleep(3.5)       # >= 3 polling cycles — covers the docked->None transition
+    await asyncio.sleep(8.0)       # >= 3 polling cycles at 3s — covers docked->None transition
     eng._state_watcher_stop = True
     watcher.cancel()
     try:

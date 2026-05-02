@@ -41,15 +41,7 @@ async def _reregister_robot(new_ip: str) -> dict:
     from dependencies import get_fleet
     fleet = get_fleet()
 
-    # Cancel any in-flight retry against the OLD ip first.
-    retry_task = lifespan_state._register_retry_tasks.pop(ROBOT_ID, None)
-    if retry_task is not None and not retry_task.done():
-        retry_task.cancel()
-        try:
-            await retry_task
-        except (asyncio.CancelledError, Exception):
-            pass
-
+    await lifespan_state.cancel_register_retry(ROBOT_ID)
     await fleet.unregister_robot(ROBOT_ID)
     result = await fleet.register_robot(ROBOT_ID, new_ip, ROBOT_NAME)
     if result.get("ok") and ROBOT_ID not in engines:

@@ -47,6 +47,23 @@ async def _register_retry_loop(
         delay = min(delay * 2, 60.0)
 
 
+async def cancel_register_retry(robot_id: str) -> None:
+    """Pop and await the in-flight retry task for ``robot_id``, if any.
+
+    Used by both ``FleetAPI.unregister_robot`` and the settings router's
+    IP-change path: a retry that succeeds against a stale IP must not be
+    allowed to reinstate a slot the caller just removed.
+    """
+    task = _register_retry_tasks.pop(robot_id, None)
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
 async def shutdown_robot_tasks(fleet) -> None:
     """Cancel-and-await retries → workers → unregister, in that order.
 
