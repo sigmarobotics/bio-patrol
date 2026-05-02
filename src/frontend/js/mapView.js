@@ -318,7 +318,12 @@
     }
     ctx.restore();
 
-    // ── Overlay layer (screen-space — icons stay visually constant size across mini/modal) ──
+    // ── Overlay layer (screen-space) ──
+    // Icons scale with the map when view.scale >= 1 (so they grow when modal
+    // is zoomed in) but never shrink below their natural pixel size — this
+    // gives a readable icon on the mini auto-fit (scale < 1) AND a zoom-aware
+    // icon in the modal.
+    const iconScale = Math.max(view.scale, 1);
     const toScreen = (mapPos) => ({
       x: mapPos.x * view.scale + view.tx,
       y: mapPos.y * view.scale + view.ty,
@@ -331,6 +336,7 @@
         ctx.save();
         ctx.translate(sp.x, sp.y);
         ctx.rotate(_state.robotTheta || 0);
+        ctx.scale(iconScale, iconScale);
         const sprite = _state._robotSprite;
         if (sprite && sprite.complete) {
           ctx.drawImage(sprite, -8, -5, 16, 10);
@@ -353,6 +359,7 @@
         const sp = toScreen(dropPos);
         ctx.save();
         ctx.translate(sp.x, sp.y);
+        ctx.scale(iconScale, iconScale);
         ctx.beginPath();
         ctx.arc(0, 0, 10, 0, 2 * Math.PI);
         ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
@@ -362,7 +369,7 @@
         ctx.fillStyle = 'red';
         ctx.fill();
         ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2 / iconScale;
         ctx.beginPath();
         ctx.moveTo(-3, -3); ctx.lineTo(3, 3);
         ctx.moveTo(3, -3); ctx.lineTo(-3, 3);
