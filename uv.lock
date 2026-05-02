@@ -102,7 +102,7 @@ requires-dist = [
     { name = "grpcio", specifier = "==1.66.1" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "kachaka-api", specifier = "==3.10.6" },
-    { name = "kachaka-sdk-toolkit", git = "https://github.com/sigmarobotics/kachaka-sdk-toolkit.git" },
+    { name = "kachaka-sdk-toolkit", specifier = ">=0.3.0" },
     { name = "paho-mqtt", specifier = "==2.1.0" },
     { name = "protobuf", specifier = "==5.27.2" },
     { name = "uvicorn", specifier = "==0.34.0" },
@@ -390,12 +390,16 @@ wheels = [
 [[package]]
 name = "kachaka-sdk-toolkit"
 version = "0.4.1"
-source = { git = "https://github.com/sigmarobotics/kachaka-sdk-toolkit.git#8e8d333449e4e0b27390baae6c94c72ccb70fb4b" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
     { name = "kachaka-api" },
     { name = "mcp", extra = ["cli"] },
     { name = "pillow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e1/29/7c94c428c581078a958173dfff48ce207efa7d3c0be9e4420fe585b91935/kachaka_sdk_toolkit-0.4.1.tar.gz", hash = "sha256:f93edfb064636b2cc7ff2ddc44632251d8dd14f4a6c6f061f35c56e7630be7bf", size = 148496, upload-time = "2026-04-09T16:02:50.2Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/90/2fbc08e5a11ad7c4ba94976cbe509ea467cbfb87de0fae6c1c139875624e/kachaka_sdk_toolkit-0.4.1-py3-none-any.whl", hash = "sha256:95a2bc3d5634bac81ad307a1e943715dfc27bd7cbccde5660d3b40e22729c426", size = 45684, upload-time = "2026-04-09T16:02:48.77Z" },
 ]
 
 [[package]]
