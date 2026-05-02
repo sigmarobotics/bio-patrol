@@ -12,6 +12,12 @@
 //   _state.gMapDesc: shared map descriptor
 
 (function (global) {
+  // Minimum on-screen scale for map overlay icons (robot, shelf-drop marker).
+  // 1 = natural pixel size — at fit scale (< 1) icons are clamped here so they
+  // remain readable on the mini canvas; in the modal (scale >= 1) icons grow
+  // along with the map.
+  const MIN_ICON_SCREEN_SCALE = 1;
+
   const _state = {
     canvases: new Map(),
     activeCanvasId: null,
@@ -324,11 +330,9 @@
     ctx.restore();
 
     // ── Overlay layer (screen-space) ──
-    // Icons scale with the map when view.scale >= 1 (so they grow when modal
-    // is zoomed in) but never shrink below their natural pixel size — this
-    // gives a readable icon on the mini auto-fit (scale < 1) AND a zoom-aware
-    // icon in the modal.
-    const iconScale = Math.max(view.scale, 1);
+    // Clamp icon scale to MIN_ICON_SCREEN_SCALE so icons stay readable at fit
+    // scale (mini canvas) but still grow with map zoom in the modal.
+    const iconScale = Math.max(view.scale, MIN_ICON_SCREEN_SCALE);
     const toScreen = (mapPos) => ({
       x: mapPos.x * view.scale + view.tx,
       y: mapPos.y * view.scale + view.ty,
