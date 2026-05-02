@@ -9,6 +9,7 @@ import paho.mqtt.client as mqtt
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
+import lifespan_state
 from settings.config import SETTINGS_FILE, get_runtime_settings, update_settings
 from utils.json_io import load_json, save_json
 from services.bio_sensor_mqtt import is_valid_scan
@@ -34,16 +35,28 @@ def _normalize_robot_ip(ip: str) -> str:
 async def _reregister_robot(new_ip: str) -> dict:
     """Swap FleetAPI's kachaka slot to a new IP without a container restart.
 
-    Returns register_robot's result dict so the UI can surface ok/error inline.
+    Cancels any in-flight lifespan retry against the OLD IP first, so a
+    racing retry that succeeds cannot reinstate a stale slot.
     """
     from dependencies import get_fleet
     fleet = get_fleet()
+
+    # Cancel any in-flight retry against the OLD ip first.
+    retry_task = lifespan_state._register_retry_tasks.pop(ROBOT_ID, None)
+    if retry_task is not None and not retry_task.done():
+        retry_task.cancel()
+        try:
+            await retry_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
     await fleet.unregister_robot(ROBOT_ID)
     result = await fleet.register_robot(ROBOT_ID, new_ip, ROBOT_NAME)
     if result.get("ok") and ROBOT_ID not in engines:
         engines[ROBOT_ID] = TaskEngine(fleet, ROBOT_ID)
         task_queues[ROBOT_ID] = asyncio.Queue()
-        asyncio.create_task(task_worker(ROBOT_ID))
+        worker = asyncio.create_task(task_worker(ROBOT_ID))
+        lifespan_state._worker_tasks[ROBOT_ID] = worker
     return result
 
 
