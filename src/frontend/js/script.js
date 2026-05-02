@@ -11,6 +11,7 @@ let robotData = { battery: null, pose: null, status: 'unknown' };
 let shelfDropPose = null;  // {x, y, theta} or null — set by checkShelfDrop()
 let _cancelledDismissed = new Set();  // task IDs dismissed after showing "cancelled"
 let _cancelHideTimer = null;
+let connectionStateInterval = null;  // setInterval handle for Settings tab poller
 
 // gMapDesc + tfROS2Canvas live in mapView.js — use mapView.getState() if needed.
 
@@ -48,6 +49,13 @@ function switchTab(tabName) {
   // Stop dashboard polling when leaving the dashboard tab
   if (prevTab === 'dashboard' && tabName !== 'dashboard') {
     if (window.bedGrid?.teardown) bedGrid.teardown();
+  }
+
+  // Start/stop the connection-state poller for the Settings tab
+  if (tabName === 'settings') {
+    startConnectionStatePoller();
+  } else if (prevTab === 'settings') {
+    stopConnectionStatePoller();
   }
 }
 
@@ -1147,6 +1155,7 @@ const SETTINGS_MAP = [
   { id: 'setting-gemini-api-key', key: 'gemini_api_key' },
   { id: 'setting-timezone', key: 'timezone' },
   { id: 'setting-bed-card-stale-hours', key: 'bed_card_stale_hours', type: 'number' },
+  { id: 'robot-offline-debounce-seconds', key: 'robot_offline_debounce_seconds', type: 'number' },
 ];
 
 async function fetchShelves() {
@@ -1275,6 +1284,52 @@ async function saveSettings() {
     alert('Settings saved!');
   } catch (e) {
     alert('Failed to save settings: ' + e.message);
+  }
+}
+
+// ─── Connection-state badge (Settings → 硬體設定) ───────────────────────────
+
+async function loadConnectionState() {
+  try {
+    const res = await axios.get('/api/robot/connection-state');
+    const data = res.data;
+    const badge = document.getElementById('robot-connection-badge');
+    if (!badge) return;
+    badge.classList.remove('connected', 'disconnected', 'unregistered', 'unknown');
+    badge.classList.add(data.state);
+    const labels = {
+      connected: '已連線',
+      disconnected: data.offline_pending ? '斷線中(debounce 計時)' : '已斷線',
+      unregistered: '未註冊(重試中)',
+    };
+    badge.textContent = labels[data.state] || data.state;
+    const help = document.getElementById('robot-connection-help');
+    if (help) {
+      const lines = [];
+      if (data.serial) lines.push(`Serial: ${data.serial}`);
+      if (data.last_seen) lines.push(`Last seen: ${new Date(data.last_seen * 1000).toLocaleTimeString()}`);
+      if (data.disconnected_at) lines.push(`Disconnected at: ${new Date(data.disconnected_at * 1000).toLocaleTimeString()}`);
+      if (data.last_reconnect_at) lines.push(`Last reconnect: ${new Date(data.last_reconnect_at * 1000).toLocaleTimeString()}`);
+      lines.push(`Debounce: ${data.debounce_seconds}s`);
+      if (data.in_patrol) lines.push('巡房中');
+      help.textContent = lines.join(' · ');
+    }
+  } catch (e) {
+    /* swallow — badge stays in last state */
+  }
+}
+
+function startConnectionStatePoller() {
+  // Initial paint right away (don't wait 10s)
+  loadConnectionState();
+  if (connectionStateInterval) clearInterval(connectionStateInterval);
+  connectionStateInterval = setInterval(loadConnectionState, 10000);
+}
+
+function stopConnectionStatePoller() {
+  if (connectionStateInterval) {
+    clearInterval(connectionStateInterval);
+    connectionStateInterval = null;
   }
 }
 

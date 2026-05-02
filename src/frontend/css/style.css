@@ -1569,6 +1569,39 @@ input[type="checkbox"]:checked::after {
     background: rgba(220, 53, 69, 0.08);
 }
 
+/* ───────── Robot connection-state badge (Settings → 硬體設定) ───────── */
+.conn-badge {
+    display: inline-block;
+    padding: 3px 12px;
+    border-radius: 999px;
+    font-family: var(--font-display);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border: 1px solid var(--border-subtle);
+    background: var(--panel-mid);
+    color: var(--text-muted);
+}
+.conn-badge.connected {
+    color: var(--mint);
+    border-color: rgba(40, 167, 69, 0.4);
+    background: rgba(40, 167, 69, 0.08);
+}
+.conn-badge.disconnected {
+    color: var(--coral);
+    border-color: rgba(220, 53, 69, 0.4);
+    background: rgba(220, 53, 69, 0.08);
+}
+.conn-badge.unregistered {
+    color: var(--warning);
+    border-color: rgba(230, 126, 34, 0.4);
+    background: rgba(230, 126, 34, 0.08);
+}
+.conn-badge.unknown {
+    color: var(--text-muted);
+}
+
 .bb-list { display: flex; flex-direction: column; gap: 8px; }
 
 .bb-loading,
