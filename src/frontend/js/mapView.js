@@ -68,14 +68,7 @@
       img.src = mapSrc;
       img.onload = () => {
         _state.img = img;
-        for (const e of _state.canvases.values()) {
-          if (e.fit) {
-            applyFitTransform(e);
-          } else {
-            e.view.tx = e.canvas.width / 2 - _state.gMapDesc.w / 2;
-            e.view.ty = e.canvas.height / 2 - _state.gMapDesc.h / 2;
-          }
-        }
+        for (const e of _state.canvases.values()) applyTransform(e);
         drawAll();
         resolve();
       };
@@ -92,6 +85,19 @@
     view.scale = scale;
     view.tx = (canvas.width - desc.w * scale) / 2;
     view.ty = (canvas.height - desc.h * scale) / 2;
+  }
+
+  // ───── Centre the map at scale 1 (no fit) ─────
+  function applyCenterTransform(entry) {
+    const { canvas, view } = entry;
+    view.tx = canvas.width / 2 - _state.gMapDesc.w / 2;
+    view.ty = canvas.height / 2 - _state.gMapDesc.h / 2;
+  }
+
+  // ───── Dispatch to the right transform for an entry ─────
+  function applyTransform(entry) {
+    if (entry.fit) applyFitTransform(entry);
+    else applyCenterTransform(entry);
   }
 
   // ───── Init a canvas ─────
@@ -120,15 +126,8 @@
         const img = new Image();
         img.src = mapSrc;
         img.onload = () => {
-          // Update view centering for all canvases with possibly-updated gMapDesc
-          for (const [id, e] of _state.canvases) {
-            if (e.fit) {
-              applyFitTransform(e);
-            } else {
-              e.view.tx = e.canvas.width / 2 - _state.gMapDesc.w / 2;
-              e.view.ty = e.canvas.height / 2 - _state.gMapDesc.h / 2;
-            }
-          }
+          // Re-apply transforms for all canvases now that gMapDesc may have updated
+          for (const e of _state.canvases.values()) applyTransform(e);
           _state.img = img;
           const loading = document.getElementById('map-loading');
           if (loading) loading.style.display = 'none';
