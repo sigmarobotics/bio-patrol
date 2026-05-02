@@ -10,6 +10,7 @@ import routers.schedule as schedule_router
 import routers.maps as maps_router
 import routers.bio_sensor as bio_sensor
 import routers.buttons as buttons_router
+import routers.robot_health as robot_health_router
 from contextlib import asynccontextmanager
 import asyncio
 import logging
@@ -232,6 +233,7 @@ app.include_router(schedule_router.router)
 app.include_router(maps_router.router)
 app.include_router(bio_sensor.router)
 app.include_router(buttons_router.router)
+app.include_router(robot_health_router.router)
 
 frontend_path = get_resource_path("src/frontend")
 if os.path.exists(frontend_path):
