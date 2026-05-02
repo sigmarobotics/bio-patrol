@@ -46,18 +46,52 @@
   // ───── Map config loader ─────
   async function loadMapConfig() {
     try {
-      const res = await global.dataService.getActiveMapInfo();
+      const res = await dataService.getActiveMapInfo();
       if (res.status === 'ok') {
         _state.gMapDesc.w = res.width;
         _state.gMapDesc.h = res.height;
         _state.gMapDesc.origin = res.origin;
         _state.gMapDesc.resolution = res.resolution;
-        return `/api/maps/${res.map_id}/image`;
+        return `/api/maps/${res.map_id}/image?v=${Date.now()}`;
       }
     } catch (e) {
       // No active map or error — use fallback
     }
     return 'vac_map.png';
+  }
+
+  // ───── Reload the active map (re-fetch metadata + image, redraw all canvases) ─────
+  function reload() {
+    _state.img = null;
+    return loadMapConfig().then(mapSrc => new Promise((resolve) => {
+      const img = new Image();
+      img.src = mapSrc;
+      img.onload = () => {
+        _state.img = img;
+        for (const e of _state.canvases.values()) {
+          if (e.fit) {
+            applyFitTransform(e);
+          } else {
+            e.view.tx = e.canvas.width / 2 - _state.gMapDesc.w / 2;
+            e.view.ty = e.canvas.height / 2 - _state.gMapDesc.h / 2;
+          }
+        }
+        drawAll();
+        resolve();
+      };
+      img.onerror = () => resolve();
+    }));
+  }
+
+  // ───── Auto-fit transform: scales + centres the map to fill the canvas ─────
+  function applyFitTransform(entry) {
+    const { canvas, view } = entry;
+    const desc = _state.gMapDesc;
+    if (!canvas.width || !canvas.height || !desc.w || !desc.h) return;
+    const scale = Math.min(canvas.width / desc.w, canvas.height / desc.h);
+    view.scale = scale;
+    view.tx = (canvas.width - desc.w * scale) / 2;
+    view.ty = (canvas.height - desc.h * scale) / 2;
   }
 
   // ───── Init a canvas ─────
@@ -76,9 +110,10 @@
       scale: 1, minScale: 0.3, maxScale: 5,
       dragging: false, lastX: 0, lastY: 0,
     };
-    const entry = { canvas, ctx, view, interactive: !!opts.interactive, container, handlers: [] };
+    const entry = { canvas, ctx, view, interactive: !!opts.interactive, fit: !!opts.fit, container, handlers: [] };
     _state.canvases.set(canvasId, entry);
     _state.activeCanvasId = canvasId;
+    if (entry.fit) applyFitTransform(entry);
 
     if (!_state.img) {
       loadMapConfig().then(mapSrc => {
@@ -87,8 +122,12 @@
         img.onload = () => {
           // Update view centering for all canvases with possibly-updated gMapDesc
           for (const [id, e] of _state.canvases) {
-            e.view.tx = e.canvas.width / 2 - _state.gMapDesc.w / 2;
-            e.view.ty = e.canvas.height / 2 - _state.gMapDesc.h / 2;
+            if (e.fit) {
+              applyFitTransform(e);
+            } else {
+              e.view.tx = e.canvas.width / 2 - _state.gMapDesc.w / 2;
+              e.view.ty = e.canvas.height / 2 - _state.gMapDesc.h / 2;
+            }
           }
           _state.img = img;
           const loading = document.getElementById('map-loading');
@@ -114,6 +153,7 @@
       if (nw > 0 && nh > 0) {
         canvas.width = nw;
         canvas.height = nh;
+        if (entry.fit) applyFitTransform(entry);
         drawCanvas(canvasId);
       }
     });
@@ -267,26 +307,30 @@
     const { canvas, ctx, view } = entry;
     if (!ctx || !canvas) return;
 
+    // ── Map layer (scaled) ──
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.translate(view.tx, view.ty);
     ctx.scale(view.scale, view.scale);
-
-    // Draw map image
     if (_state.img) {
       ctx.drawImage(_state.img, 0, 0, _state.gMapDesc.w, _state.gMapDesc.h);
     }
+    ctx.restore();
 
-    // Draw robot
-    const robotData = global.robotData;
+    // ── Overlay layer (screen-space — icons stay visually constant size across mini/modal) ──
+    const toScreen = (mapPos) => ({
+      x: mapPos.x * view.scale + view.tx,
+      y: mapPos.y * view.scale + view.ty,
+    });
+
     if (robotData && robotData.pose) {
       const pos = tfROS2Canvas(_state.gMapDesc, robotData.pose);
       if (Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+        const sp = toScreen(pos);
         ctx.save();
-        ctx.translate(pos.x, pos.y);
+        ctx.translate(sp.x, sp.y);
         ctx.rotate(_state.robotTheta || 0);
-
         const sprite = _state._robotSprite;
         if (sprite && sprite.complete) {
           ctx.drawImage(sprite, -8, -5, 16, 10);
@@ -303,13 +347,12 @@
       }
     }
 
-    // Draw shelf-drop marker
-    const shelfDropPose = global.shelfDropPose;
-    if (shelfDropPose) {
+    if (typeof shelfDropPose !== 'undefined' && shelfDropPose) {
       const dropPos = tfROS2Canvas(_state.gMapDesc, shelfDropPose);
       if (Number.isFinite(dropPos.x) && Number.isFinite(dropPos.y)) {
+        const sp = toScreen(dropPos);
         ctx.save();
-        ctx.translate(dropPos.x, dropPos.y);
+        ctx.translate(sp.x, sp.y);
         ctx.beginPath();
         ctx.arc(0, 0, 10, 0, 2 * Math.PI);
         ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
@@ -327,8 +370,6 @@
         ctx.restore();
       }
     }
-
-    ctx.restore();
   }
 
   // ───── Animation loop ─────
@@ -340,7 +381,6 @@
       requestAnimationFrame(animateMap);
       return;
     }
-    const robotData = global.robotData;
     if (robotData && robotData.pose && robotData.pose.theta !== undefined) {
       const target = -robotData.pose.theta;
       const current = _state.robotTheta || 0;
@@ -359,7 +399,7 @@
 
   // ───── Mini-canvas + full-view modal ─────
   function initMini() {
-    init('robot-mini-canvas', { interactive: false });
+    init('robot-mini-canvas', { interactive: false, fit: true });
   }
 
   function openModal() {
@@ -422,6 +462,7 @@
   global.mapView = {
     init,
     refreshPose,
+    reload,
     initMini,
     openModal,
     closeModal,
