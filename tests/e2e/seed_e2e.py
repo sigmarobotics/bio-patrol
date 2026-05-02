@@ -148,3 +148,45 @@ print("  101-1 → valid     (recent valid)")
 print("  101-2 → invalid   (recent is_valid=False)")
 print("  102-1 → stale     (>24h ago)")
 print("  102-2 → unscheduled (patrol disabled)")
+
+# 3 size-diverse maps for test_map_switch.spec.js
+from PIL import Image, ImageDraw
+
+MAPS_DIR = os.path.join(REPO_ROOT, "data", "maps")
+os.makedirs(MAPS_DIR, exist_ok=True)
+
+E2E_MAPS = [
+    {"id": "e2e-map-small", "name": "E2E small", "w": 100, "h": 80},
+    {"id": "e2e-map-medium", "name": "E2E medium", "w": 400, "h": 300},
+    {"id": "e2e-map-large", "name": "E2E large", "w": 1200, "h": 900},
+]
+
+# Wipe prior e2e- maps to keep seed deterministic
+for fname in os.listdir(MAPS_DIR):
+    if fname.startswith("e2e-map-"):
+        os.remove(os.path.join(MAPS_DIR, fname))
+
+for m in E2E_MAPS:
+    img = Image.new("RGB", (m["w"], m["h"]), color=(245, 235, 215))
+    draw = ImageDraw.Draw(img)
+    # Outer rectangle
+    draw.rectangle([(2, 2), (m["w"] - 3, m["h"] - 3)], outline=(60, 60, 60), width=2)
+    # Diagonal lines so it's clear which map is which
+    draw.line([(0, 0), (m["w"], m["h"])], fill=(60, 60, 60), width=2)
+    draw.line([(m["w"], 0), (0, m["h"])], fill=(60, 60, 60), width=2)
+    img.save(os.path.join(MAPS_DIR, f"{m['id']}.png"))
+    meta = {
+        "id": m["id"],
+        "name": m["name"],
+        "robot_map_id": m["id"],
+        "timestamp": now.isoformat(),
+        "resolution": 0.05,
+        "width": m["w"],
+        "height": m["h"],
+        "origin": {"x": -m["w"] * 0.05 / 2, "y": -m["h"] * 0.05 / 2},
+        "locations": [],
+    }
+    with open(os.path.join(MAPS_DIR, f"{m['id']}.json"), "w") as f:
+        json.dump(meta, f, indent=2)
+
+print(f"Seeded {len(E2E_MAPS)} size-diverse maps under {MAPS_DIR}")
