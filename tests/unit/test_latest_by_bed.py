@@ -105,12 +105,30 @@ def test_latest_by_bed_multi_bed_each_newest(client_with_db):
     assert by_bed["101-2"]["bpm"] == 80
 
 
-def test_latest_by_bed_filters_null_location(client_with_db):
+def test_latest_by_bed_filters_null_bed_name(client_with_db):
     client, db = client_with_db
     _insert(db, task_id="T1", location_id="B_101-1", bed_name="101-1",
             timestamp="2026-05-01T10:00:00")
-    _insert(db, task_id="T2", location_id=None, bed_name="orphan",
+    _insert(db, task_id="T2", location_id="B_orphan", bed_name=None,
             timestamp="2026-05-01T11:00:00")
     res = client.get("/api/bio-sensor/latest-by-bed")
     assert res.json()["count"] == 1
-    assert res.json()["data"][0]["location_id"] == "B_101-1"
+    assert res.json()["data"][0]["bed_name"] == "101-1"
+
+
+def test_latest_by_bed_shared_location_id_returns_per_bed(client_with_db):
+    """Pin: two beds share location_id 辦公室222; latest-by-bed must still
+    return one row per bed_name. Reproduces the "103-3 should be empty but
+    shows 102-3's data" symptom from the live pi."""
+    client, db = client_with_db
+    _insert(db, task_id="T1", location_id="辦公室222", bed_name="102-3",
+            timestamp="2026-05-11T12:00:00", bpm=83)
+    _insert(db, task_id="T2", location_id="辦公室222", bed_name="103-3",
+            timestamp="2026-05-11T12:04:00", bpm=None,
+            is_valid=False, details="未收到感測器資料（MQTT無連線或無數據）")
+    res = client.get("/api/bio-sensor/latest-by-bed")
+    by_bed = {r["bed_name"]: r for r in res.json()["data"]}
+    assert by_bed["102-3"]["bpm"] == 83
+    assert by_bed["102-3"]["is_valid"] is True
+    assert by_bed["103-3"]["bpm"] is None
+    assert by_bed["103-3"]["is_valid"] is False

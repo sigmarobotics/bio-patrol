@@ -54,7 +54,12 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
 
 @router.get("/latest-by-bed")
 async def get_latest_by_bed():
-    """Return one row per bed (location_id) — the latest scan record."""
+    """Return one row per bed (bed_name) — the latest scan record.
+
+    Partitions by bed_name, not location_id: multiple beds can share a
+    Kachaka destination (e.g. two beds at one drop-point), and the
+    dashboard's per-bed-card semantics require per-bed_name freshness.
+    """
     client = get_bio_sensor_client()
     if client is None:
         return {"status": "disabled", "data": [], "count": 0}
@@ -71,9 +76,9 @@ async def get_latest_by_bed():
                    status, bpm, rpm, is_valid, data_json, details
             FROM (
                 SELECT *,
-                       ROW_NUMBER() OVER (PARTITION BY location_id ORDER BY timestamp DESC) AS rn
+                       ROW_NUMBER() OVER (PARTITION BY bed_name ORDER BY timestamp DESC) AS rn
                 FROM sensor_scan_data
-                WHERE location_id IS NOT NULL
+                WHERE bed_name IS NOT NULL
             )
             WHERE rn = 1
             """

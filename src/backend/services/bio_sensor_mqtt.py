@@ -82,10 +82,15 @@ class BioSensorMQTTClient:
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already renamed or doesn't exist
-        # Index supports the dashboard's per-bed latest lookup
-        # (PARTITION BY location_id ORDER BY timestamp DESC).
+        # idx_scan_loc_ts kept for /scan-history?location_id=... filter.
+        # idx_scan_bed_ts supports the dashboard's per-bed latest lookup
+        # (PARTITION BY bed_name ORDER BY timestamp DESC) — multiple beds may
+        # share a location_id, so bed_name is the canonical per-card key.
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_scan_loc_ts ON sensor_scan_data(location_id, timestamp DESC)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scan_bed_ts ON sensor_scan_data(bed_name, timestamp DESC)"
         )
         conn.commit()
         conn.close()

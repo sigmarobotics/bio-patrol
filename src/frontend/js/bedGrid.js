@@ -64,8 +64,11 @@
     const beds = bedsConfig?.beds || {};
     const orderLookup = {};
     (patrolConfig?.beds_order || []).forEach(e => { orderLookup[e.bed_key] = e; });
-    const latestByLocId = {};
-    (latestByBedList || []).forEach(r => { latestByLocId[r.location_id] = r; });
+    // Key by bed_name (= bed_key) because two beds can share a location_id
+    // (Kachaka destination). Keying by location_id makes both cards show the
+    // same record — exactly the dashboard "103-3 should be empty" symptom.
+    const latestByBedName = {};
+    (latestByBedList || []).forEach(r => { if (r.bed_name) latestByBedName[r.bed_name] = r; });
 
     // Group beds by room
     const roomGroups = {};
@@ -92,7 +95,7 @@
       <div class="bed-grid">
         ${bedsInRoom.map(b => renderBedCard(
           b,
-          latestByLocId[b.location_id],
+          latestByBedName[b.bed_key],
           !!orderLookup[b.bed_key]?.enabled,
           staleHours,
           now
