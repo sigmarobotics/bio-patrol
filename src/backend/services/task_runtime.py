@@ -43,9 +43,9 @@ class TaskEngine:
         self.robot_id = robot_id
         self._shelf_names: Dict[str, str] = {}
         self._location_names: Dict[str, str] = {}
-        self._shelf_dropped = False
-        self._shelf_monitor_stop = False
-        self._shelf_monitor_task: Optional[asyncio.Task] = None
+        self.shelf_drop_event: Optional[asyncio.Event] = None
+        self._state_watcher_task: Optional[asyncio.Task] = None
+        self._state_watcher_stop = False
         self._action_handlers: Dict[str, Any] = {
             StepAction.SPEAK.value: self._do_speak,
             StepAction.MOVE_TO_POSE.value: self._do_move_to_pose,
@@ -87,43 +87,44 @@ class TaskEngine:
                 parts.append(f"{k}={v}")
         return ", ".join(parts)
 
-    # ── Shelf monitor ─────────────────────────────────────────────────
+    # ── Shelf state watcher ───────────────────────────────────────────
 
-    async def _monitor_shelf(self):
-        """Background coroutine that polls get_moving_shelf() every 3s.
-        Sets _shelf_dropped flag if the robot no longer carries a shelf."""
-        logger.info(f"[SHELF MONITOR] Started for robot {self.robot_id}")
-        while not self._shelf_monitor_stop:
-            await asyncio.sleep(3)
-            if self._shelf_monitor_stop:
-                break
-            try:
-                result = await self.fleet.get_moving_shelf(self.robot_id)
-                shelf_id = result.get("shelf_id") if result.get("ok") else None
-                if not shelf_id:
-                    logger.warning(f"[SHELF MONITOR] Robot {self.robot_id} no longer carrying a shelf — shelf dropped!")
-                    self._shelf_dropped = True
-                    try:
-                        await self.fleet.cancel_command(self.robot_id)
-                        logger.info(f"[SHELF MONITOR] Cancelled current command on robot {self.robot_id}")
-                    except Exception as ce:
-                        logger.debug(f"[SHELF MONITOR] cancel_command failed (non-critical): {ce}")
-                    break
-            except Exception as e:
-                logger.debug(f"[SHELF MONITOR] Transient error polling shelf for robot {self.robot_id}: {e}")
-        logger.info(f"[SHELF MONITOR] Stopped for robot {self.robot_id}")
+    async def _watch_shelf_state(self):
+        """1 Hz safety-net reading get_moving_shelf_id() via the SDK.
 
-    async def _stop_shelf_monitor(self):
-        """Stop the shelf monitor background task."""
-        self._shelf_monitor_stop = True
-        if self._shelf_monitor_task is not None:
-            self._shelf_monitor_task.cancel()
+        The controller's on_shelf_dropped callback fires only inside
+        _execute_command — i.e. during an active move_shelf. This watcher
+        covers drops that happen between commands (between move_shelf and
+        bio_scan, or after return_shelf), reading via the pooled connection.
+        Cached slot.ctrl.state.moving_shelf_id is NOT used: the controller's
+        _state_loop stops refreshing it while _monitoring_shelf=True, which
+        is exactly the window we need to cover.
+        """
+        slot = self.fleet._robots.get(self.robot_id)
+        if slot is None:
+            return
+        last_seen_id: Optional[str] = None
+        confirmed_docked = False
+        while not self._state_watcher_stop:
             try:
-                await self._shelf_monitor_task
+                mid = await asyncio.to_thread(slot.conn.client.get_moving_shelf_id)
+                mid = mid or None
+                if mid:
+                    last_seen_id = mid
+                    confirmed_docked = True
+                elif confirmed_docked and last_seen_id:
+                    if self.shelf_drop_event is not None:
+                        self.shelf_drop_event.set()
+                    confirmed_docked = False
+                    last_seen_id = None
+            except Exception:
+                logger.debug("[STATE WATCHER] Transient error", exc_info=True)
+            try:
+                # 3s matches the legacy _monitor_shelf cadence; in-command
+                # drops are caught faster by the controller's on_shelf_dropped.
+                await asyncio.sleep(3.0)
             except asyncio.CancelledError:
-                pass
-            self._shelf_monitor_task = None
-        logger.info(f"[SHELF MONITOR] Cleaned up for robot {self.robot_id}")
+                break
 
     # ── Shelf drop helpers ────────────────────────────────────────────
 
@@ -214,8 +215,6 @@ class TaskEngine:
                                    trigger_step: Optional[TaskStep] = None,
                                    error_code: int = 0):
         """Handle shelf drop: collect remaining beds, notify, record DB, send robot home."""
-        await self._stop_shelf_monitor()
-
         # Cancel any in-flight robot command
         try:
             await self.fleet.cancel_command(self.robot_id)
@@ -223,7 +222,7 @@ class TaskEngine:
         except Exception as ce:
             logger.debug(f"[SHELF DROP] cancel_command failed (non-critical): {ce}")
 
-        source = f"error {error_code}" if error_code else "polling monitor"
+        source = f"error {error_code}" if error_code else "state watcher"
         logger.error(f"[SHELF DROP] Detected via {source} on robot {self.robot_id}, pausing task")
 
         location_id = trigger_step.params.get("location_id", "unknown") if trigger_step else "unknown"
@@ -295,9 +294,12 @@ class TaskEngine:
         current_tasks[task.robot_id] = task.task_id
         self.current_task_id = task.task_id
         self.task_start_time = get_now().strftime("%Y%m%d%H%M%S")
-        self._shelf_dropped = False
-        self._shelf_monitor_stop = False
-        self._shelf_monitor_task = None
+        slot = self.fleet.get_slot_or_none(self.robot_id) if hasattr(self.fleet, "get_slot_or_none") else None
+        slot_evt = slot.shelf_drop_event if slot is not None else None
+        self.shelf_drop_event = slot_evt if isinstance(slot_evt, asyncio.Event) else asyncio.Event()
+        self.shelf_drop_event.clear()
+        self._state_watcher_stop = False
+        self._state_watcher_task = asyncio.create_task(self._watch_shelf_state())
 
         try:
             step_index = 0
@@ -311,8 +313,8 @@ class TaskEngine:
                     logger.info(f"[!] Task {task.task_id} on robot {self.robot_id} cancelled mid-execution")
                     break
 
-                # --- SHELF DROP via polling monitor ---
-                if self._shelf_dropped:
+                # --- SHELF DROP via slot event / state watcher ---
+                if self.shelf_drop_event.is_set():
                     await self._handle_shelf_drop(task, step_index)
                     break
 
@@ -353,7 +355,7 @@ class TaskEngine:
                     step.status = StepStatus.SUCCESS if step_result.success else StepStatus.FAIL
 
                     # Shelf drop detected during step execution
-                    if self._shelf_dropped:
+                    if self.shelf_drop_event.is_set():
                         await self._handle_shelf_drop(task, step_index, trigger_step=step)
                         break
 
@@ -429,7 +431,14 @@ class TaskEngine:
 
         finally:
             tag = f"Task {task.task_id}"
-            await self._stop_shelf_monitor()
+            self._state_watcher_stop = True
+            if self._state_watcher_task is not None:
+                self._state_watcher_task.cancel()
+                try:
+                    await self._state_watcher_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._state_watcher_task = None
             cancelled = task.status == TaskStatus.CANCELLED
 
             # Cancelled cleanup: return shelf and go home
@@ -539,21 +548,14 @@ class TaskEngine:
         shelf_id = step.params["shelf_id"]
         location_id = step.params["location_id"]
         self.target_bed = location_id
-
         result = await self.fleet.move_shelf(self.robot_id, shelf_id, location_id)
-
-        # Start shelf monitor after the first successful move_shelf.
-        if result.get("ok") and self._shelf_monitor_task is None:
+        if result.get("ok"):
             self._current_shelf_id = shelf_id
-            self._shelf_monitor_stop = False
-            self._shelf_dropped = False
-            self._shelf_monitor_task = asyncio.create_task(self._monitor_shelf())
-
+            if self.shelf_drop_event is not None:
+                self.shelf_drop_event.clear()
         return self._make_result(result, step.action, {"shelf_id": shelf_id, "location_id": location_id})
 
     async def _do_return_shelf(self, step: TaskStep) -> StepResult:
-        # Stop shelf monitor before return_shelf — no longer needed.
-        await self._stop_shelf_monitor()
         shelf_id = step.params["shelf_id"]
         result = await self.fleet.return_shelf(self.robot_id, shelf_id)
         return self._make_result(result, step.action, {"shelf_id": shelf_id})

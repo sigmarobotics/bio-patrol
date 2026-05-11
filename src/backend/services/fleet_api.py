@@ -3,19 +3,26 @@
 Every public method is ``async`` and delegates to sync kachaka_core objects
 via ``asyncio.to_thread()``, keeping the event loop unblocked.
 
-Replaces the old FleetAPI that used ``kachaka_api.aio.KachakaApiClient``
-directly.  All robot operations now flow through kachaka_core's
-KachakaConnection (pooled), RobotController (command_id verified),
-KachakaCommands (@with_retry), and KachakaQueries (@with_retry).
+IT-10 changes:
+- ``_RobotSlot`` owns the ``on_state_change`` callback (registered before
+  ``RobotController.start``, since ``start_monitoring`` is idempotent).
+- ``_on_state_change`` mirrors state to ``slot.status``, delegates to the
+  controller, and forwards to ``OfflineDebouncer`` via
+  ``run_coroutine_threadsafe``.
+- ``_on_shelf_dropped`` sets a slot-owned ``asyncio.Event`` consumed by
+  TaskEngine.
+- ``unregister_robot`` cancels any in-flight register-retry task and shuts
+  the debouncer down.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Dict, Optional
 
 from kachaka_core import (
     KachakaCommands,
@@ -23,6 +30,11 @@ from kachaka_core import (
     KachakaQueries,
     RobotController,
 )
+from kachaka_core.connection import ConnectionState
+
+import lifespan_state
+from services.notifications import dispatcher
+from services.notifications.offline_debouncer import OfflineDebouncer
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +63,16 @@ class _RobotSlot:
     ctrl: RobotController
     cmds: KachakaCommands
     queries: KachakaQueries
+    loop: asyncio.AbstractEventLoop
     status: str = "online"
     last_seen: float = field(default_factory=time.time)
     serial: str = ""
+    status_lock: threading.Lock = field(default_factory=threading.Lock)
+    debouncer: Optional[OfflineDebouncer] = None
+    shelf_drop_event: Optional[asyncio.Event] = None
+    last_dropped_shelf_id: Optional[str] = None
+    disconnected_at: Optional[float] = None
+    last_reconnect_at: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -74,54 +93,159 @@ class FleetAPI:
             raise RobotNotRegistered(f"Robot {robot_id} not registered")
         return slot
 
+    def get_slot_or_none(self, robot_id: str) -> Optional[_RobotSlot]:
+        """Return the slot for ``robot_id`` or ``None`` if not registered.
+
+        Used by callers that need to read slot state without raising
+        (e.g. connection-state endpoint).
+        """
+        return self._robots.get(robot_id)
+
     # ── registration ─────────────────────────────────────────────────
 
     async def register_robot(
         self, robot_id: str, ip: str, name: str = ""
     ) -> dict:
-        """Create a pooled connection, ping, start the controller."""
+        """Create a pooled connection, ping, build slot, then start monitoring.
 
-        def _register() -> dict:
+        Two-phase to avoid a slot/monitor race: build the slot and insert it
+        into ``self._robots`` BEFORE calling ``start_monitoring`` so the very
+        first state-change callback can find the slot. If Phase 4 raises,
+        the slot is popped and the debouncer is drained.
+        """
+        loop = asyncio.get_running_loop()
+
+        # Phase 1 — sync ping. Returns (conn, ping) on success, None on fail.
+        def _build_sync():
             conn = KachakaConnection.get(ip)
             ping = conn.ping()
             if not ping.get("ok"):
-                return {"ok": False, "error": ping.get("error", "ping failed")}
+                return None, {"ok": False, "error": ping.get("error", "ping failed")}
+            return (conn, ping), {"ok": True}
 
+        built, build_result = await asyncio.to_thread(_build_sync)
+        if built is None:
+            return build_result
+        conn, ping = built
+
+        # Phase 2 — define callbacks. They close over a slot assigned in
+        # Phase 3 before Phase 4 ever starts the monitor thread.
+        slot: _RobotSlot
+
+        def _on_state_change(state: ConnectionState) -> None:
+            with slot.status_lock:
+                slot.status = (
+                    "online" if state == ConnectionState.CONNECTED else "offline"
+                )
+                slot.last_seen = time.time()
+                if state == ConnectionState.DISCONNECTED:
+                    slot.disconnected_at = time.time()
+                else:
+                    slot.last_reconnect_at = time.time()
+            try:
+                slot.ctrl._on_conn_state_change(state)
+            except Exception:
+                logger.exception("controller delegate failed")
+            if slot.debouncer is not None:
+                fn = (
+                    slot.debouncer.note_disconnected
+                    if state == ConnectionState.DISCONNECTED
+                    else slot.debouncer.note_connected
+                )
+                slot.loop.call_soon_threadsafe(fn)
+
+        def _on_shelf_dropped(shelf_id: str) -> None:
+            slot.last_dropped_shelf_id = shelf_id
+            if slot.shelf_drop_event is not None:
+                slot.loop.call_soon_threadsafe(slot.shelf_drop_event.set)
+
+        # Phase 3 — construct slot, build debouncer, INSERT into pool.
+        ctrl = RobotController(conn, on_shelf_dropped=_on_shelf_dropped)
+        cmds = KachakaCommands(conn)
+        queries = KachakaQueries(conn)
+        slot = _RobotSlot(
+            robot_id=robot_id,
+            ip=ip,
+            name=name or robot_id,
+            conn=conn,
+            ctrl=ctrl,
+            cmds=cmds,
+            queries=queries,
+            loop=loop,
+            serial=ping.get("serial", ""),
+        )
+        slot.shelf_drop_event = asyncio.Event()
+
+        def _patrol_running() -> bool:
+            from services.task_runtime import current_tasks
+            return current_tasks.get(robot_id) is not None
+
+        def _serial() -> str:
+            return slot.serial
+
+        def _debounce_seconds() -> float:
+            from settings.config import get_runtime_settings
+            return float(
+                get_runtime_settings().get("robot_offline_debounce_seconds", 300)
+            )
+
+        slot.debouncer = OfflineDebouncer(
+            robot_id=robot_id,
+            debounce_seconds_provider=_debounce_seconds,
+            is_patrol_running=_patrol_running,
+            emit=dispatcher.dispatch,
+            get_serial=_serial,
+        )
+        self._robots[robot_id] = slot
+
+        # Phase 4 — start monitoring + controller. interval=1.0 matches the
+        # controller's _fast_interval; the controller's internal
+        # start_monitoring call is then a no-op (idempotent).
+        def _start_sync() -> None:
+            conn.start_monitoring(interval=1.0, on_state_change=_on_state_change)
             conn.ensure_resolver()
-
-            ctrl = RobotController(conn)
             ctrl.start()
 
-            cmds = KachakaCommands(conn)
-            queries = KachakaQueries(conn)
+        try:
+            await asyncio.to_thread(_start_sync)
+        except Exception as exc:
+            self._robots.pop(robot_id, None)
+            try:
+                await slot.debouncer.shutdown()
+            except Exception:
+                logger.exception("debouncer shutdown after Phase 4 failure")
+            try:
+                await asyncio.to_thread(conn.stop_monitoring)
+            except Exception:
+                pass
+            logger.exception("register_robot Phase 4 raised: %s", exc)
+            return {"ok": False, "error": f"start failed: {exc}"}
 
-            slot = _RobotSlot(
-                robot_id=robot_id,
-                ip=ip,
-                name=name or robot_id,
-                conn=conn,
-                ctrl=ctrl,
-                cmds=cmds,
-                queries=queries,
-                serial=ping.get("serial", ""),
-            )
-            self._robots[robot_id] = slot
-            logger.info(
-                "Registered robot %s (%s) serial=%s", robot_id, ip, slot.serial
-            )
-            return {"ok": True, "serial": slot.serial}
-
-        return await asyncio.to_thread(_register)
+        logger.info(
+            "Registered robot %s (%s) serial=%s", robot_id, ip, slot.serial
+        )
+        return {"ok": True, "serial": slot.serial}
 
     async def unregister_robot(self, robot_id: str) -> bool:
-        """Stop the controller and remove the robot from the pool."""
+        """Stop the controller, drain the debouncer, remove from the pool."""
+        await lifespan_state.cancel_register_retry(robot_id)
+
         slot = self._robots.pop(robot_id, None)
         if slot is None:
             return False
 
+        if slot.debouncer is not None:
+            await slot.debouncer.shutdown()
+
         def _teardown() -> None:
-            slot.ctrl.stop()
-            KachakaConnection.remove(slot.ip)
+            try:
+                slot.ctrl.stop()
+            finally:
+                try:
+                    slot.conn.stop_monitoring()
+                except Exception:
+                    pass
+                KachakaConnection.remove(slot.ip)
 
         await asyncio.to_thread(_teardown)
         logger.info("Unregistered robot %s", robot_id)
@@ -143,6 +267,51 @@ class FleetAPI:
             "serial": slot.serial,
         }
 
+    def get_connection_state_dict(
+        self, robot_id: str, *, debounce_seconds: int
+    ) -> Dict[str, Any]:
+        """Snapshot for GET /api/robot/connection-state — slot-aware payload.
+
+        Lives on FleetAPI so the router doesn't reach across the slot →
+        conn → state / slot → debouncer → method abstraction layers.
+        """
+        from services.task_runtime import current_tasks
+
+        slot = self._robots.get(robot_id)
+        if slot is None:
+            return {
+                "robot_id": robot_id,
+                "state": "unregistered",
+                "ip": "",
+                "serial": "",
+                "last_seen": None,
+                "disconnected_at": None,
+                "last_reconnect_at": None,
+                "in_patrol": False,
+                "debounce_seconds": debounce_seconds,
+                "offline_pending": False,
+            }
+        return {
+            "robot_id": slot.robot_id,
+            "state": (
+                "connected"
+                if slot.conn.state == ConnectionState.CONNECTED
+                else "disconnected"
+            ),
+            "ip": slot.ip,
+            "serial": slot.serial,
+            "last_seen": slot.last_seen,
+            "disconnected_at": slot.disconnected_at,
+            "last_reconnect_at": slot.last_reconnect_at,
+            "in_patrol": current_tasks.get(slot.robot_id) is not None,
+            "debounce_seconds": debounce_seconds,
+            "offline_pending": (
+                slot.debouncer.is_offline_pending()
+                if slot.debouncer is not None
+                else False
+            ),
+        }
+
     async def get_all_robots(self) -> Dict[str, Dict]:
         """Return metadata dicts for every registered robot."""
         return {
@@ -162,8 +331,9 @@ class FleetAPI:
         slot = self._robots.get(robot_id)
         if slot is None:
             return False
-        slot.status = status
-        slot.last_seen = time.time()
+        with slot.status_lock:
+            slot.status = status
+            slot.last_seen = time.time()
         return True
 
     # ── controller state / metrics ───────────────────────────────────

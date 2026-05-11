@@ -156,6 +156,11 @@ class DataService {
   // ROBOT APIs (hardcoded robot_id = "kachaka")
   // ═══════════════════════════════════════════════════════════════════════════
 
+  async getRobotConnectionState() {
+    const res = await axios.get('/api/robot/connection-state');
+    return res.data;
+  }
+
   async getRobotLocations() {
     const res = await axios.get(`/kachaka/${this.robotId}/locations`);
     return res.data;
