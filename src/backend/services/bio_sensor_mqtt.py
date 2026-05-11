@@ -43,6 +43,10 @@ class BioSensorMQTTClient:
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
+        # paho's background loop handles reconnection only when these are set
+        # BEFORE loop_start(). Without this, a startup-time broker outage
+        # leaves the singleton dead forever — see sensor.log 2026-05-04+.
+        self.client.reconnect_delay_set(min_delay=1, max_delay=30)
         self.latest_data = None
         self.connected = False
         self._init_database()
@@ -109,13 +113,18 @@ class BioSensorMQTTClient:
         self.client.disconnect()
     
     def start(self):
+        # connect_async + loop_start lets paho's background thread own
+        # retries — a broker that's down at boot will keep retrying with the
+        # configured reconnect_delay_set backoff instead of leaving a dead
+        # singleton that never recovers.
         try:
-            self.client.connect(self.broker, self.port, 60)
-            self.client.loop_start()
+            self.client.connect_async(self.broker, self.port, 60)
         except Exception as e:
-            self.connected = False
-            logger.error(f"Failed to connect to MQTT broker {self.broker}:{self.port}: {e}")
-            raise
+            # connect_async only validates the host string; a raise here is a
+            # config bug, not a network outage. Loop_start still runs so a
+            # later config-fix-and-reload can pick up.
+            logger.error(f"MQTT connect_async rejected {self.broker}:{self.port}: {e}")
+        self.client.loop_start()
 
     def _save_scan_data(self, task_id, data, retry_count, is_valid=False):
         conn = sqlite3.connect(self.db_path)
@@ -153,7 +162,14 @@ class BioSensorMQTTClient:
             task_id = get_now().strftime("%Y%m%d%H%M%S")
 
         if not self.connected:
-            logger.warning("MQTT broker is not connected, will wait for reconnection during scan retries")
+            # paho's loop is already retrying in the background; nudge it once
+            # so a long-idle singleton doesn't have to wait out the full
+            # reconnect_delay backoff window before this scan starts.
+            logger.warning("MQTT broker not connected at scan start; forcing reconnect")
+            try:
+                self.client.reconnect()
+            except Exception as e:
+                logger.warning(f"reconnect() raised (paho loop will keep retrying): {e}")
 
         try:
             from settings.config import get_runtime_settings
