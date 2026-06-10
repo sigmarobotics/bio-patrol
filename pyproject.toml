@@ -6,13 +6,13 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi==0.115.6",
     "grpcio==1.66.1",
-    "kachaka-api==3.10.6",
+    "kachaka-api>=3.16,<4",
     "protobuf==5.27.2",
     "paho-mqtt==2.1.0",
     "httpx>=0.27.0",
     "uvicorn==0.34.0",
     "apscheduler>=3.10.4",
-    "kachaka-sdk-toolkit>=0.3.0",
+    "kachaka-sdk-toolkit>=0.6.1,<0.7",
     "aiomqtt>=2.3.0",
 ]
 

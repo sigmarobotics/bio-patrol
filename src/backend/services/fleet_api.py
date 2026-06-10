@@ -120,6 +120,9 @@ class FleetAPI:
             conn = KachakaConnection.get(ip)
             ping = conn.ping()
             if not ping.get("ok"):
+                # Tear down so the auto-started monitor thread doesn't keep
+                # pinging a bad IP (remove() stops it since toolkit 0.6.1).
+                KachakaConnection.remove(ip)
                 return None, {"ok": False, "error": ping.get("error", "ping failed")}
             return (conn, ping), {"ok": True}
 
@@ -198,13 +201,16 @@ class FleetAPI:
         )
         self._robots[robot_id] = slot
 
-        # Phase 4 — start monitoring + controller. interval=1.0 matches the
-        # controller's _fast_interval; the controller's internal
-        # start_monitoring call is then a no-op (idempotent).
+        # Phase 4 — start controller first, then register the fleet callback.
+        # Since toolkit 0.6.0 start_monitoring() updates the single callback
+        # slot in place, so whoever registers LAST wins it. ctrl.start()
+        # installs the controller's own callback; the fleet callback must
+        # come after (it already delegates to the controller). interval=1.0
+        # matches the controller's _fast_interval so the loop isn't restarted.
         def _start_sync() -> None:
+            ctrl.start()
             conn.start_monitoring(interval=1.0, on_state_change=_on_state_change)
             conn.ensure_resolver()
-            ctrl.start()
 
         try:
             await asyncio.to_thread(_start_sync)
@@ -465,22 +471,59 @@ class FleetAPI:
         return await asyncio.to_thread(slot.cmds.speak, text, **kwargs)
 
     async def dock_shelf(self, robot_id: str, **kwargs: Any) -> dict:
-        """Dock the currently held shelf."""
+        """Dock the currently held shelf (blocks until completion)."""
         slot = self._get_slot(robot_id)
-        return await asyncio.to_thread(slot.cmds.dock_shelf, **kwargs)
+
+        def _run() -> dict:
+            # KachakaCommands is fire-and-accept since toolkit 0.6.0 —
+            # poll so the result reflects completion, not acceptance.
+            accepted = slot.cmds.dock_shelf(**kwargs)
+            if not accepted.get("ok"):
+                return accepted
+            # Give the robot a beat to register the command, otherwise the
+            # poll can read the PREVIOUS command's result (observed on
+            # hardware: elapsed=0.0 echoing the prior move_to_pose).
+            time.sleep(0.5)
+            return slot.cmds.poll_until_complete(timeout=60.0)
+
+        return await asyncio.to_thread(_run)
 
     async def undock_shelf(self, robot_id: str, **kwargs: Any) -> dict:
-        """Undock the currently held shelf."""
+        """Undock the currently held shelf (blocks until completion)."""
         slot = self._get_slot(robot_id)
-        return await asyncio.to_thread(slot.cmds.undock_shelf, **kwargs)
+
+        def _run() -> dict:
+            accepted = slot.cmds.undock_shelf(**kwargs)
+            if not accepted.get("ok"):
+                return accepted
+            time.sleep(0.5)  # let the command register before polling
+            return slot.cmds.poll_until_complete(timeout=60.0)
+
+        return await asyncio.to_thread(_run)
 
     async def move_to_pose(
-        self, robot_id: str, x: float, y: float, yaw: float, **kwargs: Any
+        self,
+        robot_id: str,
+        x: float,
+        y: float,
+        yaw: float,
+        *,
+        timeout: float = 120.0,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
     ) -> dict:
-        """Move to absolute map coordinate (x, y, yaw)."""
+        """Move to absolute map coordinate (blocking, command_id verified)."""
         slot = self._get_slot(robot_id)
         return await asyncio.to_thread(
-            slot.cmds.move_to_pose, x, y, yaw, **kwargs
+            slot.ctrl.move_to_pose,
+            x,
+            y,
+            yaw,
+            timeout=timeout,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
         )
 
     async def cancel_command(self, robot_id: str) -> dict:

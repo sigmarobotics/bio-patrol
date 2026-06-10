@@ -102,8 +102,8 @@ requires-dist = [
     { name = "fastapi", specifier = "==0.115.6" },
     { name = "grpcio", specifier = "==1.66.1" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "kachaka-api", specifier = "==3.10.6" },
-    { name = "kachaka-sdk-toolkit", specifier = ">=0.3.0" },
+    { name = "kachaka-api", specifier = ">=3.16,<4" },
+    { name = "kachaka-sdk-toolkit", specifier = ">=0.6.1,<0.7" },
     { name = "paho-mqtt", specifier = "==2.1.0" },
     { name = "protobuf", specifier = "==5.27.2" },
     { name = "uvicorn", specifier = "==0.34.0" },
@@ -379,21 +379,21 @@ wheels = [
 
 [[package]]
 name = "kachaka-api"
-version = "3.10.6.0"
+version = "3.16.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
     { name = "numpy" },
     { name = "protobuf" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9b/b2/8be6123bd6f270db757bccd59bd9cb9ec318cb60228408cb447f60333399/kachaka_api-3.10.6.0.tar.gz", hash = "sha256:60360ec12c5669427adc205aa01b1df5df8ad64f57c4d9f0f1793d1c5a9375d8", size = 36924, upload-time = "2025-03-28T09:37:14.321Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/2c/33c941029b9445983ed709829770b0d8d98fbe5517f997d0fcc9b6241253/kachaka_api-3.16.1.0.tar.gz", hash = "sha256:ecd0c5d5f7b9f00a9773039285e8b376b97fa59b518debaaf705675bbc75d734", size = 44001, upload-time = "2026-04-28T01:07:01.101Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d2/78/d166a6fb31649da6aae6afd49504b949adc7b791d1ee7e4a07a74e257093/kachaka_api-3.10.6.0-py3-none-any.whl", hash = "sha256:d4b331837f06b24c4471892ff10c2546d217a113b30942d299eac00b88ba5712", size = 42725, upload-time = "2025-03-28T09:37:12.8Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/1c/ffc6c7fc2851daf38768053554aeb4822bc6da98ac541f870b3c56776c2e/kachaka_api-3.16.1.0-py3-none-any.whl", hash = "sha256:27b0bd48cbeed77bbe0642afc16c902a25dd8396f5c6a0b56e10a3e68d3e0b6b", size = 42297, upload-time = "2026-04-28T01:06:59.546Z" },
 ]
 
 [[package]]
 name = "kachaka-sdk-toolkit"
-version = "0.4.1"
+version = "0.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
@@ -401,9 +401,9 @@ dependencies = [
     { name = "mcp", extra = ["cli"] },
     { name = "pillow" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e1/29/7c94c428c581078a958173dfff48ce207efa7d3c0be9e4420fe585b91935/kachaka_sdk_toolkit-0.4.1.tar.gz", hash = "sha256:f93edfb064636b2cc7ff2ddc44632251d8dd14f4a6c6f061f35c56e7630be7bf", size = 148496, upload-time = "2026-04-09T16:02:50.2Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/02/24/7df46caf2c1956c1ad1cd9ff9a97b361e85765425a36c6ee05122774ee18/kachaka_sdk_toolkit-0.6.1.tar.gz", hash = "sha256:1c5dc67ff317f07104b1dd0aac5510a7d6ee4c0afbda4422fa394c066b92455f", size = 173285, upload-time = "2026-06-10T13:12:21.478Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/af/90/2fbc08e5a11ad7c4ba94976cbe509ea467cbfb87de0fae6c1c139875624e/kachaka_sdk_toolkit-0.4.1-py3-none-any.whl", hash = "sha256:95a2bc3d5634bac81ad307a1e943715dfc27bd7cbccde5660d3b40e22729c426", size = 45684, upload-time = "2026-04-09T16:02:48.77Z" },
+    { url = "https://files.pythonhosted.org/packages/e5/77/b24fd596ed71de3d0a6b9bb33d90669ce75712c3aa0b92aa9907f08a8ca6/kachaka_sdk_toolkit-0.6.1-py3-none-any.whl", hash = "sha256:126778f1f64de48baabeae1387dbd244bbf29611cd253162664e9b867c748488", size = 52981, upload-time = "2026-06-10T13:12:20.33Z" },
 ]
 
 [[package]]
