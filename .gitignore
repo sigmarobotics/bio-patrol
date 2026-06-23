@@ -112,6 +112,9 @@ docs/superpowers/
 # Site-specific deployment data (maps, locations, network scans — local only)
 site/
 
+# Partner TLS credentials (certificates + private keys — never commit)
+wisleep-key/
+
 # Local git worktrees (isolated dev workspaces, not committed)
 .worktrees/
 

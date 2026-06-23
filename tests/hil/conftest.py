@@ -26,6 +26,10 @@ def bio_sensor_client(mqtt_settings):
         broker=mqtt_settings["mqtt_broker"],
         port=mqtt_settings["mqtt_port"],
         topic=mqtt_settings["mqtt_topic"],
+        username=mqtt_settings.get("mqtt_username") or None,
+        password=mqtt_settings.get("mqtt_password") or None,
+        tls_cert=mqtt_settings.get("mqtt_tls_cert") or None,
+        tls_key=mqtt_settings.get("mqtt_tls_key") or None,
         db_path=db_path,
     )
     try:

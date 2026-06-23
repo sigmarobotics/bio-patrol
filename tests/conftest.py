@@ -67,8 +67,13 @@ def robot_ip(request, env_test, runtime_settings) -> str:
 
 @pytest.fixture(scope="session")
 def mqtt_settings(runtime_settings) -> dict:
-    keys = ("mqtt_broker", "mqtt_port", "mqtt_topic")
+    keys = ("mqtt_broker", "mqtt_port", "mqtt_topic",
+            "mqtt_username", "mqtt_password", "mqtt_tls_cert", "mqtt_tls_key")
     cfg = {k: runtime_settings.get(k) for k in keys}
     if not cfg["mqtt_broker"] or not cfg["mqtt_topic"]:
         pytest.skip("MQTT broker/topic not configured")
+    # Resolve cert paths relative to project root
+    for path_key in ("mqtt_tls_cert", "mqtt_tls_key"):
+        val = cfg.get(path_key, "")
+        cfg[path_key] = str(PROJECT_ROOT / val) if val else None
     return cfg
