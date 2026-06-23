@@ -2,6 +2,8 @@
 import asyncio
 import json
 import logging
+import os
+import ssl
 from typing import AsyncIterator
 
 import paho.mqtt.client as mqtt
@@ -110,7 +112,9 @@ def _sse_event(msg: str, level: str = "info") -> str:
     return f"data: {payload}\n\n"
 
 
-async def _mqtt_test_client(broker: str, port: int, topic: str, on_message) -> AsyncIterator:
+async def _mqtt_test_client(broker: str, port: int, topic: str, on_message,
+                           username: str = None, password: str = None,
+                           tls_cert: str = None, tls_key: str = None) -> AsyncIterator:
     """Async-generator paho probe: yields SSE log strings as connect/subscribe
     progress, then yields the connected `mqtt.Client` (or `None` on failure)
     as the final event. Caller handles cleanup of the yielded client.
@@ -131,6 +135,11 @@ async def _mqtt_test_client(broker: str, port: int, topic: str, on_message) -> A
             connected.set()
 
     client = mqtt.Client(protocol=mqtt.MQTTv31)
+    if tls_cert and tls_key:
+        client.tls_set(certfile=tls_cert, keyfile=tls_key, cert_reqs=ssl.CERT_NONE)
+        client.tls_insecure_set(True)
+    if username:
+        client.username_pw_set(username, password)
     client.on_connect = _on_connect
     client.on_message = on_message
 
@@ -166,13 +175,27 @@ async def _mqtt_test_client(broker: str, port: int, topic: str, on_message) -> A
 
 # ─── /settings/test-mqtt SSE ────────────────────────────────────────────────
 
+def _get_tls_paths(cfg: dict) -> tuple[str | None, str | None]:
+    """Resolve mqtt_tls_cert / mqtt_tls_key relative to the project root."""
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    cert = cfg.get("mqtt_tls_cert", "")
+    key = cfg.get("mqtt_tls_key", "")
+    return (
+        os.path.join(project_root, cert) if cert else None,
+        os.path.join(project_root, key) if key else None,
+    )
+
+
 @router.get("/settings/test-mqtt")
 async def test_mqtt():
     """MQTT connectivity probe — connects, subscribes, waits up to 15s for any payload."""
     cfg = get_runtime_settings()
     broker = cfg.get("mqtt_broker", "localhost")
-    port = int(cfg.get("mqtt_port", 1883))
+    port = int(cfg.get("mqtt_port", 8883))
     topic = cfg.get("mqtt_topic", "")
+    username = cfg.get("mqtt_username") or None
+    password = cfg.get("mqtt_password") or None
+    tls_cert, tls_key = _get_tls_paths(cfg)
 
     async def generate() -> AsyncIterator[str]:
         received: list[str] = []
@@ -184,7 +207,9 @@ async def test_mqtt():
                 received.append(str(msg.payload))
 
         client = None
-        async for event in _mqtt_test_client(broker, port, topic, on_message):
+        async for event in _mqtt_test_client(broker, port, topic, on_message,
+                                             username=username, password=password,
+                                             tls_cert=tls_cert, tls_key=tls_key):
             if isinstance(event, str):
                 yield event
             else:
@@ -226,8 +251,11 @@ async def test_bio_scan():
     """Simulate a full bio-scan cycle using saved settings — initial wait then retry loop."""
     cfg = get_runtime_settings()
     broker = cfg.get("mqtt_broker", "localhost")
-    port = int(cfg.get("mqtt_port", 1883))
+    port = int(cfg.get("mqtt_port", 8883))
     topic = cfg.get("mqtt_topic", "")
+    username = cfg.get("mqtt_username") or None
+    password = cfg.get("mqtt_password") or None
+    tls_cert, tls_key = _get_tls_paths(cfg)
     wait_time = int(cfg.get("bio_scan_wait_time", 10))
     retry_count = int(cfg.get("bio_scan_retry_count", 19))
     initial_wait = int(cfg.get("bio_scan_initial_wait", 120))
@@ -248,7 +276,9 @@ async def test_bio_scan():
         )
 
         client = None
-        async for event in _mqtt_test_client(broker, port, topic, on_message):
+        async for event in _mqtt_test_client(broker, port, topic, on_message,
+                                             username=username, password=password,
+                                             tls_cert=tls_cert, tls_key=tls_key):
             if isinstance(event, str):
                 yield event
             else:

@@ -109,6 +109,9 @@ docs/superpowers/
 # Sigma session context (local state, not committed)
 .sigma/
 
+# Site-specific deployment data (maps, locations, network scans — local only)
+site/
+
 # Local git worktrees (isolated dev workspaces, not committed)
 .worktrees/
 

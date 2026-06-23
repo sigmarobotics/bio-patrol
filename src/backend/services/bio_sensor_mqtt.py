@@ -2,6 +2,7 @@
 MQTT client for receiving physiological sensor data.
 """
 import json
+import ssl
 import paho.mqtt.client as mqtt
 import logging
 import os
@@ -26,7 +27,8 @@ def is_valid_scan(record: dict, valid_status: int) -> bool:
 
 
 class BioSensorMQTTClient:
-    def __init__(self, broker="localhost", port=1803, topic="/my/default/channel", db_path=None):
+    def __init__(self, broker="localhost", port=8883, topic="/my/default/channel",
+                 username=None, password=None, tls_cert=None, tls_key=None, db_path=None):
         self.broker = broker
         self.port = port
         self.topic = topic
@@ -40,6 +42,11 @@ class BioSensorMQTTClient:
             self.db_path = db_path
 
         self.client = mqtt.Client(protocol=mqtt.MQTTv31)
+        if tls_cert and tls_key:
+            self.client.tls_set(certfile=tls_cert, keyfile=tls_key, cert_reqs=ssl.CERT_NONE)
+            self.client.tls_insecure_set(True)
+        if username:
+            self.client.username_pw_set(username, password)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
