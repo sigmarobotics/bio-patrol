@@ -8,7 +8,7 @@ from typing import AsyncIterator
 
 import paho.mqtt.client as mqtt
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 
 import lifespan_state
@@ -102,6 +102,68 @@ async def save_settings(body: dict):
             logger.error(f"Re-register raised: {e}")
             response["robot_re_register"] = {"ok": False, "error": str(e)}
     return response
+
+
+# ─── TLS cert/key management ────────────────────────────────────────────────
+
+def _project_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+
+@router.get("/settings/tls-status")
+async def tls_status():
+    """Return existence + size of the configured TLS cert and key files."""
+    cfg = get_runtime_settings()
+    root = _project_root()
+
+    def _info(rel_path: str) -> dict:
+        if not rel_path:
+            return {"path": "", "exists": False, "size": 0}
+        abs_path = os.path.join(root, rel_path)
+        exists = os.path.isfile(abs_path)
+        return {
+            "path": rel_path,
+            "exists": exists,
+            "size": os.path.getsize(abs_path) if exists else 0,
+        }
+
+    return {
+        "cert": _info(cfg.get("mqtt_tls_cert", "")),
+        "key": _info(cfg.get("mqtt_tls_key", "")),
+    }
+
+
+@router.post("/settings/upload-tls")
+async def upload_tls(
+    cert: UploadFile = File(None, description="PEM client certificate (.crt)"),
+    key: UploadFile = File(None, description="PEM private key (.key)"),
+):
+    """Upload TLS client cert and/or key into the configured wisleep-key/ directory."""
+    if cert is None and key is None:
+        raise HTTPException(status_code=400, detail="Provide at least one of cert or key")
+
+    cfg = get_runtime_settings()
+    root = _project_root()
+    saved = {}
+
+    for field, upload, setting_key in [
+        ("cert", cert, "mqtt_tls_cert"),
+        ("key", key, "mqtt_tls_key"),
+    ]:
+        if upload is None:
+            continue
+        rel_path = cfg.get(setting_key, f"wisleep-key/sigmabot.{'crt' if field == 'cert' else 'key'}")
+        abs_path = os.path.join(root, rel_path)
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        content = await upload.read()
+        if not content:
+            raise HTTPException(status_code=400, detail=f"{field} file is empty")
+        with open(abs_path, "wb") as f:
+            f.write(content)
+        saved[field] = {"path": rel_path, "size": len(content)}
+        logger.info(f"TLS {field} saved to {abs_path} ({len(content)} bytes)")
+
+    return {"status": "ok", "saved": saved}
 
 
 # ─── SSE-test helpers ────────────────────────────────────────────────────────

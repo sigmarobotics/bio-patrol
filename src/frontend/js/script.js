@@ -1139,6 +1139,8 @@ const SETTINGS_MAP = [
   { id: 'setting-mqtt-broker', key: 'mqtt_broker' },
   { id: 'setting-mqtt-port', key: 'mqtt_port', type: 'number' },
   { id: 'setting-mqtt-topic', key: 'mqtt_topic' },
+  { id: 'setting-mqtt-username', key: 'mqtt_username' },
+  { id: 'setting-mqtt-password', key: 'mqtt_password' },
   { id: 'setting-mqtt-enabled', key: 'mqtt_enabled', type: 'checkbox' },
   { id: 'setting-bio-scan-wait-time', key: 'bio_scan_wait_time', type: 'number' },
   { id: 'setting-bio-scan-retry-count', key: 'bio_scan_retry_count', type: 'number' },
@@ -1259,8 +1261,53 @@ async function loadSettings() {
     console.error('Failed to load settings:', e);
   }
   loadMapList();
+  loadTlsStatus();
   if (typeof window.loadButtons === 'function') {
     window.loadButtons();
+  }
+}
+
+async function loadTlsStatus() {
+  const el = document.getElementById('tls-status-display');
+  if (!el) return;
+  try {
+    const res = await axios.get('/api/settings/tls-status');
+    const { cert, key } = res.data;
+    const fmt = (f) => f.exists
+      ? `<span style="color:var(--success)">✓ ${f.path} (${f.size}B)</span>`
+      : `<span style="color:var(--warning)">✗ 未上傳 (${f.path || '未設定'})</span>`;
+    el.innerHTML = `Cert: ${fmt(cert)}<br>Key: ${fmt(key)}`;
+  } catch {
+    el.textContent = '憑證狀態載入失敗';
+  }
+}
+
+async function uploadTlsCerts() {
+  const certFile = document.getElementById('tls-cert-file').files[0];
+  const keyFile = document.getElementById('tls-key-file').files[0];
+  const statusEl = document.getElementById('tls-upload-status');
+
+  if (!certFile && !keyFile) {
+    statusEl.textContent = '請選擇至少一個檔案';
+    return;
+  }
+
+  const form = new FormData();
+  if (certFile) form.append('cert', certFile);
+  if (keyFile) form.append('key', keyFile);
+
+  statusEl.textContent = '上傳中…';
+  try {
+    const res = await axios.post('/api/settings/upload-tls', form);
+    const saved = res.data.saved || {};
+    const parts = [];
+    if (saved.cert) parts.push(`cert (${saved.cert.size}B)`);
+    if (saved.key) parts.push(`key (${saved.key.size}B)`);
+    statusEl.innerHTML = `<span style="color:var(--success)">✓ 已上傳：${parts.join('、')}</span>`;
+    loadTlsStatus();
+  } catch (e) {
+    const msg = e?.response?.data?.detail || e.message;
+    statusEl.innerHTML = `<span style="color:var(--error)">✗ 上傳失敗：${msg}</span>`;
   }
 }
 
