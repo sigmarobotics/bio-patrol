@@ -132,3 +132,16 @@ tests/e2e/playwright-report/
 tests/e2e/package-lock.json
 tests/e2e/screenshots/
 test-results/
+
+# Wisleep mTLS cert bundle (contains private key — never commit; canonical copy in wisleep-key/)
+sigmabot.zip
+*.zip
+
+# Zigbee2MQTT runtime state (regenerated each run — not source)
+zigbee2mqtt/*.db
+zigbee2mqtt/state.json
+zigbee2mqtt/configuration_backup_*.yaml
+
+# Local design-iteration artifacts (mockups + visual specs — not product assets)
+round*-*.png
+*-visual-spec.md
