@@ -1950,3 +1950,31 @@ input[type="checkbox"]:checked::after {
   text-align: center;
   margin-top: auto;
 }
+
+/* ─── IT-12: LINE 通報群組選擇清單 ─────────────────────────────────────── */
+.line-group-list {
+    border: 1px solid var(--border-subtle);
+    background: var(--void);
+    padding: 8px 12px;
+    max-height: 180px;
+    overflow-y: auto;
+}
+.line-group-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    cursor: pointer;
+}
+.line-group-item input {
+    width: auto;
+}
+.line-group-item .line-group-type {
+    font-family: var(--font-display);
+    font-size: 9px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    border: 1px solid var(--border-subtle);
+    padding: 1px 6px;
+}

@@ -16,10 +16,13 @@ class RecipientResolver(Protocol):
 
 
 class StaticResolver:
-    """Returns the single recipient configured in settings, per channel."""
+    """Returns the recipients configured in settings, per channel."""
 
     async def resolve(self, event: AnomalyEvent, channel: str) -> list[str]:
-        if channel != "telegram":
-            return []  # MQTT publishes to topic — no recipient list
-        uid = get_runtime_settings().get("telegram_user_id", "") or ""
-        return [uid] if uid else []
+        cfg = get_runtime_settings()
+        if channel == "telegram":
+            uid = cfg.get("telegram_user_id", "") or ""
+            return [uid] if uid else []
+        if channel == "line":
+            return [gid for gid in cfg.get("line_group_ids", []) if gid]
+        return []  # MQTT publishes to topic — no recipient list

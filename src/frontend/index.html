@@ -453,6 +453,38 @@
 
           <div>
             <div class="glass-panel">
+              <h3>LINE Notifications</h3>
+              <div class="form-group" style="display:flex;align-items:center;gap:12px;">
+                <input type="checkbox" id="setting-enable-line" style="width:auto;">
+                <label for="setting-enable-line" style="margin:0;cursor:pointer;">Enable LINE</label>
+              </div>
+              <div class="form-group">
+                <label>Channel Access Token</label>
+                <input type="password" id="setting-line-channel-access-token" placeholder="Enter channel access token">
+              </div>
+              <div class="form-group">
+                <label>Webhook 服務 URL</label>
+                <input type="text" id="setting-line-webhook-url" placeholder="https://line-webhook-xxxx.run.app">
+              </div>
+              <div class="form-group">
+                <label>Webhook API Key</label>
+                <input type="password" id="setting-line-webhook-api-key" placeholder="Enter groups API key">
+              </div>
+              <div class="form-group">
+                <label>通報群組</label>
+                <div id="line-group-list" class="line-group-list">
+                  <p class="test-note">按「載入群組」取得 bot 已加入的群組／好友。</p>
+                </div>
+                <div style="display:flex;gap:8px;margin-top:8px;">
+                  <button type="button" class="btn-secondary" id="btn-load-line-groups" onclick="loadLineGroups()">載入群組</button>
+                  <button type="button" class="btn-secondary" id="btn-test-line" onclick="testLine()">測試發送</button>
+                </div>
+                <p class="test-note">將 bot（@850pdvwr）邀進 LINE 群組後按「載入群組」，勾選要通報的對象再 Save Settings。「測試發送」使用已儲存的設定。</p>
+                <p id="line-test-status" class="test-note"></p>
+              </div>
+            </div>
+
+            <div class="glass-panel">
               <h3>AI Integration</h3>
               <p class="test-note">未來的「依班表派送」recipient resolver 將使用此 API key。</p>
               <div class="form-group">

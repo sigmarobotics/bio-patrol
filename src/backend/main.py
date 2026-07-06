@@ -131,10 +131,12 @@ async def lifespan(app: FastAPI):
         from services.notifications.dispatcher import dispatcher
         from services.notifications.recipients import StaticResolver
         from services.notifications.sinks.telegram import TelegramSink
+        from services.notifications.sinks.line import LineSink
         from services.notifications.sinks.mqtt import MqttSink
         dispatcher.register(TelegramSink(StaticResolver()))
+        dispatcher.register(LineSink(StaticResolver()))
         dispatcher.register(MqttSink(zigbee_mqtt=zigbee_mqtt))
-        logger.info("Anomaly dispatcher initialised: TelegramSink + MqttSink registered")
+        logger.info("Anomaly dispatcher initialised: TelegramSink + LineSink + MqttSink registered")
 
         if cfg.get("mqtt_enabled"):
             try:
@@ -194,6 +196,12 @@ async def lifespan(app: FastAPI):
             await telegram_service.aclose_client()
         except Exception:
             logger.exception("Error closing telegram HTTP client")
+
+        try:
+            from services import line_service
+            await line_service.aclose_client()
+        except Exception:
+            logger.exception("Error closing LINE HTTP client")
 
         if zigbee_mqtt:
             try:

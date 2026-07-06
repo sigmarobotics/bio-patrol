@@ -23,6 +23,13 @@ DEFAULT_SETTINGS = {
     "enable_telegram": False,
     "telegram_bot_token": "",
     "telegram_user_id": "",
+    # IT-12: LINE push 通報。line_group_ids 是 webhook 服務捕捉到的 group/user id 清單
+    # （由 Settings UI 勾選）；line_webhook_url/api_key 指向 GCP xinyin7f 的 Cloud Run 服務。
+    "enable_line": False,
+    "line_channel_access_token": "",
+    "line_group_ids": [],
+    "line_webhook_url": "",
+    "line_webhook_api_key": "",
     "gemini_api_key": "",
     "active_map": "",
     "shelf_id": "S_04",
