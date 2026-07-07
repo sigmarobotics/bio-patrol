@@ -131,10 +131,12 @@ async def lifespan(app: FastAPI):
         from services.notifications.dispatcher import dispatcher
         from services.notifications.recipients import StaticResolver
         from services.notifications.sinks.telegram import TelegramSink
+        from services.notifications.sinks.line import LineSink
         from services.notifications.sinks.mqtt import MqttSink
         dispatcher.register(TelegramSink(StaticResolver()))
+        dispatcher.register(LineSink(StaticResolver()))
         dispatcher.register(MqttSink(zigbee_mqtt=zigbee_mqtt))
-        logger.info("Anomaly dispatcher initialised: TelegramSink + MqttSink registered")
+        logger.info("Anomaly dispatcher initialised: TelegramSink + LineSink + MqttSink registered")
 
         if cfg.get("mqtt_enabled"):
             try:
@@ -181,9 +183,21 @@ async def lifespan(app: FastAPI):
         yield
 
         # Cleanup
-        # Drain in-flight notifications first so a container restart does not
-        # silently cancel a Telegram POST mid-flight. 3-second cap trades
-        # shutdown latency against message durability.
+        if zigbee_mqtt:
+            try:
+                await zigbee_mqtt.stop()
+            except Exception:
+                pass
+        if bio_sensor_client:
+            bio_sensor_client.stop()
+        await scheduler_service.stop()
+        # Single helper drains retries → workers → unregister in order.
+        await lifespan_state.shutdown_robot_tasks(fleet_client)
+
+        # Cancelled task workers dispatch their TASK_SUMMARY events (巡房已取消)
+        # from their finally blocks, so the notification drain and HTTP client
+        # close must run AFTER shutdown_robot_tasks or those sends are lost.
+        # 3-second cap trades shutdown latency against message durability.
         try:
             await dispatcher.drain(timeout=3.0)
         except Exception:
@@ -195,16 +209,12 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Error closing telegram HTTP client")
 
-        if zigbee_mqtt:
-            try:
-                await zigbee_mqtt.stop()
-            except Exception:
-                pass
-        if bio_sensor_client:
-            bio_sensor_client.stop()
-        await scheduler_service.stop()
-        # Single helper drains retries → workers → unregister in order.
-        await lifespan_state.shutdown_robot_tasks(fleet_client)
+        try:
+            from services import line_service
+            await line_service.aclose_client()
+        except Exception:
+            logger.exception("Error closing LINE HTTP client")
+
         logger.info("Application shutdown: Clean up completed.")
     except Exception as e:
         logger.error(f"Error during application startup: {e}")

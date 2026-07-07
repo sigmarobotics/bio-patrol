@@ -1,4 +1,4 @@
-"""HIL fixtures — real bio-sensor MQTT broker."""
+"""HIL fixtures — real bio-sensor MQTT broker + shared anomaly-event factory."""
 from __future__ import annotations
 
 import tempfile
@@ -7,6 +7,28 @@ import time
 import pytest
 
 CONNECT_TIMEOUT_S = 10.0
+
+
+@pytest.fixture
+def make_failure_event():
+    """Canonical bio-scan-failure AnomalyEvent shared by the sink E2E tests."""
+    from services.notifications.evaluator import ScanOutcome, BioScanFailureEvaluator
+
+    def _make(task_id: str = "hil-test"):
+        outcome = ScanOutcome(
+            task_id=task_id,
+            location_id="hil-101-1",
+            bed_name="HIL-101-1",
+            valid_record=None,
+            retry_count=19,
+            last_record_raw={"status": 2, "bpm": 0, "rpm": 0, "details": "無有效量測數值"},
+            last_failure_reason="無有效量測數值",
+        )
+        event = BioScanFailureEvaluator().evaluate(outcome)
+        assert event is not None
+        return event
+
+    return _make
 
 
 @pytest.fixture(scope="session")

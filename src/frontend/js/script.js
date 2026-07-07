@@ -1152,6 +1152,10 @@ const SETTINGS_MAP = [
   { id: 'setting-enable-telegram', key: 'enable_telegram', type: 'checkbox' },
   { id: 'setting-telegram-bot-token', key: 'telegram_bot_token' },
   { id: 'setting-telegram-user-id', key: 'telegram_user_id' },
+  { id: 'setting-enable-line', key: 'enable_line', type: 'checkbox' },
+  { id: 'setting-line-channel-access-token', key: 'line_channel_access_token' },
+  { id: 'setting-line-webhook-url', key: 'line_webhook_url' },
+  { id: 'setting-line-webhook-api-key', key: 'line_webhook_api_key' },
   { id: 'setting-enable-mqtt-egress', key: 'enable_mqtt_egress', type: 'checkbox' },
   { id: 'setting-mqtt-egress-topic-prefix', key: 'mqtt_egress_topic_prefix' },
   { id: 'setting-gemini-api-key', key: 'gemini_api_key' },
@@ -1159,6 +1163,93 @@ const SETTINGS_MAP = [
   { id: 'setting-bed-card-stale-hours', key: 'bed_card_stale_hours', type: 'number' },
   { id: 'robot-offline-debounce-seconds', key: 'robot_offline_debounce_seconds', type: 'number' },
 ];
+
+// ─── LINE 通報群組選擇 ──────────────────────────────────────────────────────
+// line_group_ids 是陣列，不走 SETTINGS_MAP 的 scalar 流程。清單成功載入後
+// 以 #line-group-list 的 data-loaded 標記，saveSettings 才收集勾選。
+
+async function loadLineGroups() {
+  const btn = document.getElementById('btn-load-line-groups');
+  const container = document.getElementById('line-group-list');
+  const original = btn.textContent;
+  btn.textContent = '載入中…';
+  btn.disabled = true;
+
+  try {
+    // 每次都重抓已存設定 — 不依賴 loadSettings 的全域狀態（可能還沒完成或失敗）。
+    const [settings, res] = await Promise.all([
+      dataService.getSettings(),
+      axios.get('/api/line/groups'),
+    ]);
+    const savedIds = Array.isArray(settings.line_group_ids) ? settings.line_group_ids : [];
+    const sources = res.data.sources || [];
+
+    container.innerHTML = '';
+    const render = (id, name, badgeText, checked) => {
+      const label = document.createElement('label');
+      label.className = 'line-group-item';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = id;
+      cb.checked = checked;
+      const nameEl = document.createElement('span');
+      nameEl.textContent = name;
+      const badge = document.createElement('span');
+      badge.className = 'line-group-type';
+      badge.textContent = badgeText;
+      label.append(cb, nameEl, badge);
+      container.appendChild(label);
+    };
+
+    sources.forEach(s => render(s.id, s.name || s.id, s.type, savedIds.includes(s.id)));
+    // 已儲存但不在 webhook 清單裡的 id（webhook 換新、資料被清等）仍要顯示並保留勾選，
+    // 否則按 Save 會被靜默洗掉。
+    savedIds.filter(id => !sources.some(s => s.id === id))
+      .forEach(id => render(id, id, '已儲存·不在清單', true));
+
+    if (!container.children.length) {
+      container.innerHTML = '<p class="test-note">尚未捕捉到任何群組——請先把 bot 邀進 LINE 群組（或加好友傳訊息）後重新載入。</p>';
+    }
+    container.dataset.loaded = '1';
+  } catch (e) {
+    const detail = e?.response?.data?.detail || e.message;
+    const p = document.createElement('p');
+    p.className = 'test-note';
+    p.style.color = 'var(--coral)';
+    p.textContent = `載入失敗：${detail}`;
+    container.replaceChildren(p);
+  } finally {
+    btn.textContent = original;
+    btn.disabled = false;
+  }
+}
+
+async function testLine() {
+  const btn = document.getElementById('btn-test-line');
+  const el = document.getElementById('line-test-status');
+  const original = btn.textContent;
+  btn.textContent = '發送中…';
+  btn.disabled = true;
+
+  try {
+    const res = await axios.post('/api/settings/test-line');
+    const results = res.data.results || {};
+    const total = Object.keys(results).length;
+    const okCount = Object.values(results).filter(Boolean).length;
+    el.innerHTML = res.data.status === 'ok'
+      ? `<span style="color:var(--mint)">✓ 已發送到 ${total} 個對象</span>`
+      : `<span style="color:var(--coral)">✗ 僅 ${okCount}/${total} 成功（詳見後端 log）</span>`;
+  } catch (e) {
+    const detail = e?.response?.data?.detail || e.message;
+    const span = document.createElement('span');
+    span.style.color = 'var(--coral)';
+    span.textContent = `✗ ${detail}`;
+    el.replaceChildren(span);
+  } finally {
+    btn.textContent = original;
+    btn.disabled = false;
+  }
+}
 
 async function fetchShelves() {
   const btn = document.getElementById('btn-fetch-shelves');
@@ -1257,6 +1348,12 @@ async function loadSettings() {
         el.value = settings[key] ?? '';
       }
     });
+    const savedLineIds = Array.isArray(settings.line_group_ids) ? settings.line_group_ids : [];
+    const lineList = document.getElementById('line-group-list');
+    if (savedLineIds.length && lineList && lineList.dataset.loaded !== '1') {
+      lineList.innerHTML =
+        `<p class="test-note">已選擇 ${savedLineIds.length} 個通報對象——按「載入群組」顯示名稱。</p>`;
+    }
   } catch (e) {
     console.error('Failed to load settings:', e);
   }
@@ -1324,6 +1421,13 @@ async function saveSettings() {
       data[key] = el.value;
     }
   });
+
+  // 群組清單只有在成功載入後才收集，避免未載入時把已存的勾選洗掉。
+  const lineList = document.getElementById('line-group-list');
+  if (lineList?.dataset.loaded === '1') {
+    data.line_group_ids = [...lineList.querySelectorAll('input[type="checkbox"]:checked')]
+      .map(cb => cb.value);
+  }
 
   try {
     await dataService.saveSettings(data);

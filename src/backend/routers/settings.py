@@ -6,6 +6,7 @@ import os
 import ssl
 from typing import AsyncIterator
 
+import httpx
 import paho.mqtt.client as mqtt
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
@@ -15,6 +16,8 @@ import lifespan_state
 from settings.config import SETTINGS_FILE, get_runtime_settings, update_settings
 from utils.json_io import load_json, save_json
 from services.bio_sensor_mqtt import is_valid_scan
+from services.line_service import send_line_message
+from services.notifications.recipients import StaticResolver
 from services.task_runtime import engines, task_queues, task_worker, TaskEngine
 
 DEFAULT_ROBOT_PORT = 26400
@@ -397,3 +400,47 @@ async def test_bio_scan():
         yield _sse_event("Test complete.", "done")
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+# ─── LINE notification endpoints ─────────────────────────────────────────────
+
+@router.get("/line/groups")
+async def line_groups():
+    """Proxy the LINE webhook service's recorded push targets (groups/users)."""
+    cfg = get_runtime_settings()
+    base_url = (cfg.get("line_webhook_url", "") or "").rstrip("/")
+    if not base_url:
+        raise HTTPException(status_code=400, detail="line_webhook_url is not set in settings")
+    headers = {"Authorization": f"Bearer {cfg.get('line_webhook_api_key', '')}"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.get(f"{base_url}/groups", headers=headers)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"LINE webhook service unreachable: {e}")
+    if res.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"LINE webhook service returned {res.status_code}: {res.text[:200]}",
+        )
+    try:
+        return res.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="LINE webhook service returned a non-JSON response")
+
+
+@router.post("/settings/test-line")
+async def test_line():
+    """Push a test message to every selected LINE target using saved settings."""
+    cfg = get_runtime_settings()
+    if not cfg.get("enable_line", False):
+        raise HTTPException(status_code=400, detail="enable_line is off")
+    if not cfg.get("line_channel_access_token"):
+        raise HTTPException(status_code=400, detail="line_channel_access_token is not set")
+    # Resolve through the same path real anomaly dispatch uses.
+    targets = await StaticResolver().resolve(None, channel="line")
+    if not targets:
+        raise HTTPException(status_code=400, detail="no LINE target selected (line_group_ids is empty)")
+    results = await asyncio.gather(
+        *(send_line_message("🔔 bio-patrol LINE 通報測試訊息", to=t) for t in targets)
+    )
+    ok = all(results)
+    return {"status": "ok" if ok else "error", "results": dict(zip(targets, results))}

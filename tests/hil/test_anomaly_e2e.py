@@ -16,8 +16,6 @@ import aiomqtt
 import httpx
 
 from services.notifications.dispatcher import AnomalyDispatcher
-from services.notifications.events import AnomalyEvent
-from services.notifications.evaluator import ScanOutcome, BioScanFailureEvaluator
 from services.notifications.recipients import StaticResolver
 from services.notifications.sinks.mqtt import MqttSink
 from services.notifications.sinks.telegram import TelegramSink
@@ -52,24 +50,9 @@ def telegram_settings(telegram_creds, monkeypatch):
     return fake
 
 
-def _make_failure_event() -> AnomalyEvent:
-    outcome = ScanOutcome(
-        task_id="hil-test",
-        location_id="hil-101-1",
-        bed_name="HIL-101-1",
-        valid_record=None,
-        retry_count=19,
-        last_record_raw={"status": 2, "bpm": 0, "rpm": 0, "details": "無有效量測數值"},
-        last_failure_reason="無有效量測數值",
-    )
-    event = BioScanFailureEvaluator().evaluate(outcome)
-    assert event is not None
-    return event
-
-
 @pytest.mark.hil
 @pytest.mark.slow
-def test_dispatcher_publishes_to_telegram(telegram_settings):
+def test_dispatcher_publishes_to_telegram(telegram_settings, make_failure_event):
     """Real bot, real chat. Verifies the bot is reachable and dispatch completes without error.
 
     Visual confirmation in the chat is the human-side verification.
@@ -77,7 +60,7 @@ def test_dispatcher_publishes_to_telegram(telegram_settings):
     async def _run():
         d = AnomalyDispatcher()
         d.register(TelegramSink(StaticResolver()))
-        await d.dispatch(_make_failure_event())
+        await d.dispatch(make_failure_event())
         await d.drain(timeout=15.0)
 
     asyncio.run(_run())
@@ -90,7 +73,7 @@ def test_dispatcher_publishes_to_telegram(telegram_settings):
 
 
 @pytest.mark.hil
-def test_dispatcher_publishes_to_internal_mqtt(telegram_settings):
+def test_dispatcher_publishes_to_internal_mqtt(telegram_settings, make_failure_event):
     """Real internal mosquitto. Subscribe + dispatch + assert receipt within 5s.
 
     Requires a local broker on localhost:1883 — skips cleanly if unavailable.
@@ -110,7 +93,7 @@ def test_dispatcher_publishes_to_internal_mqtt(telegram_settings):
 
         d = AnomalyDispatcher()
         d.register(MqttSink())
-        await d.dispatch(_make_failure_event())
+        await d.dispatch(make_failure_event())
         await d.drain(timeout=10.0)
 
         await asyncio.wait_for(consume_task, timeout=5.0)
@@ -132,7 +115,7 @@ def test_dispatcher_publishes_to_internal_mqtt(telegram_settings):
 
 
 @pytest.mark.hil
-def test_one_sink_failure_does_not_block_other_sinks(telegram_settings, monkeypatch):
+def test_one_sink_failure_does_not_block_other_sinks(telegram_settings, monkeypatch, make_failure_event):
     """Force MqttSink to fail by pointing it at an unreachable port; dispatch completes cleanly.
 
     The TelegramSink should still ship its message (visual confirm). The dispatch+drain call
@@ -146,7 +129,7 @@ def test_one_sink_failure_does_not_block_other_sinks(telegram_settings, monkeypa
         d = AnomalyDispatcher()
         d.register(TelegramSink(StaticResolver()))
         d.register(MqttSink())
-        await d.dispatch(_make_failure_event())
+        await d.dispatch(make_failure_event())
         await d.drain(timeout=15.0)
 
     asyncio.run(_run())  # if this raises, the isolation is broken
