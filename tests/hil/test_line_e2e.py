@@ -13,8 +13,8 @@ import asyncio
 
 import pytest
 
+from services import line_service
 from services.notifications.dispatcher import AnomalyDispatcher
-from services.notifications.evaluator import ScanOutcome, BioScanFailureEvaluator
 from services.notifications.recipients import StaticResolver
 from services.notifications.sinks.line import LineSink
 
@@ -43,29 +43,12 @@ def line_settings(line_creds, monkeypatch):
     return fake
 
 
-def _make_failure_event():
-    outcome = ScanOutcome(
-        task_id="hil-line-test",
-        location_id="hil-101-1",
-        bed_name="HIL-101-1",
-        valid_record=None,
-        retry_count=19,
-        last_record_raw={"status": 2, "bpm": 0, "rpm": 0, "details": "無有效量測數值"},
-        last_failure_reason="無有效量測數值",
-    )
-    event = BioScanFailureEvaluator().evaluate(outcome)
-    assert event is not None
-    return event
-
-
 @pytest.mark.hil
 @pytest.mark.slow
-def test_dispatcher_pushes_to_line(line_settings):
+def test_dispatcher_pushes_to_line(line_settings, make_failure_event, monkeypatch):
     """Real LINE push to the configured target. send_line_message must return True
     (LINE API 200) — visual confirmation in the group is the human-side check.
     """
-    from services import line_service
-
     sent: list[bool] = []
     orig = line_service.send_line_message
 
@@ -74,17 +57,13 @@ def test_dispatcher_pushes_to_line(line_settings):
         sent.append(ok)
         return ok
 
+    monkeypatch.setattr("services.notifications.sinks.line.send_line_message", _tracking)
+
     async def _run():
-        import services.notifications.sinks.line as line_sink_mod
-        original = line_sink_mod.send_line_message
-        line_sink_mod.send_line_message = _tracking
-        try:
-            d = AnomalyDispatcher()
-            d.register(LineSink(StaticResolver()))
-            await d.dispatch(_make_failure_event())
-            await d.drain(timeout=15.0)
-        finally:
-            line_sink_mod.send_line_message = original
+        d = AnomalyDispatcher()
+        d.register(LineSink(StaticResolver()))
+        await d.dispatch(make_failure_event("hil-line-test"))
+        await d.drain(timeout=15.0)
 
     asyncio.run(_run())
     assert sent == [True], f"LINE push failed: {sent}"

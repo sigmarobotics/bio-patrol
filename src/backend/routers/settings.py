@@ -17,6 +17,7 @@ from settings.config import SETTINGS_FILE, get_runtime_settings, update_settings
 from utils.json_io import load_json, save_json
 from services.bio_sensor_mqtt import is_valid_scan
 from services.line_service import send_line_message
+from services.notifications.recipients import StaticResolver
 from services.task_runtime import engines, task_queues, task_worker, TaskEngine
 
 DEFAULT_ROBOT_PORT = 26400
@@ -416,8 +417,14 @@ async def line_groups():
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"LINE webhook service unreachable: {e}")
     if res.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"LINE webhook service returned {res.status_code}")
-    return res.json()
+        raise HTTPException(
+            status_code=502,
+            detail=f"LINE webhook service returned {res.status_code}: {res.text[:200]}",
+        )
+    try:
+        return res.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="LINE webhook service returned a non-JSON response")
 
 
 @router.post("/settings/test-line")
@@ -426,7 +433,10 @@ async def test_line():
     cfg = get_runtime_settings()
     if not cfg.get("enable_line", False):
         raise HTTPException(status_code=400, detail="enable_line is off")
-    targets = [g for g in cfg.get("line_group_ids", []) if g]
+    if not cfg.get("line_channel_access_token"):
+        raise HTTPException(status_code=400, detail="line_channel_access_token is not set")
+    # Resolve through the same path real anomaly dispatch uses.
+    targets = await StaticResolver().resolve(None, channel="line")
     if not targets:
         raise HTTPException(status_code=400, detail="no LINE target selected (line_group_ids is empty)")
     results = await asyncio.gather(

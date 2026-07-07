@@ -60,6 +60,15 @@ def test_resolver_line_channel_defaults_to_empty():
         assert asyncio.run(StaticResolver().resolve(_event(), channel="line")) == []
 
 
+def test_resolver_line_channel_tolerates_malformed_settings():
+    """settings.json is merged unvalidated — null/string/int must not raise
+    (or worse, iterate a string per character → one push per char)."""
+    for bad in (None, "Cgid-as-bare-string", 42):
+        with patch("services.notifications.recipients.get_runtime_settings",
+                   return_value={"line_group_ids": bad}):
+            assert asyncio.run(StaticResolver().resolve(_event(), channel="line")) == []
+
+
 def test_send_no_targets_makes_no_api_call():
     sink = LineSink(StaticResolver())
     with patch("services.notifications.recipients.get_runtime_settings",

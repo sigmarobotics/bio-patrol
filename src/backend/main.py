@@ -183,9 +183,21 @@ async def lifespan(app: FastAPI):
         yield
 
         # Cleanup
-        # Drain in-flight notifications first so a container restart does not
-        # silently cancel a Telegram POST mid-flight. 3-second cap trades
-        # shutdown latency against message durability.
+        if zigbee_mqtt:
+            try:
+                await zigbee_mqtt.stop()
+            except Exception:
+                pass
+        if bio_sensor_client:
+            bio_sensor_client.stop()
+        await scheduler_service.stop()
+        # Single helper drains retries → workers → unregister in order.
+        await lifespan_state.shutdown_robot_tasks(fleet_client)
+
+        # Cancelled task workers dispatch their TASK_SUMMARY events (巡房已取消)
+        # from their finally blocks, so the notification drain and HTTP client
+        # close must run AFTER shutdown_robot_tasks or those sends are lost.
+        # 3-second cap trades shutdown latency against message durability.
         try:
             await dispatcher.drain(timeout=3.0)
         except Exception:
@@ -203,16 +215,6 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Error closing LINE HTTP client")
 
-        if zigbee_mqtt:
-            try:
-                await zigbee_mqtt.stop()
-            except Exception:
-                pass
-        if bio_sensor_client:
-            bio_sensor_client.stop()
-        await scheduler_service.stop()
-        # Single helper drains retries → workers → unregister in order.
-        await lifespan_state.shutdown_robot_tasks(fleet_client)
         logger.info("Application shutdown: Clean up completed.")
     except Exception as e:
         logger.error(f"Error during application startup: {e}")

@@ -24,5 +24,9 @@ class StaticResolver:
             uid = cfg.get("telegram_user_id", "") or ""
             return [uid] if uid else []
         if channel == "line":
-            return [gid for gid in cfg.get("line_group_ids", []) if gid]
+            # settings.json is merged unvalidated — tolerate null/non-list values.
+            ids = cfg.get("line_group_ids")
+            if not isinstance(ids, list):
+                return []
+            return [gid for gid in ids if gid]
         return []  # MQTT publishes to topic — no recipient list

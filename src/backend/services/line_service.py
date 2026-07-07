@@ -1,9 +1,11 @@
 """LINE notification service.
 
-Pushes text messages via the LINE Messaging API (push message) when enabled
-in settings. Mirrors telegram_service: a single module-level
-``httpx.AsyncClient`` is reused across sends so connection pool + TLS
-handshake survive between calls. Lifespan calls ``aclose_client`` on shutdown.
+Pushes text messages via the LINE Messaging API (push message). Both callers
+(LineSink via the dispatcher, and the /settings/test-line endpoint) gate on
+``enable_line`` before calling, so this module only needs the token.
+Mirrors telegram_service: a single module-level ``httpx.AsyncClient`` is
+reused across sends so connection pool + TLS handshake survive between
+calls. Lifespan calls ``aclose_client`` on shutdown.
 """
 import logging
 from typing import Optional
@@ -42,14 +44,9 @@ async def send_line_message(message: str, to: str) -> bool:
     """
     try:
         cfg = get_runtime_settings()
-
-        if not cfg.get("enable_line", False):
-            logger.debug("LINE notifications disabled")
-            return False
-
         token = cfg.get("line_channel_access_token", "")
         if not token or not to:
-            logger.warning("LINE enabled but access token or target not set")
+            logger.warning("LINE push skipped: access token or target not set")
             return False
 
         payload = {"to": to, "messages": [{"type": "text", "text": message}]}
