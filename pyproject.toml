@@ -19,6 +19,9 @@ dependencies = [
     # future `uv lock --upgrade` must fail loudly instead of drifting past
     # fastapi 0.115.6's starlette<0.42 requirement
     "starlette>=0.40,<0.42",
+    # Form endpoints need this; it used to arrive transitively via the
+    # toolkit's mcp stack, which 0.7 no longer installs
+    "python-multipart>=0.0.9",
     "aiomqtt>=2.3.0",
 ]
 
