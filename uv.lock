@@ -86,6 +86,7 @@ dependencies = [
     { name = "kachaka-sdk-toolkit" },
     { name = "paho-mqtt" },
     { name = "protobuf" },
+    { name = "starlette" },
     { name = "uvicorn" },
 ]
 
@@ -103,9 +104,10 @@ requires-dist = [
     { name = "grpcio", specifier = "==1.66.1" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "kachaka-api", specifier = ">=3.16,<4" },
-    { name = "kachaka-sdk-toolkit", specifier = ">=0.6.1,<0.7" },
+    { name = "kachaka-sdk-toolkit", specifier = ">=0.6.1,<0.8" },
     { name = "paho-mqtt", specifier = "==2.1.0" },
     { name = "protobuf", specifier = "==5.27.2" },
+    { name = "starlette", specifier = ">=0.40,<0.42" },
     { name = "uvicorn", specifier = "==0.34.0" },
 ]
 

@@ -480,9 +480,11 @@ class FleetAPI:
             accepted = slot.cmds.dock_shelf(**kwargs)
             if not accepted.get("ok"):
                 return accepted
-            # Give the robot a beat to register the command, otherwise the
-            # poll can read the PREVIOUS command's result (observed on
-            # hardware: elapsed=0.0 echoing the prior move_to_pose).
+            # Toolkit >=0.7: poll_until_complete verifies completion against
+            # the command_id tracked by this cmds instance — the registration
+            # window can no longer be misread as completion. The sleep stays
+            # as belt-and-braces for 0.6.x (observed on hardware there:
+            # elapsed=0.0 echoing the prior move_to_pose).
             time.sleep(0.5)
             return slot.cmds.poll_until_complete(timeout=60.0)
 

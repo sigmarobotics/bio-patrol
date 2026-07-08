@@ -12,7 +12,13 @@ dependencies = [
     "httpx>=0.27.0",
     "uvicorn==0.34.0",
     "apscheduler>=3.10.4",
-    "kachaka-sdk-toolkit>=0.6.1,<0.7",
+    # >=0.7: poll_until_complete verifies command_id; mcp moved to optional
+    # extra so the toolkit no longer forces the mcp->starlette stack
+    "kachaka-sdk-toolkit>=0.6.1,<0.8",
+    # Explicit guard: toolkit <0.7 pulls mcp (unbounded) -> starlette; a
+    # future `uv lock --upgrade` must fail loudly instead of drifting past
+    # fastapi 0.115.6's starlette<0.42 requirement
+    "starlette>=0.40,<0.42",
     "aiomqtt>=2.3.0",
 ]
 
