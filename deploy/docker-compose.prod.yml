@@ -8,6 +8,8 @@ services:
     volumes:
       - ./data:/app/data:rw
       - ./wisleep-key:/app/wisleep-key:ro
+    environment:
+      - TZ=Asia/Taipei
     networks:
       - bio-patrol-net
     depends_on:
