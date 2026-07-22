@@ -37,9 +37,8 @@ async def get_patrol():
 
 @router.post("/patrol")
 async def save_patrol(body: dict):
-    """Save patrol.json. beds_order is sorted by bed_key."""
-    if "beds_order" in body:
-        body["beds_order"] = sorted(body["beds_order"], key=lambda b: b.get("bed_key", ""))
+    """Save patrol.json. beds_order is persisted in caller-supplied order —
+    it IS the patrol route (e.g. odd-side rooms first, then even side)."""
     save_json(PATROL_FILE, body)
     return {"status": "ok", "data": body}
 
