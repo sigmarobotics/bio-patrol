@@ -157,8 +157,8 @@ async function fetchRobotStatus() {
       dataService.getRobotPose(),
     ]);
 
-    // Battery
-    const battery = batteryRes?.remaining_percentage;
+    // Battery — kachaka_core queries.get_battery returns {ok, percentage, power_status}
+    const battery = batteryRes?.percentage ?? batteryRes?.remaining_percentage;
     if (battery !== undefined) {
       robotData.battery = battery;
       const el = document.getElementById('battery-value');
