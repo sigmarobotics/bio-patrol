@@ -1,12 +1,13 @@
 services:
   app:
-    image: ghcr.io/sigma-snaken/bio-patrol:main
+    image: ghcr.io/sigmarobotics/bio-patrol:latest
     container_name: bio-patrol
     restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
       - ./data:/app/data:rw
+      - ./wisleep-key:/app/wisleep-key:ro
     networks:
       - bio-patrol-net
     depends_on:
