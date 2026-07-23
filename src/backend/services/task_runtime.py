@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sqlite3
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from services.fleet_api import FleetAPI
@@ -46,6 +47,9 @@ class TaskEngine:
         self.shelf_drop_event: Optional[asyncio.Event] = None
         self._state_watcher_task: Optional[asyncio.Task] = None
         self._state_watcher_stop = False
+        # True while return_shelf is placing the shelf — the moving-shelf id
+        # legitimately disappears then, and the watcher must not call it a drop.
+        self._shelf_release_expected = False
         self._action_handlers: Dict[str, Any] = {
             StepAction.SPEAK.value: self._do_speak,
             StepAction.MOVE_TO_POSE.value: self._do_move_to_pose,
@@ -113,7 +117,15 @@ class TaskEngine:
                     last_seen_id = mid
                     confirmed_docked = True
                 elif confirmed_docked and last_seen_id:
-                    if self.shelf_drop_event is not None:
+                    if self._shelf_release_expected:
+                        # return_shelf is placing the shelf — a legal release,
+                        # not a drop (2026-07-23/24 false alarms: both patrol
+                        # runs ended with a normal placement flagged as a drop).
+                        logger.info(
+                            f"[STATE WATCHER] Shelf {last_seen_id} released by "
+                            f"return_shelf — normal placement, not a drop"
+                        )
+                    elif self.shelf_drop_event is not None:
                         self.shelf_drop_event.set()
                     confirmed_docked = False
                     last_seen_id = None
@@ -302,6 +314,7 @@ class TaskEngine:
         slot_evt = slot.shelf_drop_event if slot is not None else None
         self.shelf_drop_event = slot_evt if isinstance(slot_evt, asyncio.Event) else asyncio.Event()
         self.shelf_drop_event.clear()
+        self._shelf_release_expected = False
         self._state_watcher_stop = False
         self._state_watcher_task = asyncio.create_task(self._watch_shelf_state())
 
@@ -465,18 +478,33 @@ class TaskEngine:
                     title = "✅ 巡房完成"
                 else:
                     title = "⚠️ 巡房中斷"
-                body = (
-                    f"本次巡房 {total_beds} 床\n"
-                    f"{'已完成' if cancelled else '成功讀取'} {success_beds} 床"
-                )
-                # Beds the nursing staff must follow up manually
-                missed = [
-                    str(s.params.get("bed_key", "?"))
-                    for s in bio_steps
-                    if s.status != StepStatus.SUCCESS
-                ]
-                if missed:
-                    body += f"\n未量測：{'、'.join(missed)}"
+                buckets = self._run_outcome_buckets(task.task_id)
+                if buckets is not None:
+                    # Same per-bed buckets as the history view: reaching the
+                    # bed is the success bar; restless / empty-bed are reports.
+                    body = f"本次巡房 {total_beds} 床\n正常量測 {len(buckets['valid'])} 床"
+                    if buckets["restless"]:
+                        body += f"\n躁動通報 {len(buckets['restless'])} 床：{'、'.join(buckets['restless'])}"
+                    if buckets["no_reading"]:
+                        body += f"\n無量測值 {len(buckets['no_reading'])} 床：{'、'.join(buckets['no_reading'])}"
+                    if buckets["unreachable"]:
+                        body += f"\n機器人無法到位 {len(buckets['unreachable'])} 床：{'、'.join(buckets['unreachable'])}"
+                    not_executed = total_beds - sum(len(v) for v in buckets.values())
+                    if not_executed > 0:
+                        body += f"\n未執行 {not_executed} 床"
+                else:
+                    # DB unavailable — fall back to the step-status view
+                    body = (
+                        f"本次巡房 {total_beds} 床\n"
+                        f"{'已完成' if cancelled else '成功讀取'} {success_beds} 床"
+                    )
+                    missed = [
+                        str(s.params.get("bed_key", "?"))
+                        for s in bio_steps
+                        if s.status != StepStatus.SUCCESS
+                    ]
+                    if missed:
+                        body += f"\n未量測：{'、'.join(missed)}"
                 await dispatcher.dispatch(AnomalyEvent(
                     severity=Severity.INFO,
                     source=Source.TASK_SUMMARY,
@@ -574,8 +602,103 @@ class TaskEngine:
 
     async def _do_return_shelf(self, step: TaskStep) -> StepResult:
         shelf_id = step.params["shelf_id"]
+        # Mute the drop watcher for the placement: the moving-shelf id
+        # disappearing during return_shelf is the shelf being set down.
+        self._shelf_release_expected = True
         result = await self.fleet.return_shelf(self.robot_id, shelf_id)
+        if not result.get("ok") and await self._shelf_dropped_en_route(shelf_id):
+            # Placement failed AND the shelf is off the robot, away from its
+            # home — it came off mid-return. Surface it as a real drop.
+            self._shelf_release_expected = False
+            if self.shelf_drop_event is not None:
+                self.shelf_drop_event.set()
         return self._make_result(result, step.action, {"shelf_id": shelf_id})
+
+    def _run_outcome_buckets(self, task_id: str) -> Optional[dict]:
+        """Per-bed outcome buckets for one run, from the scan DB.
+
+        Same classification as the frontend history view: one outcome row per
+        bed (the valid row if any, else the final attempt), bucketed into
+        valid / restless (status 2) / unreachable (skipped, status 'N/A') /
+        no-reading (everything else). None when the DB can't be read.
+        """
+        client = get_bio_sensor_client()
+        if client is None:
+            return None
+        try:
+            conn = sqlite3.connect(client.db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT bed_name, status, is_valid, retry_count "
+                "FROM sensor_scan_data WHERE task_id = ?",
+                (task_id,),
+            ).fetchall()
+            conn.close()
+        except Exception:
+            logger.exception("Failed to load scan rows for run summary")
+            return None
+        best: Dict[str, Any] = {}
+        for r in rows:
+            bed = r["bed_name"] or "?"
+            cur = best.get(bed)
+            if (
+                cur is None
+                or (r["is_valid"] and not cur["is_valid"])
+                or (bool(r["is_valid"]) == bool(cur["is_valid"])
+                    and (r["retry_count"] or 0) > (cur["retry_count"] or 0))
+            ):
+                best[bed] = r
+        buckets: Dict[str, list] = {"valid": [], "restless": [], "unreachable": [], "no_reading": []}
+        for bed, r in best.items():
+            if r["is_valid"]:
+                buckets["valid"].append(bed)
+            elif str(r["status"]) == "2":
+                buckets["restless"].append(bed)
+            elif str(r["status"]) == "N/A":
+                buckets["unreachable"].append(bed)
+            else:
+                buckets["no_reading"].append(bed)
+        for v in buckets.values():
+            v.sort()
+        return buckets
+
+    async def _shelf_dropped_en_route(self, shelf_id: str) -> bool:
+        """After a failed return_shelf: did the shelf actually fall off?
+
+        False when the robot still carries it (plain navigation failure) or
+        when it already sits at its home (the robot finished the placement
+        after the app-side timeout). Unknown → True: a missed drop leaves a
+        shelf loose in a hospital corridor, so err toward alerting.
+        """
+        try:
+            slot = self.fleet.get_slot_or_none(self.robot_id) if hasattr(self.fleet, "get_slot_or_none") else None
+            if slot is not None:
+                mid = await asyncio.to_thread(slot.conn.client.get_moving_shelf_id)
+                if mid:
+                    return False
+            shelves_res = await self.fleet.get_shelves(self.robot_id)
+            shelf = next(
+                (s for s in shelves_res.get("shelves", [])
+                 if s.get("id") == shelf_id or s.get("name") == shelf_id),
+                None,
+            )
+            if shelf is None:
+                return True
+            locs_res = await self.fleet.get_locations(self.robot_id)
+            home = next(
+                (l for l in locs_res.get("locations", [])
+                 if l.get("id") == shelf.get("home_location_id")),
+                None,
+            )
+            if home is None:
+                return True
+            sp, hp = shelf.get("pose", {}) or {}, home.get("pose", {}) or {}
+            dx = sp.get("x", 0) - hp.get("x", 0)
+            dy = sp.get("y", 0) - hp.get("y", 0)
+            return (dx * dx + dy * dy) ** 0.5 > 1.5
+        except Exception:
+            logger.warning("[SHELF] Could not verify shelf state after failed return", exc_info=True)
+            return True
 
     async def _do_return_home(self, step: TaskStep) -> StepResult:
         result = await self.fleet.return_home(self.robot_id)

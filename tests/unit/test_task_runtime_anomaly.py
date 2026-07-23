@@ -54,3 +54,56 @@ def test_shelf_drop_dispatches_critical_event():
     assert "返回充電站" in event.body
     assert event.raw["shelf_id"] == "S_04"
     assert event.raw["remaining_beds"] == ["101-2", "101-3"]
+
+
+# ── return_shelf release vs drop (2026-07-24 false-alarm regression) ──
+
+def _engine_with_event():
+    from services import task_runtime
+    fleet = MagicMock()
+    engine = task_runtime.TaskEngine(fleet, "kachaka")
+    engine.shelf_drop_event = asyncio.Event()
+    return engine, fleet
+
+
+def test_successful_return_shelf_is_not_a_drop():
+    from common_types import TaskStep
+    engine, fleet = _engine_with_event()
+    fleet.return_shelf = AsyncMock(return_value={"ok": True})
+    step = TaskStep(step_id="r-1", action="return_shelf", params={"shelf_id": "S01"})
+    asyncio.run(engine._do_return_shelf(step))
+    assert engine._shelf_release_expected is True
+    assert not engine.shelf_drop_event.is_set()
+
+
+def test_failed_return_with_shelf_at_home_is_not_a_drop():
+    from common_types import TaskStep
+    engine, fleet = _engine_with_event()
+    fleet.return_shelf = AsyncMock(return_value={"ok": False, "error": "TIMEOUT"})
+    fleet.get_slot_or_none = MagicMock(return_value=None)
+    fleet.get_shelves = AsyncMock(return_value={"ok": True, "shelves": [
+        {"id": "S01", "home_location_id": "S01_home", "pose": {"x": -0.10, "y": 3.28}}
+    ]})
+    fleet.get_locations = AsyncMock(return_value={"ok": True, "locations": [
+        {"id": "S01_home", "pose": {"x": -0.04, "y": 3.25}}
+    ]})
+    step = TaskStep(step_id="r-1", action="return_shelf", params={"shelf_id": "S01"})
+    asyncio.run(engine._do_return_shelf(step))
+    assert not engine.shelf_drop_event.is_set()
+
+
+def test_failed_return_with_shelf_en_route_is_a_drop():
+    from common_types import TaskStep
+    engine, fleet = _engine_with_event()
+    fleet.return_shelf = AsyncMock(return_value={"ok": False, "error": "TIMEOUT"})
+    fleet.get_slot_or_none = MagicMock(return_value=None)
+    fleet.get_shelves = AsyncMock(return_value={"ok": True, "shelves": [
+        {"id": "S01", "home_location_id": "S01_home", "pose": {"x": -15.0, "y": 6.0}}
+    ]})
+    fleet.get_locations = AsyncMock(return_value={"ok": True, "locations": [
+        {"id": "S01_home", "pose": {"x": -0.04, "y": 3.25}}
+    ]})
+    step = TaskStep(step_id="r-1", action="return_shelf", params={"shelf_id": "S01"})
+    asyncio.run(engine._do_return_shelf(step))
+    assert engine.shelf_drop_event.is_set()
+    assert engine._shelf_release_expected is False
