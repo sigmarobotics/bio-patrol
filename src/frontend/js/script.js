@@ -1073,15 +1073,22 @@ function dedupeScans(rows) {
   return [...byKey.values()];
 }
 
+// Per-bed outcome buckets. Reaching the bed counts as success — a restless
+// or empty-bed report is patrol value, not failure. Only "robot couldn't
+// get there" (skipped rows, status 'N/A') is a miss.
 function updateSensorStats() {
   const total = sensorData.length;
   const valid = sensorData.filter(d => d.is_valid).length;
-  const rate = total > 0 ? ((valid / total) * 100).toFixed(1) : '0';
+  const restless = sensorData.filter(d => !d.is_valid && d.status === 2).length;
+  const unreachable = sensorData.filter(d => !d.is_valid && d.status === 'N/A').length;
+  const noReading = total - valid - restless - unreachable;
 
   const el = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
-  el('stat-total-scans', total);
+  el('stat-total-beds', total);
   el('stat-valid-scans', valid);
-  el('stat-success-rate', rate + '%');
+  el('stat-restless', restless);
+  el('stat-no-reading', noReading);
+  el('stat-unreachable', unreachable);
 }
 
 function formatTaskId(taskId) {
