@@ -1031,17 +1031,23 @@ async function saveBedsConfig() {
 
 let sensorData = [];
 
+// The unit of viewing is one patrol run (task_id), not a calendar day —
+// the 23:00 night run crosses midnight but all its rows share the task_id
+// stamped at launch time.
 async function loadSensorData() {
   try {
-    const dateFilter = document.getElementById('sensor-filter-date')?.value || '';
-    const limit = parseInt(document.getElementById('sensor-filter-limit')?.value) || 100;
+    const runSel = document.getElementById('sensor-filter-run');
+    const selectedRun = runSel?.value || '';
 
-    const params = { limit };
-    // Convert "2026-02-05" → "20260205" prefix to match task_id format
-    if (dateFilter) params.task_id = dateFilter.replace(/-/g, '');
+    // Wide fetch so the run dropdown covers the recent runs (~250 rows/run max).
+    const res = await dataService.getSensorHistory({ limit: 500 });
+    const rows = res.data || [];
 
-    const res = await dataService.getSensorHistory(params);
-    sensorData = dedupeScans(res.data || []);
+    const runs = [...new Set(rows.map(d => d.task_id))];
+    populateRunFilter(runSel, runs, selectedRun);
+
+    const activeRun = selectedRun || runs[0] || '';
+    sensorData = dedupeScans(rows.filter(d => d.task_id === activeRun));
 
     updateSensorStats();
     renderSensorTable();
@@ -1050,10 +1056,19 @@ async function loadSensorData() {
   }
 }
 
-function clearSensorFilter() {
-  const dateEl = document.getElementById('sensor-filter-date');
-  if (dateEl) dateEl.value = '';
-  loadSensorData();
+function formatRunLabel(taskId) {
+  if (/^\d{14}$/.test(taskId)) {
+    return `${taskId.slice(4, 6)}/${taskId.slice(6, 8)} ${taskId.slice(8, 10)}:${taskId.slice(10, 12)} 巡房`;
+  }
+  return taskId.slice(0, 8);
+}
+
+function populateRunFilter(sel, runs, keep) {
+  if (!sel) return;
+  sel.innerHTML = [
+    '<option value="">最新一輪</option>',
+    ...runs.map(t => `<option value="${t}"${t === keep ? ' selected' : ''}>${formatRunLabel(t)}</option>`),
+  ].join('');
 }
 
 // One row per (task_id, location_id): a failed scan writes one DB row per
