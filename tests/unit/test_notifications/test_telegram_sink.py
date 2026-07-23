@@ -20,7 +20,7 @@ def _event():
     )
 
 
-def test_format_wraps_html_and_appends_event_id_footer():
+def test_format_wraps_html_without_footer():
     sink = TelegramSink(StaticResolver())
     e = _event()
     rendered = sink._format(e)

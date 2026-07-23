@@ -255,7 +255,7 @@ class TaskEngine:
                 body=(
                     f"掉落位置：{location_id}\n"
                     f"剩餘 {len(remaining_beds)} 床尚未巡視\n"
-                    f"機器人已返回充電站"
+                    f"機器人將返回充電站"
                 ),
                 raw={"shelf_id": shelf_id, "remaining_beds": remaining_beds},
             ))
@@ -278,10 +278,14 @@ class TaskEngine:
             self._record_skipped_scan(s, "貨架掉落，巡房中斷", location_id=s.params.get("location_id", ""))
             s.status = StepStatus.SKIPPED
 
-        # Robot return home
+        # Robot return home — controller failures come back as {"ok": False},
+        # not exceptions, so check the result explicitly.
         try:
-            await self.fleet.return_home(self.robot_id)
-            logger.info(f"[SHELF DROP] Robot {self.robot_id} sent home")
+            rh = await self.fleet.return_home(self.robot_id)
+            if rh.get("ok"):
+                logger.info(f"[SHELF DROP] Robot {self.robot_id} sent home")
+            else:
+                logger.error(f"[SHELF DROP] return_home failed: {rh.get('error')}")
         except Exception as rh_err:
             logger.error(f"[SHELF DROP] Failed to send robot home: {rh_err}")
 
@@ -455,14 +459,19 @@ class TaskEngine:
                 bio_steps = [s for s in task.steps if s.action == StepAction.BIO_SCAN]
                 total_beds = len(bio_steps)
                 success_beds = sum(1 for s in bio_steps if s.status == StepStatus.SUCCESS)
-                title = "🚫 巡房已取消" if cancelled else "✅ 巡房完成"
+                if cancelled:
+                    title = "🚫 巡房已取消"
+                elif task.status == TaskStatus.DONE:
+                    title = "✅ 巡房完成"
+                else:
+                    title = "⚠️ 巡房中斷"
                 body = (
                     f"本次巡房 {total_beds} 床\n"
                     f"{'已完成' if cancelled else '成功讀取'} {success_beds} 床"
                 )
                 # Beds the nursing staff must follow up manually
                 missed = [
-                    s.params.get("bed_key", "?")
+                    str(s.params.get("bed_key", "?"))
                     for s in bio_steps
                     if s.status != StepStatus.SUCCESS
                 ]

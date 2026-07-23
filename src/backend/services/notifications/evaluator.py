@@ -33,10 +33,7 @@ class BioScanFailureEvaluator:
             return None
         bed = outcome.bed_name or outcome.location_id
         last = outcome.last_record_raw or {}
-        try:
-            status_text = _STATUS_TEXT.get(int(last.get("status")))
-        except (TypeError, ValueError):
-            status_text = None
+        status_text = _STATUS_TEXT.get(last.get("status"))
         return AnomalyEvent(
             severity=Severity.WARN,
             source=Source.BIO_SCAN_FAILURE,

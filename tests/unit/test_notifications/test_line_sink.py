@@ -20,7 +20,7 @@ def _event():
     )
 
 
-def test_format_plain_text_with_event_id_footer():
+def test_format_plain_text_without_footer():
     sink = LineSink(StaticResolver())
     e = _event()
     rendered = sink._format(e)
