@@ -151,11 +151,13 @@ class OfflineDebouncer:
         if self._closed:
             return
         total = round(time.monotonic() - started_at, 1)
+        mins, secs = int(total // 60), int(total % 60)
+        duration = f"{mins} 分 {secs} 秒" if mins else f"{secs} 秒"
         evt = AnomalyEvent(
             severity=prior_severity,
             source=Source.ROBOT_RECOVERED,
             title="✅ 機器人已恢復連線",
-            body=f"機器人:{self._robot_id}\n離線總計:{total}s",
+            body=f"機器人 {self._get_serial() or self._robot_id}\n離線約 {duration}",
             raw={
                 "robot_id": self._robot_id,
                 "serial": self._get_serial() or "",
@@ -173,8 +175,7 @@ class OfflineDebouncer:
             logger.exception("OfflineDebouncer emit failed for %s", evt.source)
 
     def _format_offline_body(self, in_patrol: bool) -> str:
-        serial = self._get_serial() or ""
-        head = f"機器人:{self._robot_id}({serial})" if serial else f"機器人:{self._robot_id}"
+        head = f"機器人 {self._get_serial() or self._robot_id}"
         if in_patrol:
-            return head + "\n狀態:巡房中(任務可能受影響)"
+            return head + "\n巡房進行中，任務可能中斷"
         return head

@@ -49,6 +49,8 @@ def test_shelf_drop_dispatches_critical_event():
     assert event.bed_key == "101-1"
     assert event.task_id == "t-1"
     assert "貨架掉落" in event.title
-    assert "S_04" in event.body
+    assert "掉落位置：101-1" in event.body
+    assert "剩餘 2 床" in event.body
+    assert "返回充電站" in event.body
     assert event.raw["shelf_id"] == "S_04"
     assert event.raw["remaining_beds"] == ["101-2", "101-3"]

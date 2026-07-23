@@ -253,9 +253,9 @@ class TaskEngine:
                 task_id=task.task_id,
                 title="⚠️ 貨架掉落，請協助歸位",
                 body=(
-                    f"床位：{location_id}\n"
-                    f"貨架：{shelf_id}\n"
-                    f"剩餘 {len(remaining_beds)} 床尚未巡視"
+                    f"掉落位置：{location_id}\n"
+                    f"剩餘 {len(remaining_beds)} 床尚未巡視\n"
+                    f"機器人已返回充電站"
                 ),
                 raw={"shelf_id": shelf_id, "remaining_beds": remaining_beds},
             ))
@@ -460,6 +460,14 @@ class TaskEngine:
                     f"本次巡房 {total_beds} 床\n"
                     f"{'已完成' if cancelled else '成功讀取'} {success_beds} 床"
                 )
+                # Beds the nursing staff must follow up manually
+                missed = [
+                    s.params.get("bed_key", "?")
+                    for s in bio_steps
+                    if s.status != StepStatus.SUCCESS
+                ]
+                if missed:
+                    body += f"\n未量測：{'、'.join(missed)}"
                 await dispatcher.dispatch(AnomalyEvent(
                     severity=Severity.INFO,
                     source=Source.TASK_SUMMARY,
