@@ -46,6 +46,9 @@ class TaskEngine:
         self.shelf_drop_event: Optional[asyncio.Event] = None
         self._state_watcher_task: Optional[asyncio.Task] = None
         self._state_watcher_stop = False
+        # True while return_shelf is placing the shelf — the moving-shelf id
+        # legitimately disappears then, and the watcher must not call it a drop.
+        self._shelf_release_expected = False
         self._action_handlers: Dict[str, Any] = {
             StepAction.SPEAK.value: self._do_speak,
             StepAction.MOVE_TO_POSE.value: self._do_move_to_pose,
@@ -113,7 +116,15 @@ class TaskEngine:
                     last_seen_id = mid
                     confirmed_docked = True
                 elif confirmed_docked and last_seen_id:
-                    if self.shelf_drop_event is not None:
+                    if self._shelf_release_expected:
+                        # return_shelf is placing the shelf — a legal release,
+                        # not a drop (2026-07-23/24 false alarms: both patrol
+                        # runs ended with a normal placement flagged as a drop).
+                        logger.info(
+                            f"[STATE WATCHER] Shelf {last_seen_id} released by "
+                            f"return_shelf — normal placement, not a drop"
+                        )
+                    elif self.shelf_drop_event is not None:
                         self.shelf_drop_event.set()
                     confirmed_docked = False
                     last_seen_id = None
@@ -302,6 +313,7 @@ class TaskEngine:
         slot_evt = slot.shelf_drop_event if slot is not None else None
         self.shelf_drop_event = slot_evt if isinstance(slot_evt, asyncio.Event) else asyncio.Event()
         self.shelf_drop_event.clear()
+        self._shelf_release_expected = False
         self._state_watcher_stop = False
         self._state_watcher_task = asyncio.create_task(self._watch_shelf_state())
 
@@ -574,8 +586,55 @@ class TaskEngine:
 
     async def _do_return_shelf(self, step: TaskStep) -> StepResult:
         shelf_id = step.params["shelf_id"]
+        # Mute the drop watcher for the placement: the moving-shelf id
+        # disappearing during return_shelf is the shelf being set down.
+        self._shelf_release_expected = True
         result = await self.fleet.return_shelf(self.robot_id, shelf_id)
+        if not result.get("ok") and await self._shelf_dropped_en_route(shelf_id):
+            # Placement failed AND the shelf is off the robot, away from its
+            # home — it came off mid-return. Surface it as a real drop.
+            self._shelf_release_expected = False
+            if self.shelf_drop_event is not None:
+                self.shelf_drop_event.set()
         return self._make_result(result, step.action, {"shelf_id": shelf_id})
+
+    async def _shelf_dropped_en_route(self, shelf_id: str) -> bool:
+        """After a failed return_shelf: did the shelf actually fall off?
+
+        False when the robot still carries it (plain navigation failure) or
+        when it already sits at its home (the robot finished the placement
+        after the app-side timeout). Unknown → True: a missed drop leaves a
+        shelf loose in a hospital corridor, so err toward alerting.
+        """
+        try:
+            slot = self.fleet.get_slot_or_none(self.robot_id) if hasattr(self.fleet, "get_slot_or_none") else None
+            if slot is not None:
+                mid = await asyncio.to_thread(slot.conn.client.get_moving_shelf_id)
+                if mid:
+                    return False
+            shelves_res = await self.fleet.get_shelves(self.robot_id)
+            shelf = next(
+                (s for s in shelves_res.get("shelves", [])
+                 if s.get("id") == shelf_id or s.get("name") == shelf_id),
+                None,
+            )
+            if shelf is None:
+                return True
+            locs_res = await self.fleet.get_locations(self.robot_id)
+            home = next(
+                (l for l in locs_res.get("locations", [])
+                 if l.get("id") == shelf.get("home_location_id")),
+                None,
+            )
+            if home is None:
+                return True
+            sp, hp = shelf.get("pose", {}) or {}, home.get("pose", {}) or {}
+            dx = sp.get("x", 0) - hp.get("x", 0)
+            dy = sp.get("y", 0) - hp.get("y", 0)
+            return (dx * dx + dy * dy) ** 0.5 > 1.5
+        except Exception:
+            logger.warning("[SHELF] Could not verify shelf state after failed return", exc_info=True)
+            return True
 
     async def _do_return_home(self, step: TaskStep) -> StepResult:
         result = await self.fleet.return_home(self.robot_id)
