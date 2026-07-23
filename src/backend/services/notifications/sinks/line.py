@@ -27,7 +27,6 @@ class LineSink:
         )
 
     def _format(self, event: AnomalyEvent) -> str:
-        # LINE text messages carry no HTML — plain text, same event-id footer
-        # as TelegramSink so a recipient can cross-reference MQTT logs.
+        # LINE text messages carry no HTML — plain text, same format as Telegram.
         body_block = f"\n\n{event.body}" if event.body else ""
-        return f"{event.title}{body_block}\n\n[{event.event_id[-8:]}]"
+        return f"{event.title}{body_block}"

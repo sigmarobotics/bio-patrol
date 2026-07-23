@@ -27,6 +27,5 @@ class TelegramSink:
         )
 
     def _format(self, event: AnomalyEvent) -> str:
-        # event_id last-8 footer lets a recipient cross-reference MQTT logs
         body_block = f"\n\n{event.body}" if event.body else ""
-        return f"<b>{event.title}</b>{body_block}\n\n<code>{event.event_id[-8:]}</code>"
+        return f"<b>{event.title}</b>{body_block}"

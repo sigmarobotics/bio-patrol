@@ -14,7 +14,7 @@ def _event():
         severity=Severity.WARN,
         source=Source.BIO_SCAN_FAILURE,
         title="⚠️ 101-1 量測失敗",
-        body="床位：101-1\n原因：無有效量測數值\n重試次數：19\n最後一筆：status=2, bpm=0, rpm=0",
+        body="床位：101-1\n狀況：人員躁動，無穩定讀值\n重試次數：19",
         bed_key="101-1",
         task_id="task-1",
     )
@@ -26,7 +26,7 @@ def test_format_plain_text_with_event_id_footer():
     rendered = sink._format(e)
     assert rendered.startswith("⚠️ 101-1 量測失敗\n\n")
     assert e.body in rendered
-    assert f"[{e.event_id[-8:]}]" in rendered
+    assert e.event_id[-8:] not in rendered
     assert "<b>" not in rendered  # LINE push is plain text, no HTML
 
 
@@ -34,7 +34,7 @@ def test_format_title_only_event_renders_single_line_title():
     sink = LineSink(StaticResolver())
     e = AnomalyEvent(severity=Severity.INFO, source=Source.TASK_SUMMARY, title="✅ 巡邏完成")
     rendered = sink._format(e)
-    assert rendered == f"✅ 巡邏完成\n\n[{e.event_id[-8:]}]"
+    assert rendered == "✅ 巡邏完成"
 
 
 def test_is_enabled_reads_settings():
