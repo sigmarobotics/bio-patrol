@@ -1041,7 +1041,7 @@ async function loadSensorData() {
     if (dateFilter) params.task_id = dateFilter.replace(/-/g, '');
 
     const res = await dataService.getSensorHistory(params);
-    sensorData = res.data || [];
+    sensorData = dedupeScans(res.data || []);
 
     updateSensorStats();
     renderSensorTable();
@@ -1056,18 +1056,32 @@ function clearSensorFilter() {
   loadSensorData();
 }
 
+// One row per (task_id, location_id): a failed scan writes one DB row per
+// retry — show only the outcome row (the valid one, else the last attempt).
+// Stats computed on the deduped list are therefore per-bed, not per-attempt.
+function dedupeScans(rows) {
+  const byKey = new Map();
+  for (const d of rows) {
+    const key = `${d.task_id}|${d.location_id}`;
+    const cur = byKey.get(key);
+    if (!cur) { byKey.set(key, d); continue; }
+    if (d.is_valid && !cur.is_valid) { byKey.set(key, d); continue; }
+    if (!!d.is_valid === !!cur.is_valid && (d.retry_count ?? 0) > (cur.retry_count ?? 0)) {
+      byKey.set(key, d);
+    }
+  }
+  return [...byKey.values()];
+}
+
 function updateSensorStats() {
   const total = sensorData.length;
   const valid = sensorData.filter(d => d.is_valid).length;
   const rate = total > 0 ? ((valid / total) * 100).toFixed(1) : '0';
-  const bpmValues = sensorData.filter(d => d.bpm).map(d => d.bpm);
-  const avgBpm = bpmValues.length > 0 ? (bpmValues.reduce((a, b) => a + b, 0) / bpmValues.length).toFixed(0) : '--';
 
   const el = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
   el('stat-total-scans', total);
   el('stat-valid-scans', valid);
   el('stat-success-rate', rate + '%');
-  el('stat-avg-bpm', avgBpm);
 }
 
 function formatTaskId(taskId) {
