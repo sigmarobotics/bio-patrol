@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 
 from services.notifications.events import AnomalyEvent
 from services.notifications.recipients import RecipientResolver
@@ -27,6 +28,7 @@ class TelegramSink:
         )
 
     def _format(self, event: AnomalyEvent) -> str:
-        # event_id last-8 footer lets a recipient cross-reference MQTT logs
-        body_block = f"\n\n{event.body}" if event.body else ""
-        return f"<b>{event.title}</b>{body_block}\n\n<code>{event.event_id[-8:]}</code>"
+        # Bed/location names from user config flow into these strings; escape
+        # them or a name containing &/</> kills the whole HTML-mode message.
+        body_block = f"\n\n{html.escape(event.body)}" if event.body else ""
+        return f"<b>{html.escape(event.title)}</b>{body_block}"

@@ -14,19 +14,19 @@ def _event():
         severity=Severity.WARN,
         source=Source.BIO_SCAN_FAILURE,
         title="⚠️ 101-1 量測失敗",
-        body="床位：101-1\n原因：無有效量測數值\n重試次數：19\n最後一筆：status=2, bpm=0, rpm=0",
+        body="床位：101-1\n狀況：人員躁動，無穩定讀值\n重試次數：19",
         bed_key="101-1",
         task_id="task-1",
     )
 
 
-def test_format_wraps_html_and_appends_event_id_footer():
+def test_format_wraps_html_without_footer():
     sink = TelegramSink(StaticResolver())
     e = _event()
     rendered = sink._format(e)
     assert rendered.startswith("<b>⚠️ 101-1 量測失敗</b>\n\n")
     assert e.body in rendered
-    assert f"<code>{e.event_id[-8:]}</code>" in rendered
+    assert e.event_id[-8:] not in rendered
 
 
 def test_is_enabled_reads_settings():
@@ -130,7 +130,6 @@ def test_format_skips_body_separator_when_body_empty():
         body="",
     )
     rendered = sink._format(e)
-    # No double-blank line between title and footer when body is empty
-    assert "\n\n\n" not in rendered
-    assert rendered.startswith("<b>⚠️ 貨架掉落，請協助歸位</b>\n\n")
-    assert rendered.endswith(f"<code>{e.event_id[-8:]}</code>")
+    # Title only — no body block, no footer
+    assert rendered == "<b>⚠️ 貨架掉落，請協助歸位</b>"
+    assert e.event_id[-8:] not in rendered

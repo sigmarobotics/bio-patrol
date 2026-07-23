@@ -35,9 +35,7 @@ def test_evaluator_emits_warn_event_on_failure():
     assert event.task_id == "task-1"
     assert "101-1" in event.title
     assert "量測失敗" in event.title
-    assert "status=2" in event.body
-    assert "bpm=0" in event.body
-    assert "rpm=0" in event.body
+    assert "人員躁動，無穩定讀值" in event.body
     assert "重試次數：19" in event.body
     assert event.raw == {"status": 2, "bpm": 0, "rpm": 0, "details": "無有效量測數值"}
 
