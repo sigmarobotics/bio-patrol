@@ -1011,6 +1011,23 @@ input[type="checkbox"]:checked::after {
     margin-top: 4px;
 }
 
+/* Outcome-bucket accents: restless / out-of-bed are the alerts nursing
+   staff act on — they get the loud colors; unreachable stays muted. */
+.stat-card.stat-ok .stat-value { color: var(--mint); }
+.stat-card.stat-warn {
+    border-color: var(--warning);
+    background: rgba(230, 126, 34, 0.08);
+}
+.stat-card.stat-warn .stat-value { color: var(--warning); }
+.stat-card.stat-warn .stat-label { color: var(--warning); }
+.stat-card.stat-critical {
+    border-color: var(--coral);
+    background: rgba(220, 53, 69, 0.08);
+}
+.stat-card.stat-critical .stat-value { color: var(--coral); }
+.stat-card.stat-critical .stat-label { color: var(--coral); }
+.stat-card.stat-muted .stat-value { color: var(--text-muted); }
+
 /* ═══════════════════════════════════════════════════════════════════════════
    SCHEDULE SECTION
    ═══════════════════════════════════════════════════════════════════════════ */

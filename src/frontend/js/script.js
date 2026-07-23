@@ -1031,17 +1031,23 @@ async function saveBedsConfig() {
 
 let sensorData = [];
 
+// The unit of viewing is one patrol run (task_id), not a calendar day —
+// the 23:00 night run crosses midnight but all its rows share the task_id
+// stamped at launch time.
 async function loadSensorData() {
   try {
-    const dateFilter = document.getElementById('sensor-filter-date')?.value || '';
-    const limit = parseInt(document.getElementById('sensor-filter-limit')?.value) || 100;
+    const runSel = document.getElementById('sensor-filter-run');
+    const selectedRun = runSel?.value || '';
 
-    const params = { limit };
-    // Convert "2026-02-05" → "20260205" prefix to match task_id format
-    if (dateFilter) params.task_id = dateFilter.replace(/-/g, '');
+    // Wide fetch so the run dropdown covers the recent runs (~250 rows/run max).
+    const res = await dataService.getSensorHistory({ limit: 500 });
+    const rows = res.data || [];
 
-    const res = await dataService.getSensorHistory(params);
-    sensorData = res.data || [];
+    const runs = [...new Set(rows.map(d => d.task_id))];
+    populateRunFilter(runSel, runs, selectedRun);
+
+    const activeRun = selectedRun || runs[0] || '';
+    sensorData = dedupeScans(rows.filter(d => d.task_id === activeRun));
 
     updateSensorStats();
     renderSensorTable();
@@ -1050,24 +1056,54 @@ async function loadSensorData() {
   }
 }
 
-function clearSensorFilter() {
-  const dateEl = document.getElementById('sensor-filter-date');
-  if (dateEl) dateEl.value = '';
-  loadSensorData();
+function formatRunLabel(taskId) {
+  if (/^\d{14}$/.test(taskId)) {
+    return `${taskId.slice(4, 6)}/${taskId.slice(6, 8)} ${taskId.slice(8, 10)}:${taskId.slice(10, 12)} 巡房`;
+  }
+  return taskId.slice(0, 8);
 }
 
+function populateRunFilter(sel, runs, keep) {
+  if (!sel) return;
+  sel.innerHTML = [
+    '<option value="">最新一輪</option>',
+    ...runs.map(t => `<option value="${t}"${t === keep ? ' selected' : ''}>${formatRunLabel(t)}</option>`),
+  ].join('');
+}
+
+// One row per (task_id, location_id): a failed scan writes one DB row per
+// retry — show only the outcome row (the valid one, else the last attempt).
+// Stats computed on the deduped list are therefore per-bed, not per-attempt.
+function dedupeScans(rows) {
+  const byKey = new Map();
+  for (const d of rows) {
+    const key = `${d.task_id}|${d.location_id}`;
+    const cur = byKey.get(key);
+    if (!cur) { byKey.set(key, d); continue; }
+    if (d.is_valid && !cur.is_valid) { byKey.set(key, d); continue; }
+    if (!!d.is_valid === !!cur.is_valid && (d.retry_count ?? 0) > (cur.retry_count ?? 0)) {
+      byKey.set(key, d);
+    }
+  }
+  return [...byKey.values()];
+}
+
+// Per-bed outcome buckets. Reaching the bed counts as success — a restless
+// or empty-bed report is patrol value, not failure. Only "robot couldn't
+// get there" (skipped rows, status 'N/A') is a miss.
 function updateSensorStats() {
   const total = sensorData.length;
   const valid = sensorData.filter(d => d.is_valid).length;
-  const rate = total > 0 ? ((valid / total) * 100).toFixed(1) : '0';
-  const bpmValues = sensorData.filter(d => d.bpm).map(d => d.bpm);
-  const avgBpm = bpmValues.length > 0 ? (bpmValues.reduce((a, b) => a + b, 0) / bpmValues.length).toFixed(0) : '--';
+  const restless = sensorData.filter(d => !d.is_valid && d.status === 2).length;
+  const unreachable = sensorData.filter(d => !d.is_valid && d.status === 'N/A').length;
+  const noReading = total - valid - restless - unreachable;
 
   const el = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
-  el('stat-total-scans', total);
+  el('stat-total-beds', total);
   el('stat-valid-scans', valid);
-  el('stat-success-rate', rate + '%');
-  el('stat-avg-bpm', avgBpm);
+  el('stat-restless', restless);
+  el('stat-no-reading', noReading);
+  el('stat-unreachable', unreachable);
 }
 
 function formatTaskId(taskId) {

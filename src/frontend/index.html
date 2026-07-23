@@ -184,31 +184,34 @@
       <!-- Stats Cards -->
       <div class="stats-grid" id="sensor-stats">
         <div class="stat-card">
-          <div class="stat-value" id="stat-total-scans">0</div>
-          <div class="stat-label">Total Scans</div>
+          <div class="stat-value" id="stat-total-beds">0</div>
+          <div class="stat-label">全部床位</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card stat-ok">
           <div class="stat-value" id="stat-valid-scans">0</div>
-          <div class="stat-label">Valid Scans</div>
+          <div class="stat-label">正常量測</div>
         </div>
-        <div class="stat-card">
-          <div class="stat-value" id="stat-success-rate">0%</div>
-          <div class="stat-label">Success Rate</div>
+        <div class="stat-card stat-warn">
+          <div class="stat-value" id="stat-restless">0</div>
+          <div class="stat-label">躁動通報</div>
         </div>
-        <div class="stat-card">
-          <div class="stat-value" id="stat-avg-bpm">--</div>
-          <div class="stat-label">Avg BPM</div>
+        <div class="stat-card stat-critical">
+          <div class="stat-value" id="stat-no-reading">0</div>
+          <div class="stat-label">無量測值通報</div>
+        </div>
+        <div class="stat-card stat-muted">
+          <div class="stat-value" id="stat-unreachable">0</div>
+          <div class="stat-label">機器人無法到位</div>
         </div>
       </div>
 
       <!-- Filter Controls -->
       <div class="sensor-controls">
-        <label>Date</label>
-        <input type="date" id="sensor-filter-date">
-        <label>Limit</label>
-        <input type="number" id="sensor-filter-limit" value="100" min="1" max="500" style="width:80px;">
-        <button class="btn-secondary" onclick="loadSensorData()">Search</button>
-        <button class="btn-secondary" onclick="clearSensorFilter()">Clear</button>
+        <label>巡房輪次</label>
+        <select id="sensor-filter-run" onchange="loadSensorData()">
+          <option value="">最新一輪</option>
+        </select>
+        <button class="btn-secondary" onclick="loadSensorData()">重新整理</button>
         <button class="btn-secondary" onclick="exportSensorCSV()">Export CSV</button>
       </div>
 
