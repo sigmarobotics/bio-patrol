@@ -203,16 +203,20 @@
       };
     }
 
-    dataService.getScanHistoryByLocation(locationId, 5).then(res => {
+    // Fetch enough raw rows to cover ~5 runs (a failed scan writes one row
+    // per retry), then dedupe to one outcome row per patrol run — otherwise a
+    // single failed measurement fills the drawer with 5 identical Invalid rows.
+    dataService.getScanHistoryByLocation(locationId, 30).then(res => {
       if (res.status !== 'success') {
         body.innerHTML = `<p style="color:var(--accent-red);font-size:11px;">載入失敗：${res.message ?? '未知'}</p>`;
         return;
       }
-      if (!res.data.length) {
+      const perRun = dedupeScans(res.data).slice(0, 5);
+      if (!perRun.length) {
         body.innerHTML = '<p style="color:var(--text-muted);font-size:11px;">尚無掃描記錄</p>';
         return;
       }
-      body.innerHTML = res.data.map(d => `
+      body.innerHTML = perRun.map(d => `
       <div class="drawer-row drawer-row--${d.is_valid ? 'valid' : 'invalid'}">
         <div class="drawer-row__time">${new Date(d.timestamp).toLocaleString()}</div>
         <div class="drawer-row__vit">BPM ${d.bpm ?? '--'} · RPM ${d.rpm ?? '--'} · status=${d.status ?? '--'}</div>
