@@ -107,3 +107,34 @@ def test_failed_return_with_shelf_en_route_is_a_drop():
     asyncio.run(engine._do_return_shelf(step))
     assert engine.shelf_drop_event.is_set()
     assert engine._shelf_release_expected is False
+
+
+def test_stale_drop_signal_cleared_on_successful_return():
+    """kachaka_core's monitor (armed by move_shelf, never disarmed) sets the
+    slot event when return_shelf places the shelf. A successful placement
+    must clear that stale signal instead of letting the loop treat it as a
+    drop (2026-07-24 noon false alarm, second source)."""
+    from common_types import TaskStep
+    engine, fleet = _engine_with_event()
+    fleet.return_shelf = AsyncMock(return_value={"ok": True})
+    engine.shelf_drop_event.set()  # stale signal from kachaka_core's monitor
+    step = TaskStep(step_id="r-1", action="return_shelf", params={"shelf_id": "S01"})
+    asyncio.run(engine._do_return_shelf(step))
+    assert not engine.shelf_drop_event.is_set()
+
+
+def test_stale_drop_signal_cleared_on_failed_return_with_shelf_at_home():
+    from common_types import TaskStep
+    engine, fleet = _engine_with_event()
+    fleet.return_shelf = AsyncMock(return_value={"ok": False, "error": "TIMEOUT"})
+    fleet.get_slot_or_none = MagicMock(return_value=None)
+    fleet.get_shelves = AsyncMock(return_value={"ok": True, "shelves": [
+        {"id": "S01", "home_location_id": "S01_home", "pose": {"x": -0.10, "y": 3.28}}
+    ]})
+    fleet.get_locations = AsyncMock(return_value={"ok": True, "locations": [
+        {"id": "S01_home", "pose": {"x": -0.04, "y": 3.25}}
+    ]})
+    engine.shelf_drop_event.set()
+    step = TaskStep(step_id="r-1", action="return_shelf", params={"shelf_id": "S01"})
+    asyncio.run(engine._do_return_shelf(step))
+    assert not engine.shelf_drop_event.is_set()
