@@ -606,12 +606,22 @@ class TaskEngine:
         # disappearing during return_shelf is the shelf being set down.
         self._shelf_release_expected = True
         result = await self.fleet.return_shelf(self.robot_id, shelf_id)
-        if not result.get("ok") and await self._shelf_dropped_en_route(shelf_id):
-            # Placement failed AND the shelf is off the robot, away from its
-            # home — it came off mid-return. Surface it as a real drop.
+        # kachaka_core's controller arms its shelf monitor on move_shelf and
+        # never disarms it, so its poll loop ALSO sees the placement as a
+        # "drop" and sets the slot event (2026-07-24 noon false alarm, second
+        # source). A completed placement — or a failed one with the shelf
+        # verified at/on home — means any pending drop signal is stale.
+        if result.get("ok"):
+            dropped = False
+        else:
+            dropped = await self._shelf_dropped_en_route(shelf_id)
+        if dropped:
             self._shelf_release_expected = False
             if self.shelf_drop_event is not None:
                 self.shelf_drop_event.set()
+        elif self.shelf_drop_event is not None and self.shelf_drop_event.is_set():
+            logger.info("[SHELF] Clearing stale drop signal raised during normal placement")
+            self.shelf_drop_event.clear()
         return self._make_result(result, step.action, {"shelf_id": shelf_id})
 
     def _run_outcome_buckets(self, task_id: str) -> Optional[dict]:
