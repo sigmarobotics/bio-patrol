@@ -40,6 +40,9 @@ async def send_telegram_message(message: str, chat_id: str | None = None):
     """Send a Telegram message if enabled in runtime settings.
 
     chat_id: optional override; defaults to settings.telegram_user_id.
+    When notify_hub_url + notify_hub_token are both set, the message is
+    relayed through the cloud hub's /api/notify instead of calling the
+    Telegram API directly — the hub owns the bot token.
     """
     try:
         cfg = get_runtime_settings()
@@ -48,8 +51,26 @@ async def send_telegram_message(message: str, chat_id: str | None = None):
             logger.debug("Telegram notifications disabled")
             return
 
-        token = cfg.get("telegram_bot_token", "")
         effective_chat_id = chat_id or cfg.get("telegram_user_id", "")
+
+        hub_url = (cfg.get("notify_hub_url") or "").rstrip("/")
+        hub_token = cfg.get("notify_hub_token") or ""
+        if hub_url and hub_token:
+            payload = {"text": message, "source": "bio-patrol", "parse_mode": "HTML"}
+            if effective_chat_id:
+                payload["chat_id"] = str(effective_chat_id)
+            resp = await _get_client().post(
+                f"{hub_url}/api/notify",
+                json=payload,
+                headers={"Authorization": f"Bearer {hub_token}"},
+            )
+            if resp.status_code == 200:
+                logger.info("Notification relayed via hub")
+            else:
+                logger.warning(f"Hub notify returned {resp.status_code}: {resp.text}")
+            return
+
+        token = cfg.get("telegram_bot_token", "")
 
         if not token or not effective_chat_id:
             logger.warning("Telegram enabled but bot_token or chat_id not set")

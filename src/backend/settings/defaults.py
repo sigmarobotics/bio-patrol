@@ -23,6 +23,10 @@ DEFAULT_SETTINGS = {
     "enable_telegram": False,
     "telegram_bot_token": "",
     "telegram_user_id": "",
+    # 通知改走雲端 hub relay（雲端 hub /api/notify）；兩值皆設時 Pi 不再直連
+    # Telegram API，bot token 由 hub 持有。
+    "notify_hub_url": "",
+    "notify_hub_token": "",
     # IT-12: LINE push 通報。line_group_ids 是 webhook 服務捕捉到的 group/user id 清單
     # （由 Settings UI 勾選）；line_webhook_url/api_key 指向 GCP xinyin7f 的 Cloud Run 服務。
     "enable_line": False,
