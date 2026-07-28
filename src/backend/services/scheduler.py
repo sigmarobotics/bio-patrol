@@ -12,6 +12,12 @@ from apscheduler.triggers.cron import CronTrigger
 
 logger = logging.getLogger(__name__)
 
+# APScheduler defaults to 1 s: a job whose run time slips past that — an event
+# loop stalled on a blocking call, a clock step after boot — is dropped without
+# executing. For a twice-daily patrol that window is far too tight; 15 min
+# tolerates any realistic delay while still keeping the patrol near its slot.
+MISFIRE_GRACE_SECONDS = 900
+
 
 class TaskSchedulerService:
     def __init__(self):
@@ -78,6 +84,7 @@ class TaskSchedulerService:
                     id=job_id,
                     args=[schedule_id],
                     replace_existing=True,
+                    misfire_grace_time=MISFIRE_GRACE_SECONDS,
                 )
             elif schedule_type == "weekday":
                 self.scheduler.add_job(
@@ -86,6 +93,7 @@ class TaskSchedulerService:
                     id=job_id,
                     args=[schedule_id],
                     replace_existing=True,
+                    misfire_grace_time=MISFIRE_GRACE_SECONDS,
                 )
             else:
                 # Treat as daily fallback
@@ -95,6 +103,7 @@ class TaskSchedulerService:
                     id=job_id,
                     args=[schedule_id],
                     replace_existing=True,
+                    misfire_grace_time=MISFIRE_GRACE_SECONDS,
                 )
 
             added += 1

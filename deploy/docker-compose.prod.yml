@@ -10,6 +10,10 @@ services:
       - ./wisleep-key:/app/wisleep-key:ro
     environment:
       - TZ=Asia/Taipei
+      # Without this, Python block-buffers stdout (no tty): a quiet app can go
+      # hours with `docker logs` showing nothing, and the buffered lines are
+      # lost when the process exits.
+      - PYTHONUNBUFFERED=1
     networks:
       - bio-patrol-net
     depends_on:

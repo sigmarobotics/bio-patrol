@@ -69,6 +69,9 @@ def _setup_logging():
             "services.telegram_service", "utils",
             "routers.settings", "routers.beds", "routers.patrol",
             "routers.schedule", "routers.maps",
+            # Button pairing/press history: stdout-only leaves no trace of which
+            # physical button fired an action once the container is replaced.
+            "services.button_manager", "services.action_registry",
         ],
         "task.log": [
             "kachaka", "routers.tasks", "routers.kachaka",
@@ -78,6 +81,11 @@ def _setup_logging():
         ],
         "scheduler.log": [
             "services.scheduler",
+            # APScheduler's own logger carries the "run time was missed" and
+            # job-execution warnings. Left on stdout only, they sit in the
+            # block-buffered pipe and die with the process — which is why a
+            # skipped 23:00 patrol left no evidence anywhere.
+            "apscheduler",
         ],
     }
     for filename, names in routing.items():
