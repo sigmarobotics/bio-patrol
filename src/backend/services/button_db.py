@@ -17,8 +17,14 @@ logger = logging.getLogger("services.button_db")
 
 
 def _project_root() -> str:
+    # services/ → backend/ → src/ → project root. One level deeper than
+    # main.py, hence four dirname() calls: three lands on src/, which puts the
+    # database outside the mounted data/ volume and silently discards every
+    # pairing whenever the container is recreated.
     return os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
     )
 
 
