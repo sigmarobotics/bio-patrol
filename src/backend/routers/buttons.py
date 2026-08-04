@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services import action_registry, button_db
+from services.zigbee_snapshot import snapshot_service
 
 logger = logging.getLogger("routers.buttons")
 
@@ -89,6 +90,12 @@ async def unpair(action_key: str, forget_device: bool = False):
     if forget_device and prev_ieee and _button_manager is not None:
         await _button_manager.forget_device(prev_ieee)
     return {"ok": True, "previous_ieee": prev_ieee, "forget_device": forget_device}
+
+
+@router.get("/zigbee/snapshot_status")
+async def snapshot_status():
+    """z2m 設定快照狀態（ts 一律 epoch 秒，時區換算交給前端）。"""
+    return snapshot_service.status()
 
 
 @router.post("/button-bindings/{action_key}/test")

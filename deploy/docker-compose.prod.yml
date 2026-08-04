@@ -8,8 +8,13 @@ services:
     volumes:
       - ./data:/app/data:rw
       - ./wisleep-key:/app/wisleep-key:ro
+      # Read side of the z2m config snapshotter; the write side (snapshots)
+      # lands under ./data above, which z2m mounts back as /snapshots:ro.
+      - ./zigbee2mqtt:/z2m-data:ro
     environment:
       - TZ=Asia/Taipei
+      - Z2M_DATA_DIR=/z2m-data
+      - Z2M_SNAPSHOT_DIR=/app/data/z2m-snapshots
       # Without this, Python block-buffers stdout (no tty): a quiet app can go
       # hours with `docker logs` showing nothing, and the buffered lines are
       # lost when the process exits.
@@ -42,9 +47,18 @@ services:
         max-file: "3"
 
   zigbee2mqtt:
-    image: koenkk/zigbee2mqtt:latest
+    # Pinned: overriding entrypoint wipes the image CMD, so `command` below
+    # restores it verbatim — and that value is version-specific (2.13.0
+    # docker/Dockerfile). Re-check it on every version bump.
+    image: koenkk/zigbee2mqtt:2.13.0
     container_name: bio-patrol-z2m
     restart: unless-stopped
+    # Restore must live inside z2m's own startup path: a one-shot compose
+    # service only runs on `compose up`, while a power-cut reboot has dockerd
+    # re-launch the container straight from the restart policy. `$$@` is
+    # compose escaping so the in-container sh sees `$@`.
+    entrypoint: ["/bin/sh", "-c", "sh /z2m-restore.sh || echo '[restore] failed, starting anyway'; exec docker-entrypoint.sh \"$$@\"", "--"]
+    command: ["/sbin/tini", "--", "node", "index.js"]
     # privileged + /dev:/dev so the host udev rule (99-zigbee.rules)
     # SYMLINK+="zigbee" survives a dongle unplug+replug without operator
     # intervention. Static `devices:` mapping was stuck at the old inode
@@ -54,6 +68,8 @@ services:
     volumes:
       - ./zigbee2mqtt:/app/data
       - /dev:/dev
+      - ./z2m-restore.sh:/z2m-restore.sh:ro
+      - ./data/z2m-snapshots:/snapshots:ro
     environment:
       - TZ=Asia/Taipei
     ports:

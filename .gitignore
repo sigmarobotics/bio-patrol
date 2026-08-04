@@ -141,6 +141,8 @@ sigmabot.zip
 zigbee2mqtt/*.db
 zigbee2mqtt/state.json
 zigbee2mqtt/configuration_backup_*.yaml
+zigbee2mqtt/restore-log.jsonl
+data/z2m-snapshots/
 
 # Local design-iteration artifacts (mockups + visual specs — not product assets)
 round*-*.png

@@ -26,6 +26,7 @@ from services.scheduler import scheduler_service
 from services.fleet_api import RobotNotRegistered
 from services import action_registry, button_db
 from services.zigbee_mqtt import ZigbeeMQTT
+from services.zigbee_snapshot import snapshot_service
 from services.button_manager import ButtonManager
 from dependencies import get_fleet, get_bio_sensor_client
 import lifespan_state
@@ -119,6 +120,13 @@ async def lifespan(app: FastAPI):
             action_registry.init_default_actions()
             button_db.init_schema()
             button_db.seed_actions([a["key"] for a in action_registry.list_actions()])
+            # Must be configured before the MQTT loop starts, or the first
+            # (retained) bridge/devices message arrives with snapshots still
+            # disabled. Env unset on a dev box → disabled, all ops no-op.
+            snapshot_service.configure(
+                os.environ.get("Z2M_DATA_DIR", ""),
+                os.environ.get("Z2M_SNAPSHOT_DIR", ""),
+            )
             if cfg.get("zigbee_enabled", True):
                 zigbee_mqtt = ZigbeeMQTT(
                     host=cfg.get("zigbee_mqtt_host", "mqtt-broker"),

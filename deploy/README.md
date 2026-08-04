@@ -80,6 +80,17 @@ security trade-off of running z2m privileged — is documented in:
 
 → [docs/buttons-manual.md §2.1–2.2](../docs/buttons-manual.md#21-udev-rule-for-devzigbee)
 
+### Zigbee config snapshots (power-loss resilience)
+
+The app snapshots z2m's `configuration.yaml` / `database.db` /
+`coordinator_backup.json` into `data/z2m-snapshots/` whenever the device list
+changes, and `z2m-restore.sh` — wired into the z2m container's entrypoint —
+rolls the latest complete generation back on every container start. Without
+it, one hard power cut can zero `configuration.yaml`, regenerating the
+network key and forcing every paired button to be re-paired. `z2m-restore.sh`
+must sit next to `docker-compose.prod.yml`; status is shown in Settings →
+硬體設定 → Zigbee 設定快照.
+
 ## Commands
 
 ```bash
@@ -113,6 +124,8 @@ All data is preserved across container restarts and image updates.
 deploy/
 ├── docker-compose.prod.yml   # Production compose file
 ├── mosquitto.conf             # Mosquitto broker config
+├── z2m-restore.sh             # Runs inside the z2m container on every start
+
 ├── data/
 │   └── config/                # Runtime JSON configs
 │       ├── settings.json

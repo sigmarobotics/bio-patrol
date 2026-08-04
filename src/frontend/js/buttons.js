@@ -2,9 +2,14 @@
 (function () {
   const POLL_INTERVAL_MS = 3000;
   const PAIR_COUNTDOWN_MS = 1000;
+  const SNAPSHOT_POLL_MS = 10000;
+  const TOAST_MS = 6000;
+  const SEEN_RESTORE_KEY = "z2m_snap_seen_restore_ts";
+  const SEEN_ERROR_KEY = "z2m_snap_seen_error";
 
   let pollTimer = null;
   let countdownTimer = null;
+  let snapshotTimer = null;
   let pairingState = null; // {action_key, deadline_ts}
 
   async function api(path, opts = {}) {
@@ -30,6 +35,87 @@
     const h = Math.round(m / 60);
     if (h < 48) return `${h}h ago`;
     return d.toLocaleString();
+  }
+
+  // Snapshot status carries epoch seconds (see /api/zigbee/snapshot_status).
+  function fmtEpoch(ts) {
+    if (!ts) return "—";
+    return fmtRelative(new Date(ts * 1000).toISOString());
+  }
+
+  function toast(message, isError = false) {
+    const el = document.createElement("div");
+    el.className = `z2m-toast${isError ? " z2m-toast--error" : ""}`;
+    el.textContent = message;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), TOAST_MS);
+  }
+
+  function maybeToastSnapshot(data) {
+    const restoreTs = data.last_restore?.ts;
+    if (restoreTs && String(restoreTs) !== localStorage.getItem(SEEN_RESTORE_KEY)) {
+      localStorage.setItem(SEEN_RESTORE_KEY, String(restoreTs));
+      toast(`Zigbee 設定已於開機時還原（${data.last_restore.gen || "—"}）`);
+    }
+    const err = data.last_error || "";
+    if (err !== (localStorage.getItem(SEEN_ERROR_KEY) || "")) {
+      localStorage.setItem(SEEN_ERROR_KEY, err);
+      if (err) toast(`Zigbee 設定快照失敗：${err}`, true);
+    }
+  }
+
+  async function refreshSnapshot() {
+    const card = document.getElementById("z2m-snap-card");
+    if (!card) return;
+    const pill = document.getElementById("z2m-snap-pill");
+    const lastEl = document.getElementById("z2m-snap-last");
+    const gensEl = document.getElementById("z2m-snap-gens");
+    const restoreEl = document.getElementById("z2m-snap-restore");
+    const errEl = document.getElementById("z2m-snap-error");
+
+    let data;
+    try {
+      data = await api("/api/zigbee/snapshot_status");
+    } catch (e) {
+      pill.textContent = "讀取失敗";
+      pill.className = "bb-pill bb-pill--bad";
+      return;
+    }
+
+    if (!data.enabled) {
+      card.classList.remove("z2m-snap--error");
+      pill.textContent = "未啟用";
+      pill.className = "bb-pill";
+      lastEl.textContent = "未啟用（本機開發）";
+      gensEl.textContent = "—";
+      restoreEl.textContent = "—";
+      errEl.hidden = true;
+      return;
+    }
+
+    const snap = data.last_snapshot;
+    lastEl.textContent = snap
+      ? `${fmtEpoch(snap.ts)} · ${snap.reason || "—"}`
+      : "尚無快照";
+    gensEl.textContent = `${data.generations} 代`;
+    restoreEl.textContent = data.last_restore
+      ? `${fmtEpoch(data.last_restore.ts)} · ${data.last_restore.gen || "—"}`
+      : "無紀錄";
+
+    if (data.last_error) {
+      card.classList.add("z2m-snap--error");
+      errEl.hidden = false;
+      errEl.textContent = `快照失敗：${data.last_error}`;
+      pill.textContent = "異常";
+      pill.className = "bb-pill bb-pill--bad";
+    } else {
+      card.classList.remove("z2m-snap--error");
+      errEl.hidden = true;
+      pill.textContent = "運作中";
+      pill.className = "bb-pill bb-pill--ok";
+    }
+
+    maybeToastSnapshot(data);
   }
 
   function renderRow(row) {
@@ -219,6 +305,10 @@
       clearInterval(countdownTimer);
       countdownTimer = null;
     }
+    if (snapshotTimer) {
+      clearInterval(snapshotTimer);
+      snapshotTimer = null;
+    }
   }
 
   window.loadButtons = function () {
@@ -226,6 +316,8 @@
     refresh();
     pollTimer = setInterval(refresh, POLL_INTERVAL_MS);
     startCountdown();
+    refreshSnapshot();
+    snapshotTimer = setInterval(refreshSnapshot, SNAPSHOT_POLL_MS);
   };
 
   window.unloadButtons = stopTimers;

@@ -403,6 +403,31 @@
               <div class="bb-loading">載入中…</div>
             </div>
           </div>
+
+          <div class="glass-panel" id="z2m-snap-card">
+            <div class="bb-panel-header">
+              <h3>Zigbee 設定快照</h3>
+              <span id="z2m-snap-pill" class="bb-pill">—</span>
+            </div>
+            <p class="bb-help">
+              裝置清單一變動就存一代設定檔；z2m 每次啟動自動還原最新一代，斷電後不必重配按鈕。
+            </p>
+            <div class="z2m-snap-grid">
+              <div class="z2m-snap-item">
+                <span class="z2m-snap-key">最近快照</span>
+                <span class="z2m-snap-val" id="z2m-snap-last">—</span>
+              </div>
+              <div class="z2m-snap-item">
+                <span class="z2m-snap-key">保留代數</span>
+                <span class="z2m-snap-val" id="z2m-snap-gens">—</span>
+              </div>
+              <div class="z2m-snap-item">
+                <span class="z2m-snap-key">上次開機還原</span>
+                <span class="z2m-snap-val" id="z2m-snap-restore">—</span>
+              </div>
+            </div>
+            <div class="z2m-snap-error" id="z2m-snap-error" hidden></div>
+          </div>
         </div>
       </div>
 
