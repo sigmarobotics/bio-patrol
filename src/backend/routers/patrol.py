@@ -110,11 +110,15 @@ async def set_demo_preset(name: str):
 # ── Patrol step builder ──────────────────────────────────────────────────────
 
 def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode) -> List[TaskStep]:
-    """Build a (move_shelf -> action -> ...)+ + return_shelf step list.
+    """Build a reset_shelf_pose + (move_shelf -> action -> ...)+ + return_shelf list.
 
     `beds`: ordered list of {bed_key, location_id} for the run. Empty/invalid
             entries are skipped silently (resume_patrol may carry partial dicts).
     `mode`: "demo" -> action is wait(5s); "patrol" -> bio_scan.
+
+    The shelf sits at its home whenever a run starts, so the run opens by
+    resetting the robot's shelf-pose estimate — a drifted estimate is what
+    turns into move_shelf 11005 and phantom drop alerts mid-patrol.
     """
     steps: List[TaskStep] = []
     counter = 0
@@ -150,6 +154,12 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode) -> 
         counter += 1
 
     if steps:
+        steps.insert(0, TaskStep(
+            step_id="reset_shelf",
+            action=StepAction.RESET_SHELF_POSE.value,
+            params={"shelf_id": shelf_id},
+            status=StepStatus.PENDING,
+        ))
         steps.append(TaskStep(
             step_id=f"return_{counter}",
             action=StepAction.RETURN_SHELF.value,

@@ -35,6 +35,7 @@ class StepAction(str, Enum):
     UNDOCK_SHELF = "undock_shelf"
     MOVE_SHELF = "move_shelf"
     RETURN_SHELF = "return_shelf"
+    RESET_SHELF_POSE = "reset_shelf_pose"
     RETURN_HOME = "return_home"
     BIO_SCAN = "bio_scan"
     WAIT = "wait"
@@ -46,6 +47,7 @@ NON_CRITICAL_ACTIONS = frozenset({
     StepAction.WAIT.value,
     StepAction.SPEAK.value,
     StepAction.RETURN_SHELF.value,
+    StepAction.RESET_SHELF_POSE.value,
 })
 
 # Enhanced Result Models

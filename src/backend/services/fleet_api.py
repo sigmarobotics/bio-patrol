@@ -503,6 +503,11 @@ class FleetAPI:
 
         return await asyncio.to_thread(_run)
 
+    async def reset_shelf_pose(self, robot_id: str, shelf_id: str) -> dict:
+        """Reset the robot's recorded shelf pose to the shelf's home."""
+        slot = self._get_slot(robot_id)
+        return await asyncio.to_thread(slot.cmds.reset_shelf_pose, shelf_id)
+
     async def move_to_pose(
         self,
         robot_id: str,

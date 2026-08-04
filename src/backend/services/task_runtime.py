@@ -58,6 +58,7 @@ class TaskEngine:
             StepAction.UNDOCK_SHELF.value: self._do_undock_shelf,
             StepAction.MOVE_SHELF.value: self._do_move_shelf,
             StepAction.RETURN_SHELF.value: self._do_return_shelf,
+            StepAction.RESET_SHELF_POSE.value: self._do_reset_shelf_pose,
             StepAction.RETURN_HOME.value: self._do_return_home,
             StepAction.BIO_SCAN.value: self._do_bio_scan,
             StepAction.WAIT.value: self._do_wait,
@@ -588,6 +589,11 @@ class TaskEngine:
     async def _do_undock_shelf(self, step: TaskStep) -> StepResult:
         result = await self.fleet.undock_shelf(self.robot_id)
         return self._make_result(result, step.action, {})
+
+    async def _do_reset_shelf_pose(self, step: TaskStep) -> StepResult:
+        shelf_id = step.params["shelf_id"]
+        result = await self.fleet.reset_shelf_pose(self.robot_id, shelf_id)
+        return self._make_result(result, step.action, {"shelf_id": shelf_id})
 
     async def _do_move_shelf(self, step: TaskStep) -> StepResult:
         shelf_id = step.params["shelf_id"]

@@ -3,6 +3,8 @@ Pin its contract so a refactor in one consumer can't silently drift the other.
 """
 from __future__ import annotations
 
+import pytest
+
 from common_types import StepAction, StepStatus
 from routers.patrol import build_patrol_steps
 
@@ -17,6 +19,7 @@ def _beds():
 def test_patrol_mode_emits_move_then_bio_scan_per_bed_then_return_shelf():
     steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="patrol")
     assert [s.action for s in steps] == [
+        StepAction.RESET_SHELF_POSE.value,
         StepAction.MOVE_SHELF.value, StepAction.BIO_SCAN.value,
         StepAction.MOVE_SHELF.value, StepAction.BIO_SCAN.value,
         StepAction.RETURN_SHELF.value,
@@ -42,6 +45,28 @@ def test_demo_mode_uses_wait_5s_instead_of_bio_scan():
 def test_empty_beds_emits_no_steps_and_no_dangling_return_shelf():
     steps = build_patrol_steps([], shelf_id="S_04", mode="patrol")
     assert steps == []
+
+
+def test_all_invalid_beds_emit_no_steps():
+    """start/resume return 400 on an empty step list — a run that reduces to
+    nothing must not become a lone reset_shelf_pose step."""
+    beds = [{"bed_key": "", "location_id": ""}, {"bed_key": "101-1", "location_id": ""}]
+    steps = build_patrol_steps(beds, shelf_id="S_04", mode="patrol")
+    assert steps == []
+
+
+@pytest.mark.parametrize("mode", ["patrol", "demo"])
+def test_run_opens_with_reset_shelf_pose(mode):
+    """The customer parks the shelf at home before every run, so the run opens
+    by resetting the robot's shelf-pose estimate to home."""
+    steps = build_patrol_steps(_beds(), shelf_id="S_04", mode=mode)
+    first = steps[0]
+    assert first.action == StepAction.RESET_SHELF_POSE.value
+    assert first.step_id == "reset_shelf"
+    assert first.params == {"shelf_id": "S_04"}
+    # Non-critical by NON_CRITICAL_ACTIONS, not by a skip list — a failed
+    # reset must not take the first bed's move_shelf down with it.
+    assert not first.skip_on_failure
 
 
 def test_skips_beds_with_missing_keys():
