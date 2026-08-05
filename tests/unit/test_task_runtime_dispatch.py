@@ -75,6 +75,22 @@ def test_speak_handler_calls_fleet_speak():
     assert result.data == {"speak_text": "hi"}
 
 
+def test_reset_shelf_pose_handler_calls_fleet_with_shelf_id():
+    engine = _make_engine()
+    engine.fleet.reset_shelf_pose = AsyncMock(return_value={"ok": True})
+    step = TaskStep(
+        step_id="reset_shelf",
+        action=StepAction.RESET_SHELF_POSE.value,
+        params={"shelf_id": "S_04"},
+    )
+
+    result = asyncio.run(engine._execute_step(step))
+
+    engine.fleet.reset_shelf_pose.assert_awaited_once_with("kachaka", "S_04")
+    assert result.success is True
+    assert result.data == {"shelf_id": "S_04"}
+
+
 def test_wait_handler_sleeps_and_succeeds():
     engine = _make_engine()
     step = TaskStep(step_id="s-1", action=StepAction.WAIT.value, params={"seconds": "0.01"})
