@@ -51,16 +51,28 @@
     setTimeout(() => el.remove(), TOAST_MS);
   }
 
+  // ok === 0 → z2m-restore.sh 有檔案沒蓋回去（舊格式沒有 ok，視為正常）。
+  function restoreFailed(restore) {
+    return !!restore && restore.ok === 0;
+  }
+
   function maybeToastSnapshot(data) {
-    const restoreTs = data.last_restore?.ts;
+    const restore = data.last_restore;
+    const restoreTs = restore?.ts;
     if (restoreTs && String(restoreTs) !== localStorage.getItem(SEEN_RESTORE_KEY)) {
       localStorage.setItem(SEEN_RESTORE_KEY, String(restoreTs));
-      toast(`Zigbee 設定已於開機時還原（${data.last_restore.gen || "—"}）`);
+      const gen = restore.gen || "—";
+      toast(
+        restoreFailed(restore)
+          ? `Zigbee 設定開機還原不完整（${gen}）：z2m 可能是用壞掉的設定啟動的`
+          : `Zigbee 設定已於開機時還原（${gen}）`,
+        restoreFailed(restore),
+      );
     }
     const err = data.last_error || "";
     if (err !== (localStorage.getItem(SEEN_ERROR_KEY) || "")) {
       localStorage.setItem(SEEN_ERROR_KEY, err);
-      if (err) toast(`Zigbee 設定快照失敗：${err}`, true);
+      if (err) toast(`Zigbee 設定快照異常：${err}`, true);
     }
   }
 
@@ -82,37 +94,52 @@
       return;
     }
 
-    if (!data.enabled) {
-      card.classList.remove("z2m-snap--error");
-      pill.textContent = "未啟用";
-      pill.className = "bb-pill";
-      lastEl.textContent = "未啟用（本機開發）";
-      gensEl.textContent = "—";
-      restoreEl.textContent = "—";
-      errEl.hidden = true;
-      return;
+    // 停用分兩種：env 沒設＝本機開發（中性）；設了卻用不起來＝正式機誤設，快照
+    // 停了但還原沒停，每次開機都會把系統拖回停掉那一刻——必須報異常。
+    const restore = data.last_restore;
+    const badRestore = restoreFailed(restore);
+    const errors = [];
+    if (data.last_error) {
+      errors.push(
+        data.enabled
+          ? `快照失敗：${data.last_error}`
+          : `快照已停用（沒在存新的，但開機還原照樣會蓋）：${data.last_error}`,
+      );
+    }
+    if (badRestore) {
+      const got = (restore.files || []).length;
+      const want = (restore.expected || []).length;
+      errors.push(
+        `上次開機還原不完整（${got}/${want} 檔）：z2m 可能是用壞掉的設定啟動的，` +
+          "請確認按鈕是否還在配對狀態",
+      );
     }
 
     const snap = data.last_snapshot;
-    lastEl.textContent = snap
-      ? `${fmtEpoch(snap.ts)} · ${snap.reason || "—"}`
-      : "尚無快照";
-    gensEl.textContent = `${data.generations} 代`;
-    restoreEl.textContent = data.last_restore
-      ? `${fmtEpoch(data.last_restore.ts)} · ${data.last_restore.gen || "—"}`
+    if (!data.enabled) {
+      lastEl.textContent = data.last_error ? "已停用（設定有問題）" : "未啟用（本機開發）";
+      gensEl.textContent = "—";
+    } else {
+      lastEl.textContent = snap
+        ? `${fmtEpoch(snap.ts)} · ${snap.reason || "—"}`
+        : "尚無快照";
+      gensEl.textContent = `${data.generations} 代`;
+    }
+    restoreEl.textContent = restore
+      ? `${fmtEpoch(restore.ts)} · ${restore.gen || "—"}${badRestore ? " · 不完整" : ""}`
       : "無紀錄";
 
-    if (data.last_error) {
+    if (errors.length) {
       card.classList.add("z2m-snap--error");
       errEl.hidden = false;
-      errEl.textContent = `快照失敗：${data.last_error}`;
+      errEl.textContent = errors.join("；");
       pill.textContent = "異常";
       pill.className = "bb-pill bb-pill--bad";
     } else {
       card.classList.remove("z2m-snap--error");
       errEl.hidden = true;
-      pill.textContent = "運作中";
-      pill.className = "bb-pill bb-pill--ok";
+      pill.textContent = data.enabled ? "運作中" : "未啟用";
+      pill.className = data.enabled ? "bb-pill bb-pill--ok" : "bb-pill";
     }
 
     maybeToastSnapshot(data);

@@ -91,6 +91,13 @@ network key and forcing every paired button to be re-paired. `z2m-restore.sh`
 must sit next to `docker-compose.prod.yml`; status is shown in Settings →
 硬體設定 → Zigbee 設定快照.
 
+That card goes red when the app cannot snapshot (missing
+`Z2M_DATA_DIR`/`Z2M_SNAPSHOT_DIR`, or the `zigbee2mqtt/` mount not taking
+effect — snapshots stop while the restore keeps rolling back, the worst
+combination) and when a boot restore did not put every file back. Grey
+「未啟用（本機開發）」 means neither env var is set at all, which is only
+correct off the Pi — on the Pi it means the compose file is out of date.
+
 ## Commands
 
 ```bash

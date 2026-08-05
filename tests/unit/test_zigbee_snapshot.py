@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -115,11 +117,41 @@ def test_unconfigured_service_is_noop():
     }
 
 
-def test_configure_with_missing_dir_stays_disabled():
+def test_configure_without_env_is_silent_dev_mode():
+    s = SnapshotService()
+    s.configure("", "")
+    assert s.enabled is False
+    assert s.status()["last_error"] is None
+
+
+def test_configure_with_missing_dir_reports_misconfiguration():
+    """設了卻用不起來 ≠ 本機 dev：還原端照樣每次開機蓋回，這種停用必須報異常。"""
     with tempfile.TemporaryDirectory() as d:
         s = SnapshotService()
         s.configure(str(Path(d) / "nope"), str(Path(d) / "snapshots"))
         assert s.enabled is False
+        assert "Z2M_DATA_DIR" in s.status()["last_error"]
+
+
+def test_configure_without_snapshot_dir_reports_misconfiguration(svc):
+    _s, z2m, _snap = svc
+    s = SnapshotService()
+    s.configure(str(z2m), "")
+    assert s.enabled is False
+    assert "Z2M_SNAPSHOT_DIR" in s.status()["last_error"]
+
+
+def test_configure_reports_unusable_snapshot_dir_but_keeps_restore_visible(svc):
+    s, z2m, _snap = svc
+    (z2m / "restore-log.jsonl").write_text('{"ts":9,"gen":"gen-9","ok":1}\n')
+    blocker = z2m / "not-a-dir"      # 檔案擋著 → mkdir 失敗
+    blocker.write_text("x")
+
+    s.configure(str(z2m), str(blocker / "snapshots"))
+    st = s.status()
+    assert s.enabled is False
+    assert "快照目錄建不起來" in st["last_error"]
+    assert st["last_restore"] == {"ts": 9, "gen": "gen-9", "ok": 1}
 
 
 # ── debounce ────────────────────────────────────────────────────────────
@@ -192,13 +224,15 @@ def test_status_reads_latest_generation_from_disk_after_restart(svc):
 def test_status_last_restore_is_last_log_line(svc):
     s, z2m, _snap = svc
     (z2m / "restore-log.jsonl").write_text(
-        '{"ts":1,"gen":"gen-1","files":["configuration.yaml"]}\n'
-        '{"ts":2,"gen":"gen-2","files":["configuration.yaml","database.db"]}\n'
+        '{"ts":1,"gen":"gen-1","ok":1,"files":["configuration.yaml"]}\n'
+        '{"ts":2,"gen":"gen-2","ok":0,"expected":["configuration.yaml","database.db"],'
+        '"files":["configuration.yaml"]}\n'
         "\n"
     )
     assert s.status()["last_restore"] == {
-        "ts": 2, "gen": "gen-2",
-        "files": ["configuration.yaml", "database.db"],
+        "ts": 2, "gen": "gen-2", "ok": 0,
+        "expected": ["configuration.yaml", "database.db"],
+        "files": ["configuration.yaml"],
     }
 
 
@@ -206,6 +240,62 @@ def test_status_last_restore_tolerates_broken_log(svc):
     s, z2m, _snap = svc
     (z2m / "restore-log.jsonl").write_text('{"ts":1,"gen":"gen-1"}\n{"ts":2,')
     assert s.status()["last_restore"] is None
+
+
+# ── z2m-restore.sh ──────────────────────────────────────────────────────
+
+RESTORE_SH = Path(__file__).resolve().parents[2] / "deploy" / "z2m-restore.sh"
+
+
+def _run_restore(tmp: Path, files: dict[str, str], before=None) -> dict:
+    """在 tmp 下擺一代快照、跑還原腳本，回傳它寫的紀錄行。"""
+    gen = tmp / "snapshots" / "gen-1700000000005"
+    gen.mkdir(parents=True)
+    for name, content in files.items():
+        (gen / name).write_text(content)
+    (gen / "meta.json").write_text("{}")
+    data = tmp / "data"
+    data.mkdir()
+    (data / "configuration.yaml").write_text("network_key: ZEROED\n")
+    if before:
+        before()
+
+    proc = subprocess.run(
+        ["sh", str(RESTORE_SH)], capture_output=True, text=True,
+        env={**os.environ, "SNAP_DIR": str(tmp / "snapshots"), "DATA_DIR": str(data)},
+    )
+    assert proc.returncode == 0, proc.stderr      # 還原絕不擋 z2m 啟動
+    return json.loads((data / "restore-log.jsonl").read_text().splitlines()[-1])
+
+
+def test_restore_records_ok_when_every_file_lands():
+    """這代本來就沒有 coordinator_backup.json 也算完整——expected 是照這代算的。"""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        line = _run_restore(tmp, {"configuration.yaml": "network_key: GOOD\n",
+                                  "database.db": "db-good\n"})
+        assert line["ok"] == 1
+        assert line["expected"] == line["files"] == ["configuration.yaml", "database.db"]
+        assert (tmp / "data" / "configuration.yaml").read_text() == "network_key: GOOD\n"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root 讀得到 chmod 000 的檔案")
+def test_restore_records_shortfall_instead_of_looking_healthy():
+    """有檔案沒蓋回去 → ok=0；少了它，壞掉那次開機長得跟健康的一模一樣。"""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        db = tmp / "snapshots" / "gen-1700000000005" / "database.db"
+
+        def unreadable_db():
+            db.chmod(0o000)      # 模擬 SD 讀取錯誤：cp 讀不到這一份
+
+        line = _run_restore(tmp, {"configuration.yaml": "network_key: GOOD\n",
+                                  "database.db": "db-good\n"}, before=unreadable_db)
+        db.chmod(0o644)          # 讓 TemporaryDirectory 收得掉
+
+        assert line["ok"] == 0
+        assert line["expected"] == ["configuration.yaml", "database.db"]
+        assert line["files"] == ["configuration.yaml"]
 
 
 # ── endpoint ────────────────────────────────────────────────────────────

@@ -12,7 +12,9 @@ fs.writeFileSync——斷在寫入中就清零，等於 Zigbee 網路重生（ne
 代的完整性靠 rename 的原子性：先寫 gen-*.tmp/，meta.json 落地後才 rename 成
 gen-*——所以「目錄裡有 meta.json」＝這一代寫完了，還原端據此挑選。
 
-env 未設或路徑不存在（本機 dev 沒掛 z2m 資料夾）→ disabled，所有操作 no-op。
+env 兩個都沒設（本機 dev 沒掛 z2m 資料夾）→ disabled，所有操作 no-op；設了卻用不
+起來（掛載沒生效、路徑改名）也 disabled，但那是正式機誤設，要在狀態卡報異常——
+還原端不受 app 影響照樣每次開機蓋回，快照停了而還原沒停＝每次開機回滾到停掉那刻。
 """
 
 import asyncio
@@ -36,8 +38,10 @@ class SnapshotService:
     def __init__(self):
         self._z2m_dir: Path | None = None
         self._snap_dir: Path | None = None
+        self._log_dir: Path | None = None   # 還原紀錄讀得到就讀，與 enabled 無關
         self._last: dict | None = None
         self._last_error: str | None = None
+        self._config_error: str | None = None
         self._task: asyncio.Task | None = None
         self._seen_bridge = False
         self._pending = "startup"
@@ -47,16 +51,34 @@ class SnapshotService:
         return self._z2m_dir is not None
 
     def configure(self, z2m_dir: str = "", snap_dir: str = "") -> None:
-        """main.py lifespan 注入路徑；任一項缺失就停用（本機 dev 不炸）。"""
-        self._z2m_dir = self._snap_dir = None
-        if not z2m_dir or not snap_dir or not Path(z2m_dir).is_dir():
-            logger.info("z2m 快照未啟用（Z2M_DATA_DIR=%r）", z2m_dir)
+        """main.py lifespan 注入路徑。
+
+        兩個 env 都沒設＝本機 dev，安靜停用；設了卻用不起來＝正式機誤設（compose 沒
+        更新、掛載沒生效、目錄改名），一樣停用但記進 _config_error 讓狀態卡報異常。
+        兩者不能折成同一個「未啟用」——後者代表快照停了而還原沒停。
+        """
+        self._z2m_dir = self._snap_dir = self._log_dir = None
+        self._config_error = None
+
+        if not z2m_dir and not snap_dir:
+            logger.info("z2m 快照未啟用（Z2M_DATA_DIR/Z2M_SNAPSHOT_DIR 未設定）")
             return
-        try:
-            Path(snap_dir).mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            logger.warning("z2m 快照目錄建立失敗：%s", e)
+        if z2m_dir and Path(z2m_dir).is_dir():
+            self._log_dir = Path(z2m_dir)    # 停用了也要能回報上次開機還原
+        else:
+            self._config_error = f"Z2M_DATA_DIR 不是目錄（{z2m_dir!r}）：掛載沒生效？"
+        if not self._config_error and not snap_dir:
+            self._config_error = "Z2M_SNAPSHOT_DIR 未設定"
+        if not self._config_error:
+            try:
+                Path(snap_dir).mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                self._config_error = f"快照目錄建不起來（{snap_dir!r}）：{e}"
+        if self._config_error:
+            logger.error("z2m 快照停用（設定有問題，快照不會存但還原照樣會蓋）：%s",
+                         self._config_error)
             return
+
         self._z2m_dir, self._snap_dir = Path(z2m_dir), Path(snap_dir)
         logger.info("z2m 快照已啟用：%s → %s", z2m_dir, snap_dir)
 
@@ -153,10 +175,15 @@ class SnapshotService:
     # ── 狀態（/api/zigbee/snapshot_status）────────────────────────────
 
     def status(self) -> dict:
-        """ts 一律 epoch 秒，時區換算交給前端。"""
+        """ts 一律 epoch 秒，時區換算交給前端。
+
+        停用時 last_error 帶設定錯誤（沒設就是 None＝本機 dev），last_restore 照樣
+        回報——還原端與 app 無關，開機一樣會蓋。
+        """
+        restore = self._last_restore()
         if not self.enabled:
             return {"enabled": False, "last_snapshot": None, "generations": 0,
-                    "last_error": self._last_error, "last_restore": None}
+                    "last_error": self._config_error, "last_restore": restore}
         last = self._last
         if last is None:
             latest = self._latest()
@@ -166,13 +193,15 @@ class SnapshotService:
         return {"enabled": True, "last_snapshot": last,
                 "generations": len(self._gens()),
                 "last_error": self._last_error,
-                "last_restore": self._last_restore()}
+                "last_restore": restore}
 
     def _last_restore(self) -> dict | None:
         """z2m 容器每次啟動由 z2m-restore.sh append 一行；取最後一行。"""
+        if self._log_dir is None:
+            return None
         try:
             lines = [ln for ln in
-                     (self._z2m_dir / "restore-log.jsonl").read_text().splitlines()
+                     (self._log_dir / "restore-log.jsonl").read_text().splitlines()
                      if ln.strip()]
             return json.loads(lines[-1]) if lines else None
         except (OSError, ValueError):
