@@ -80,6 +80,24 @@ security trade-off of running z2m privileged — is documented in:
 
 → [docs/buttons-manual.md §2.1–2.2](../docs/buttons-manual.md#21-udev-rule-for-devzigbee)
 
+### Zigbee config snapshots (power-loss resilience)
+
+The app snapshots z2m's `configuration.yaml` / `database.db` /
+`coordinator_backup.json` into `data/z2m-snapshots/` whenever the device list
+changes, and `z2m-restore.sh` — wired into the z2m container's entrypoint —
+rolls the latest complete generation back on every container start. Without
+it, one hard power cut can zero `configuration.yaml`, regenerating the
+network key and forcing every paired button to be re-paired. `z2m-restore.sh`
+must sit next to `docker-compose.prod.yml`; status is shown in Settings →
+硬體設定 → Zigbee 設定快照.
+
+That card goes red when the app cannot snapshot (missing
+`Z2M_DATA_DIR`/`Z2M_SNAPSHOT_DIR`, or the `zigbee2mqtt/` mount not taking
+effect — snapshots stop while the restore keeps rolling back, the worst
+combination) and when a boot restore did not put every file back. Grey
+「未啟用（本機開發）」 means neither env var is set at all, which is only
+correct off the Pi — on the Pi it means the compose file is out of date.
+
 ## Commands
 
 ```bash
@@ -113,6 +131,8 @@ All data is preserved across container restarts and image updates.
 deploy/
 ├── docker-compose.prod.yml   # Production compose file
 ├── mosquitto.conf             # Mosquitto broker config
+├── z2m-restore.sh             # Runs inside the z2m container on every start
+
 ├── data/
 │   └── config/                # Runtime JSON configs
 │       ├── settings.json

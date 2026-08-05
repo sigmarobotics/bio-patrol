@@ -12,7 +12,14 @@ from typing import Awaitable, Callable
 
 import aiomqtt
 
+from services.zigbee_snapshot import snapshot_service
+
 logger = logging.getLogger("services.zigbee_mqtt")
+
+# Retained topic z2m re-publishes on every pairing / removal / rename — the
+# trigger for a config snapshot. Already covered by the `zigbee2mqtt/#`
+# subscription, so no extra subscribe is needed.
+BRIDGE_DEVICES_TOPIC = "zigbee2mqtt/bridge/devices"
 
 Handler = Callable[[dict], Awaitable[None]]
 
@@ -116,6 +123,8 @@ class ZigbeeMQTT:
                     logger.info("Connected to MQTT %s:%s", self._host, self._port)
                     await client.subscribe(self.SUB_TOPIC)
                     async for message in client.messages:
+                        if str(message.topic) == BRIDGE_DEVICES_TOPIC:
+                            snapshot_service.notify_bridge_devices()
                         payload = message.payload
                         if isinstance(payload, (bytes, bytearray)):
                             payload = payload.decode(errors="replace")

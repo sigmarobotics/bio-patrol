@@ -2,9 +2,14 @@
 (function () {
   const POLL_INTERVAL_MS = 3000;
   const PAIR_COUNTDOWN_MS = 1000;
+  const SNAPSHOT_POLL_MS = 10000;
+  const TOAST_MS = 6000;
+  const SEEN_RESTORE_KEY = "z2m_snap_seen_restore_ts";
+  const SEEN_ERROR_KEY = "z2m_snap_seen_error";
 
   let pollTimer = null;
   let countdownTimer = null;
+  let snapshotTimer = null;
   let pairingState = null; // {action_key, deadline_ts}
 
   async function api(path, opts = {}) {
@@ -30,6 +35,114 @@
     const h = Math.round(m / 60);
     if (h < 48) return `${h}h ago`;
     return d.toLocaleString();
+  }
+
+  // Snapshot status carries epoch seconds (see /api/zigbee/snapshot_status).
+  function fmtEpoch(ts) {
+    if (!ts) return "—";
+    return fmtRelative(new Date(ts * 1000).toISOString());
+  }
+
+  function toast(message, isError = false) {
+    const el = document.createElement("div");
+    el.className = `z2m-toast${isError ? " z2m-toast--error" : ""}`;
+    el.textContent = message;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), TOAST_MS);
+  }
+
+  // ok === 0 → z2m-restore.sh 有檔案沒蓋回去（舊格式沒有 ok，視為正常）。
+  function restoreFailed(restore) {
+    return !!restore && restore.ok === 0;
+  }
+
+  function maybeToastSnapshot(data) {
+    const restore = data.last_restore;
+    const restoreTs = restore?.ts;
+    if (restoreTs && String(restoreTs) !== localStorage.getItem(SEEN_RESTORE_KEY)) {
+      localStorage.setItem(SEEN_RESTORE_KEY, String(restoreTs));
+      const gen = restore.gen || "—";
+      toast(
+        restoreFailed(restore)
+          ? `Zigbee 設定開機還原不完整（${gen}）：z2m 可能是用壞掉的設定啟動的`
+          : `Zigbee 設定已於開機時還原（${gen}）`,
+        restoreFailed(restore),
+      );
+    }
+    const err = data.last_error || "";
+    if (err !== (localStorage.getItem(SEEN_ERROR_KEY) || "")) {
+      localStorage.setItem(SEEN_ERROR_KEY, err);
+      if (err) toast(`Zigbee 設定快照異常：${err}`, true);
+    }
+  }
+
+  async function refreshSnapshot() {
+    const card = document.getElementById("z2m-snap-card");
+    if (!card) return;
+    const pill = document.getElementById("z2m-snap-pill");
+    const lastEl = document.getElementById("z2m-snap-last");
+    const gensEl = document.getElementById("z2m-snap-gens");
+    const restoreEl = document.getElementById("z2m-snap-restore");
+    const errEl = document.getElementById("z2m-snap-error");
+
+    let data;
+    try {
+      data = await api("/api/zigbee/snapshot_status");
+    } catch (e) {
+      pill.textContent = "讀取失敗";
+      pill.className = "bb-pill bb-pill--bad";
+      return;
+    }
+
+    // 停用分兩種：env 沒設＝本機開發（中性）；設了卻用不起來＝正式機誤設，快照
+    // 停了但還原沒停，每次開機都會把系統拖回停掉那一刻——必須報異常。
+    const restore = data.last_restore;
+    const badRestore = restoreFailed(restore);
+    const errors = [];
+    if (data.last_error) {
+      errors.push(
+        data.enabled
+          ? `快照失敗：${data.last_error}`
+          : `快照已停用（沒在存新的，但開機還原照樣會蓋）：${data.last_error}`,
+      );
+    }
+    if (badRestore) {
+      const got = (restore.files || []).length;
+      const want = (restore.expected || []).length;
+      errors.push(
+        `上次開機還原不完整（${got}/${want} 檔）：z2m 可能是用壞掉的設定啟動的，` +
+          "請確認按鈕是否還在配對狀態",
+      );
+    }
+
+    const snap = data.last_snapshot;
+    if (!data.enabled) {
+      lastEl.textContent = data.last_error ? "已停用（設定有問題）" : "未啟用（本機開發）";
+      gensEl.textContent = "—";
+    } else {
+      lastEl.textContent = snap
+        ? `${fmtEpoch(snap.ts)} · ${snap.reason || "—"}`
+        : "尚無快照";
+      gensEl.textContent = `${data.generations} 代`;
+    }
+    restoreEl.textContent = restore
+      ? `${fmtEpoch(restore.ts)} · ${restore.gen || "—"}${badRestore ? " · 不完整" : ""}`
+      : "無紀錄";
+
+    if (errors.length) {
+      card.classList.add("z2m-snap--error");
+      errEl.hidden = false;
+      errEl.textContent = errors.join("；");
+      pill.textContent = "異常";
+      pill.className = "bb-pill bb-pill--bad";
+    } else {
+      card.classList.remove("z2m-snap--error");
+      errEl.hidden = true;
+      pill.textContent = data.enabled ? "運作中" : "未啟用";
+      pill.className = data.enabled ? "bb-pill bb-pill--ok" : "bb-pill";
+    }
+
+    maybeToastSnapshot(data);
   }
 
   function renderRow(row) {
@@ -219,6 +332,10 @@
       clearInterval(countdownTimer);
       countdownTimer = null;
     }
+    if (snapshotTimer) {
+      clearInterval(snapshotTimer);
+      snapshotTimer = null;
+    }
   }
 
   window.loadButtons = function () {
@@ -226,6 +343,8 @@
     refresh();
     pollTimer = setInterval(refresh, POLL_INTERVAL_MS);
     startCountdown();
+    refreshSnapshot();
+    snapshotTimer = setInterval(refreshSnapshot, SNAPSHOT_POLL_MS);
   };
 
   window.unloadButtons = stopTimers;
