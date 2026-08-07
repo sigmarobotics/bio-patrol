@@ -71,6 +71,44 @@ test.describe('IT-9 dashboard bed-grid E2E', () => {
     await expect(drawer).toBeHidden();
   });
 
+  // IT-15 — seed gives 101-1 a 60-run history: newest 10 valid runs read 72/18,
+  // the next 20 read 90/22 → window 10 averages 72, window 30 averages 84.
+  test('IT-15: drawer stats block shows computed averages + sparkline', async ({ page }) => {
+    await page.locator('.bed-card[data-bed-key="101-1"]').click();
+    await page.waitForSelector('#bed-drawer-stats-title', { timeout: 5000 });
+    await expect(page.locator('#bed-drawer-stats-title')).toHaveText('近 30 次有效量測');
+    await expect(page.locator('#bed-stat-bpm')).toHaveText('84');
+    await expect(page.locator('#bed-stat-rpm')).toHaveText('20.7');
+    await expect(page.locator('.bed-stats__spark')).toBeVisible();
+    await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'it15-drawer-stats.png') });
+  });
+
+  test('IT-15: window select 30→10 refreshes stats + title', async ({ page }) => {
+    await page.locator('.bed-card[data-bed-key="101-1"]').click();
+    await page.waitForSelector('#bed-drawer-window', { timeout: 5000 });
+    await page.locator('#bed-drawer-window').selectOption('10');
+    await expect(page.locator('#bed-drawer-stats-title')).toHaveText('近 10 次有效量測');
+    await expect(page.locator('#bed-stat-bpm')).toHaveText('72');
+    await expect(page.locator('#bed-stat-rpm')).toHaveText('18');
+  });
+
+  test('IT-15: scrolling the drawer loads more runs until 已載入全部', async ({ page }) => {
+    await page.locator('.bed-card[data-bed-key="101-1"]').click();
+    await page.waitForSelector('#bed-drawer-body .drawer-row', { timeout: 5000 });
+    const rows = page.locator('#bed-drawer-body .drawer-row');
+    const before = await rows.count();
+    expect(before).toBeGreaterThan(5);  // the old drawer capped at 5
+    const body = page.locator('#bed-drawer-body');
+    for (let i = 0; i < 8; i++) {
+      await body.evaluate(el => { el.scrollTop = el.scrollHeight; });
+      await page.waitForTimeout(400);
+      if (await page.locator('#bed-drawer-end').count()) break;
+    }
+    expect(await rows.count()).toBeGreaterThan(before);
+    await expect(page.locator('#bed-drawer-end')).toHaveText('已載入全部');
+    await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'it15-drawer-scrolled.png') });
+  });
+
   test('Settings stale_hours field exists + persists', async ({ page }) => {
     await page.locator('button[data-tab="settings"]').click();
     await page.locator('button[data-settings-subtab="notifications"]').click();

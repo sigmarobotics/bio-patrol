@@ -5,10 +5,13 @@ router = APIRouter(prefix='/api/bio-sensor', tags=['Bio Sensor'])
 
 
 @router.get("/scan-history")
-async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, location_id: str = None):
+async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, location_id: str = None,
+                                      before_id: int = None):
     """Get historical bio-sensor scan data from database.
 
     location_id is the canonical join key, not bed_name which is free-text.
+    before_id is the pagination cursor: id is AUTOINCREMENT, so id order and
+    timestamp order agree.
     """
     client = get_bio_sensor_client()
     if client is None:
@@ -29,6 +32,9 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
         if location_id:
             clauses.append("location_id = ?")
             params.append(location_id)
+        if before_id:
+            clauses.append("id < ?")
+            params.append(before_id)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
         params.append(limit)
@@ -46,6 +52,70 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
         rows = cursor.fetchall()
         data = [{**dict(r), "is_valid": bool(r["is_valid"])} for r in rows]
         return {"status": "success", "data": data, "count": len(data)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn is not None:
+            conn.close()
+
+@router.get("/bed-stats")
+async def get_bed_stats(location_id: str, window: int = 30):
+    """Rolling stats + trend for one bed over its most recent runs.
+
+    A failed scan writes one row per retry, so rows are collapsed into runs by
+    task_id first — success_rate counts runs, not retries. Averages come from
+    the newest `window` VALID runs only; success_rate from the newest `window`
+    runs including failures.
+    """
+    client = get_bio_sensor_client()
+    if client is None:
+        return {"status": "disabled", "message": "Bio-sensor MQTT is disabled"}
+    import sqlite3
+
+    window = max(1, min(window, 200))
+    conn = None
+    try:
+        conn = sqlite3.connect(client.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT task_id, timestamp, bpm, rpm, is_valid
+            FROM sensor_scan_data
+            WHERE location_id = ?
+            ORDER BY id DESC
+            LIMIT 2000
+            """,
+            (location_id,),
+        )
+
+        runs = []      # newest-first, one entry per task_id
+        by_task = {}
+        for r in cursor.fetchall():
+            run = by_task.get(r["task_id"])
+            if run is None:
+                run = {"is_valid": False, "timestamp": r["timestamp"], "bpm": None, "rpm": None}
+                by_task[r["task_id"]] = run
+                runs.append(run)
+            if r["is_valid"] and not run["is_valid"]:
+                run.update(is_valid=True, timestamp=r["timestamp"], bpm=r["bpm"], rpm=r["rpm"])
+
+        recent = runs[:window]
+        valid = [r for r in runs if r["is_valid"]][:window]
+        stats = {
+            "avg_bpm": round(sum(r["bpm"] for r in valid) / len(valid), 1) if valid else None,
+            "avg_rpm": round(sum(r["rpm"] for r in valid) / len(valid), 1) if valid else None,
+            "valid_count": len(valid),
+            "success_rate": (
+                round(sum(1 for r in recent if r["is_valid"]) / len(recent), 3) if recent else None
+            ),
+            "window": window,
+        }
+        trend = [
+            {"timestamp": r["timestamp"], "bpm": r["bpm"], "rpm": r["rpm"]}
+            for r in reversed(valid)
+        ]
+        return {"status": "success", "stats": stats, "trend": trend}
     except Exception as e:
         return {"status": "error", "message": str(e)}
     finally:

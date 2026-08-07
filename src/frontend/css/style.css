@@ -1900,10 +1900,42 @@ input[type="checkbox"]:checked::after {
   background: none; border: none; color: var(--text-muted);
   font-size: 18px; cursor: pointer; padding: 0 4px;
 }
+.bed-drawer-stats {
+  padding: 12px 16px;
+  background: var(--panel-mid);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.bed-drawer-stats:empty { display: none; }
+.bed-stats__head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 8px;
+}
+.bed-stats__title { color: var(--text-secondary); font-size: 11px; }
+.bed-stats__window {
+  background: var(--panel-light); color: var(--text-primary);
+  border: 1px solid var(--border-medium); border-radius: 3px;
+  font-family: var(--font-mono); font-size: 11px; padding: 1px 4px;
+}
+.bed-stats__grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px;
+}
+.bed-stat { display: flex; flex-direction: column; gap: 2px; }
+.bed-stat__label { color: var(--text-muted); font-size: 9px; }
+.bed-stat__value { font-family: var(--font-mono); font-size: 13px; color: var(--text-bright); }
+.bed-stats__spark { display: block; width: 100%; height: 48px; margin-top: 8px; }
+.bed-stats__legend {
+  display: flex; align-items: center; gap: 4px;
+  color: var(--text-muted); font-size: 9px;
+}
+.bed-stats__key { width: 10px; height: 2px; display: inline-block; }
+.bed-stats__key--bpm { background: var(--amber); }
+.bed-stats__key--rpm { background: var(--teal); margin-left: 8px; }
+.bed-stats__empty { color: var(--text-muted); font-size: 11px; margin-top: 8px; }
 .bed-drawer-body {
   flex: 1; overflow-y: auto; padding: 12px 16px;
   display: flex; flex-direction: column; gap: 8px;
 }
+.drawer-hint { color: var(--text-muted); font-size: 10px; text-align: center; padding: 4px 0; }
 .drawer-row {
   background: var(--panel-light);
   border-left: 3px solid var(--accent-green);
@@ -1915,12 +1947,6 @@ input[type="checkbox"]:checked::after {
 .drawer-row__time { color: var(--text-muted); font-size: 10px; }
 .drawer-row__vit { font-family: var(--font-mono); margin-top: 2px; }
 .drawer-row__detail { color: var(--text-muted); font-size: 10px; margin-top: 2px; font-style: italic; }
-.bed-drawer-footer {
-  padding: 10px 16px;
-  border-top: 1px solid var(--border-subtle);
-  text-align: center;
-}
-.bed-drawer-footer-link { color: var(--teal); font-size: 11px; text-decoration: none; }
 
 /* ═══════════════════════════════════════════════════════════════════════
    ROBOT MINI FRAME + ROBOT MODAL

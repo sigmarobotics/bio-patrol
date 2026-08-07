@@ -175,11 +175,110 @@
     _pollState.visibilityHandler = null;
   }
 
+  // Per-open drawer state: accumulated raw rows (keyed by row id so paged
+  // fetches can overlap), the pagination cursor, and the scroll listener.
+  const _drawer = { locationId: null, rows: new Map(), oldestId: null, loading: false, done: false, scrollHandler: null };
+  const WINDOW_OPTIONS = [10, 20, 30, 50, 100];
+  const DEFAULT_WINDOW = 30;
+  const PAGE_SIZE = 100;
+
+  function _statsWindow() {
+    const saved = parseInt(localStorage.getItem('bedStatsWindow'), 10);
+    return WINDOW_OPTIONS.includes(saved) ? saved : DEFAULT_WINDOW;
+  }
+
+  // Both series share one scale — a second y-scale would misstate BPM vs RPM.
+  function _renderSparkline(trend) {
+    if (trend.length < 2) return '<p class="bed-stats__empty">尚無有效量測</p>';
+    const W = 100, H = 48, PAD = 4;
+    const values = trend.flatMap(p => [p.bpm, p.rpm]);
+    const min = Math.min(...values);
+    const span = Math.max(...values) - min || 1;
+    const px = i => (i / (trend.length - 1)) * W;
+    const py = v => PAD + (1 - (v - min) / span) * (H - 2 * PAD);
+    const points = key => trend.map((p, i) => `${px(i).toFixed(1)},${py(p[key]).toFixed(1)}`).join(' ');
+    return `<svg class="bed-stats__spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="BPM 與 RPM 趨勢">
+      <polyline points="${points('bpm')}" fill="none" stroke="var(--amber)" stroke-width="1.5" vector-effect="non-scaling-stroke" />
+      <polyline points="${points('rpm')}" fill="none" stroke="var(--teal)" stroke-width="1.5" vector-effect="non-scaling-stroke" />
+    </svg>
+    <div class="bed-stats__legend">
+      <span class="bed-stats__key bed-stats__key--bpm"></span>BPM
+      <span class="bed-stats__key bed-stats__key--rpm"></span>RPM
+    </div>`;
+  }
+
+  function _renderStats(res) {
+    const el = document.getElementById('bed-drawer-stats');
+    if (!el) return;
+    if (res.status !== 'success') {
+      el.innerHTML = `<p class="bed-stats__empty">統計載入失敗：${res.message ?? '未知'}</p>`;
+      return;
+    }
+    const s = res.stats;
+    const pct = s.success_rate == null ? '--' : `${Math.round(s.success_rate * 100)}%`;
+    el.innerHTML = `<div class="bed-stats__head">
+      <span class="bed-stats__title" id="bed-drawer-stats-title">近 ${s.window} 次有效量測</span>
+      <select class="bed-stats__window" id="bed-drawer-window">
+        ${WINDOW_OPTIONS.map(n => `<option value="${n}"${n === s.window ? ' selected' : ''}>${n}</option>`).join('')}
+      </select>
+    </div>
+    <div class="bed-stats__grid">
+      <div class="bed-stat"><span class="bed-stat__label">平均 BPM</span><span class="bed-stat__value" id="bed-stat-bpm">${s.avg_bpm ?? '--'}</span></div>
+      <div class="bed-stat"><span class="bed-stat__label">平均 RPM</span><span class="bed-stat__value" id="bed-stat-rpm">${s.avg_rpm ?? '--'}</span></div>
+      <div class="bed-stat"><span class="bed-stat__label">成功率</span><span class="bed-stat__value">${pct}</span></div>
+      <div class="bed-stat"><span class="bed-stat__label">有效次數</span><span class="bed-stat__value">${s.valid_count}</span></div>
+    </div>
+    ${_renderSparkline(res.trend)}`;
+    document.getElementById('bed-drawer-window').onchange = (ev) => {
+      const win = parseInt(ev.target.value, 10);
+      localStorage.setItem('bedStatsWindow', win);
+      dataService.getBedStats(_drawer.locationId, win).then(_renderStats);
+    };
+  }
+
+  function _renderRows() {
+    const body = document.getElementById('bed-drawer-body');
+    if (!body) return;
+    const perRun = dedupeScans([..._drawer.rows.values()]);
+    if (!perRun.length) {
+      body.innerHTML = '<p style="color:var(--text-muted);font-size:11px;">尚無掃描記錄</p>';
+      return;
+    }
+    body.innerHTML = perRun.map(d => `
+      <div class="drawer-row drawer-row--${d.is_valid ? 'valid' : 'invalid'}">
+        <div class="drawer-row__time">${new Date(d.timestamp).toLocaleString()}</div>
+        <div class="drawer-row__vit">BPM ${d.bpm ?? '--'} · RPM ${d.rpm ?? '--'} · status=${d.status ?? '--'}</div>
+        ${d.details ? `<div class="drawer-row__detail">${d.details}</div>` : ''}
+      </div>
+    `).join('') + (_drawer.done ? '<p class="drawer-hint" id="bed-drawer-end">已載入全部</p>' : '');
+  }
+
+  function _mergeRows(rows) {
+    rows.forEach(r => { if (!_drawer.rows.has(r.id)) _drawer.rows.set(r.id, r); });
+    if (_drawer.rows.size) _drawer.oldestId = Math.min(...[..._drawer.rows.keys()]);
+  }
+
+  function _loadMore() {
+    _drawer.loading = true;
+    dataService.getScanHistoryByLocation(_drawer.locationId, PAGE_SIZE, _drawer.oldestId).then(res => {
+      _drawer.loading = false;
+      if (res.status !== 'success') return;
+      _mergeRows(res.data);
+      if (res.data.length < PAGE_SIZE) _drawer.done = true;
+      _renderRows();
+    }).catch(() => { _drawer.loading = false; });
+  }
+
+  function _onDrawerScroll(ev) {
+    if (_drawer.loading || _drawer.done) return;
+    const body = ev.currentTarget;
+    if (body.scrollHeight - body.scrollTop - body.clientHeight < 200) _loadMore();
+  }
+
   function openDrawer(bedKey) {
     const drawer = document.getElementById('bed-drawer');
     const title = document.getElementById('bed-drawer-title');
     const body = document.getElementById('bed-drawer-body');
-    const histLink = document.getElementById('bed-drawer-history-link');
     if (!drawer || !title || !body) return;
 
     // Resolve bedKey → location_id (canonical key) via cached beds config
@@ -192,40 +291,36 @@
 
     title.textContent = `Bed ${bedKey}`;
     body.innerHTML = '<p style="color:var(--text-muted);font-size:11px;">Loading…</p>';
+    document.getElementById('bed-drawer-stats').innerHTML = '';
     drawer.removeAttribute('hidden');
 
-    if (histLink) {
-      histLink.onclick = (ev) => {
-        ev.preventDefault();
-        closeDrawer();
-        if (typeof switchTab === 'function') switchTab('sensor');
-        // Could prefilter History tab; YAGNI for now
-      };
-    }
+    _drawer.locationId = locationId;
+    _drawer.rows = new Map();
+    _drawer.oldestId = null;
+    _drawer.loading = false;
+    _drawer.done = false;
 
-    // Fetch enough raw rows to cover ~5 runs (a failed scan writes one row
-    // per retry), then dedupe to one outcome row per patrol run — otherwise a
-    // single failed measurement fills the drawer with 5 identical Invalid rows.
-    dataService.getScanHistoryByLocation(locationId, 30).then(res => {
+    dataService.getBedStats(locationId, _statsWindow())
+      .then(_renderStats)
+      .catch(err => _renderStats({ status: 'error', message: err.message }));
+
+    // Raw rows, not runs: a failed scan writes one row per retry, so the page
+    // is deduped to one outcome row per patrol run before rendering.
+    dataService.getScanHistoryByLocation(locationId, PAGE_SIZE).then(res => {
       if (res.status !== 'success') {
         body.innerHTML = `<p style="color:var(--accent-red);font-size:11px;">載入失敗：${res.message ?? '未知'}</p>`;
         return;
       }
-      const perRun = dedupeScans(res.data).slice(0, 5);
-      if (!perRun.length) {
-        body.innerHTML = '<p style="color:var(--text-muted);font-size:11px;">尚無掃描記錄</p>';
-        return;
-      }
-      body.innerHTML = perRun.map(d => `
-      <div class="drawer-row drawer-row--${d.is_valid ? 'valid' : 'invalid'}">
-        <div class="drawer-row__time">${new Date(d.timestamp).toLocaleString()}</div>
-        <div class="drawer-row__vit">BPM ${d.bpm ?? '--'} · RPM ${d.rpm ?? '--'} · status=${d.status ?? '--'}</div>
-        ${d.details ? `<div class="drawer-row__detail">${d.details}</div>` : ''}
-      </div>
-    `).join('');
+      _mergeRows(res.data);
+      if (res.data.length < PAGE_SIZE) _drawer.done = true;
+      _renderRows();
     }).catch(err => {
       body.innerHTML = `<p style="color:var(--accent-red);font-size:11px;">載入失敗：${err.message}</p>`;
     });
+
+    if (_drawer.scrollHandler) body.removeEventListener('scroll', _drawer.scrollHandler);
+    _drawer.scrollHandler = _onDrawerScroll;
+    body.addEventListener('scroll', _drawer.scrollHandler);
 
     // Backdrop click + ESC close
     const backdrop = drawer.querySelector('.bed-drawer-backdrop');
@@ -248,6 +343,14 @@
       document.removeEventListener('keydown', drawer._escHandler);
       drawer._escHandler = null;
     }
+    const body = document.getElementById('bed-drawer-body');
+    if (body && _drawer.scrollHandler) body.removeEventListener('scroll', _drawer.scrollHandler);
+    _drawer.scrollHandler = null;
+    _drawer.locationId = null;
+    _drawer.rows = new Map();
+    _drawer.oldestId = null;
+    _drawer.loading = false;
+    _drawer.done = false;
   }
 
   global.bedGrid = {
