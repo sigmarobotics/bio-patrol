@@ -99,9 +99,10 @@ async def get_bio_sensor_scan_data():
         client = get_bio_sensor_client()
         if client is None:
             return {"status": "disabled", "message": "Bio-sensor MQTT is disabled"}
-        # location_id is NOT NULL in sensor_scan_data — tag ad-hoc scans as
-        # "manual" so the save doesn't blow up outside a patrol task.
-        outcome = await client.get_valid_scan_data(target_bed="manual", bed_name="manual")
+        # Task-less scans default to location_id='manual' inside
+        # get_valid_scan_data; bed_name stays None so ad-hoc rows never
+        # show up in /latest-by-bed.
+        outcome = await client.get_valid_scan_data()
 
         if outcome.valid_record is None:
             return {
