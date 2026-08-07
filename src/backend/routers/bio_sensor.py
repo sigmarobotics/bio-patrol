@@ -5,10 +5,14 @@ router = APIRouter(prefix='/api/bio-sensor', tags=['Bio Sensor'])
 
 
 @router.get("/scan-history")
-async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, location_id: str = None):
+async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, location_id: str = None,
+                                      before_id: int = None):
     """Get historical bio-sensor scan data from database.
 
     location_id is the canonical join key, not bed_name which is free-text.
+    before_id is the pagination cursor; rows sort by id DESC so the cursor
+    and the sort always agree (timestamps are wall-clock strings that can go
+    backwards on tz changes or NTP steps — id is true insert order).
     """
     client = get_bio_sensor_client()
     if client is None:
@@ -29,6 +33,9 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
         if location_id:
             clauses.append("location_id = ?")
             params.append(location_id)
+        if before_id:
+            clauses.append("id < ?")
+            params.append(before_id)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
         params.append(limit)
@@ -38,7 +45,7 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
                    status, bpm, rpm, is_valid, data_json, details
             FROM sensor_scan_data
             {where}
-            ORDER BY timestamp DESC, retry_count ASC
+            ORDER BY id DESC
             LIMIT ?
             """,
             params,
@@ -46,6 +53,77 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
         rows = cursor.fetchall()
         data = [{**dict(r), "is_valid": bool(r["is_valid"])} for r in rows]
         return {"status": "success", "data": data, "count": len(data)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn is not None:
+            conn.close()
+
+@router.get("/bed-stats")
+async def get_bed_stats(location_id: str, window: int = 30, bed_name: str = None):
+    """Rolling stats + trend for one bed over its most recent runs.
+
+    A failed scan writes one row per retry, so rows are collapsed into runs by
+    task_id first — success_rate counts runs, not retries. Averages come from
+    the newest `window` VALID runs only; success_rate from the newest `window`
+    runs including failures. Pass bed_name too when beds share a Kachaka
+    destination — one patrol stamps the same task_id for both beds, and
+    location_id alone would merge the roommates' readings into one run.
+    """
+    client = get_bio_sensor_client()
+    if client is None:
+        return {"status": "disabled", "message": "Bio-sensor MQTT is disabled"}
+    import sqlite3
+
+    window = max(1, min(window, 200))
+    conn = None
+    try:
+        conn = sqlite3.connect(client.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        clauses = ["location_id = ?"]
+        params = [location_id]
+        if bed_name:
+            clauses.append("bed_name = ?")
+            params.append(bed_name)
+        cursor.execute(
+            f"""
+            SELECT task_id, timestamp, bpm, rpm, is_valid
+            FROM sensor_scan_data
+            WHERE {' AND '.join(clauses)}
+            ORDER BY id DESC
+            LIMIT 2000
+            """,
+            params,
+        )
+
+        runs = []      # newest-first, one entry per task_id
+        by_task = {}
+        for r in cursor.fetchall():
+            run = by_task.get(r["task_id"])
+            if run is None:
+                run = {"is_valid": False, "timestamp": r["timestamp"], "bpm": None, "rpm": None}
+                by_task[r["task_id"]] = run
+                runs.append(run)
+            if r["is_valid"] and not run["is_valid"]:
+                run.update(is_valid=True, timestamp=r["timestamp"], bpm=r["bpm"], rpm=r["rpm"])
+
+        recent = runs[:window]
+        valid = [r for r in runs if r["is_valid"]][:window]
+        stats = {
+            "avg_bpm": round(sum(r["bpm"] for r in valid) / len(valid), 1) if valid else None,
+            "avg_rpm": round(sum(r["rpm"] for r in valid) / len(valid), 1) if valid else None,
+            "valid_count": len(valid),
+            "success_rate": (
+                round(sum(1 for r in recent if r["is_valid"]) / len(recent), 3) if recent else None
+            ),
+            "window": window,
+        }
+        trend = [
+            {"timestamp": r["timestamp"], "bpm": r["bpm"], "rpm": r["rpm"]}
+            for r in reversed(valid)
+        ]
+        return {"status": "success", "stats": stats, "trend": trend}
     except Exception as e:
         return {"status": "error", "message": str(e)}
     finally:

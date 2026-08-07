@@ -105,24 +105,33 @@ except sqlite3.OperationalError:
     pass  # column already exists
 
 # Wipe E2E rows from prior runs to make seed deterministic
-cur.execute("DELETE FROM sensor_scan_data WHERE task_id LIKE 'e2e-%'")
+# Wipe by location too, not just task_id: IT-15 asserts exact averages over
+# ALL rows of these locations, so stray local patrol rows would flake them.
+cur.execute(
+    "DELETE FROM sensor_scan_data WHERE task_id LIKE 'e2e-%' "
+    "OR location_id IN ('loc_101_1', 'loc_101_2', 'loc_102_1', 'loc_102_2')"
+)
 
 now = datetime.now(timezone.utc)
 
 
-def insert(loc_id: str, ts: datetime, *, is_valid: bool, status: int, bpm: int, rpm: int, details: str | None = None):
+def insert(loc_id: str, bed: str, ts: datetime, *, is_valid: bool, status: int, bpm: int, rpm: int,
+           retry_count: int = 0, details: str | None = None, task_id: str | None = None):
+    # bed_name is required: /latest-by-bed filters `bed_name IS NOT NULL`, so a
+    # row without it never reaches a bed card.
     data = {"location_id": loc_id, "status": status, "bpm": bpm, "rpm": rpm, "details": details}
     cur.execute(
         """
         INSERT INTO sensor_scan_data
-        (task_id, location_id, timestamp, retry_count, status, bpm, rpm, data_json, is_valid, details)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (task_id, location_id, bed_name, timestamp, retry_count, status, bpm, rpm, data_json, is_valid, details)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            f"e2e-{uuid.uuid4()}",
+            task_id or f"e2e-{uuid.uuid4()}",
             loc_id,
+            bed,
             ts.isoformat(),
-            0,
+            retry_count,
             status,
             bpm,
             rpm,
@@ -133,17 +142,41 @@ def insert(loc_id: str, ts: datetime, *, is_valid: bool, status: int, bpm: int, 
     )
 
 
+# IT-15: deep history for 101-1 so the drawer has >1 page of raw rows and a
+# window-dependent average. Inserted FIRST so ids stay in timestamp order
+# (bed-stats walks rows by id DESC).
+# 60 runs, every 4th a failure that writes 5 retry rows → 120 raw rows.
+# Newest 9 valid runs read 72/18, the rest 90/22 → window=10 averages 72.0
+# (with the 101-1 state row below), window=30 averages 84.0.
+history = []
+valid_rank = 0
+for i in range(60):  # newest → oldest
+    if i % 4 == 3:
+        history.append(None)
+    else:
+        history.append((72, 18) if valid_rank < 9 else (90, 22))
+        valid_rank += 1
+for age, run in enumerate(reversed(history), start=1):  # oldest first
+    ts = now - timedelta(minutes=10 * (len(history) - age + 1))
+    task = f"e2e-hist-{age:03d}"
+    if run is None:
+        for retry in range(5):
+            insert("loc_101_1", "101-1", ts + timedelta(seconds=retry), is_valid=False, status=2,
+                   bpm=0, rpm=0, retry_count=retry, details="Signal too weak", task_id=task)
+    else:
+        insert("loc_101_1", "101-1", ts, is_valid=True, status=4, bpm=run[0], rpm=run[1], task_id=task)
+
 # 101-1 → VALID (recent + is_valid=True)
-insert("loc_101_1", now - timedelta(minutes=5), is_valid=True, status=4, bpm=72, rpm=18)
+insert("loc_101_1", "101-1", now - timedelta(minutes=5), is_valid=True, status=4, bpm=72, rpm=18)
 
 # 101-2 → INVALID (recent but is_valid=False)
-insert("loc_101_2", now - timedelta(minutes=3), is_valid=False, status=2, bpm=0, rpm=0, details="Signal too weak")
+insert("loc_101_2", "101-2", now - timedelta(minutes=3), is_valid=False, status=2, bpm=0, rpm=0, details="Signal too weak")
 
 # 102-1 → STALE (last valid > 24h ago, threshold is 24h)
-insert("loc_102_1", now - timedelta(hours=30), is_valid=True, status=4, bpm=80, rpm=20)
+insert("loc_102_1", "102-1", now - timedelta(hours=30), is_valid=True, status=4, bpm=80, rpm=20)
 
 # 102-2 → UNSCHEDULED (enabled=False) — even though there's a valid recent row, classifier ignores it
-insert("loc_102_2", now - timedelta(minutes=10), is_valid=True, status=4, bpm=70, rpm=17)
+insert("loc_102_2", "102-2", now - timedelta(minutes=10), is_valid=True, status=4, bpm=70, rpm=17)
 
 conn.commit()
 conn.close()

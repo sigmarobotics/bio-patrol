@@ -139,10 +139,17 @@ class DataService {
     return res.data;
   }
 
-  async getScanHistoryByLocation(locationId, limit = 5) {
-    const res = await axios.get('/api/bio-sensor/scan-history', {
-      params: { location_id: locationId, limit }
-    });
+  async getScanHistoryByLocation(locationId, limit = 5, beforeId = null) {
+    const params = { location_id: locationId, limit };
+    if (beforeId) params.before_id = beforeId;
+    const res = await axios.get('/api/bio-sensor/scan-history', { params });
+    return res.data;
+  }
+
+  async getBedStats(locationId, window = 30, bedName = null) {
+    const params = { location_id: locationId, window };
+    if (bedName) params.bed_name = bedName;
+    const res = await axios.get('/api/bio-sensor/bed-stats', { params });
     return res.data;
   }
 
