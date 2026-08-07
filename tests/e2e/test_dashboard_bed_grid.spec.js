@@ -107,7 +107,7 @@ test.describe('IT-9 dashboard bed-grid E2E', () => {
       if (await page.locator('#bed-drawer-end').count()) break;
     }
     expect(await rows.count()).toBeGreaterThan(before);
-    await expect(page.locator('#bed-drawer-end')).toHaveText('已載入全部');
+    await expect(page.locator('#bed-drawer-end')).toHaveText('已載入至最舊紀錄');
     await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'it15-drawer-scrolled.png') });
   });
 

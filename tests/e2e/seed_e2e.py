@@ -105,7 +105,12 @@ except sqlite3.OperationalError:
     pass  # column already exists
 
 # Wipe E2E rows from prior runs to make seed deterministic
-cur.execute("DELETE FROM sensor_scan_data WHERE task_id LIKE 'e2e-%'")
+# Wipe by location too, not just task_id: IT-15 asserts exact averages over
+# ALL rows of these locations, so stray local patrol rows would flake them.
+cur.execute(
+    "DELETE FROM sensor_scan_data WHERE task_id LIKE 'e2e-%' "
+    "OR location_id IN ('loc_101_1', 'loc_101_2', 'loc_102_1', 'loc_102_2')"
+)
 
 now = datetime.now(timezone.utc)
 

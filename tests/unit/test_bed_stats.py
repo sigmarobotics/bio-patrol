@@ -105,3 +105,19 @@ def test_bed_stats_scoped_to_location(client_with_db):
     stats = client.get("/api/bio-sensor/bed-stats?location_id=B_101-1").json()["stats"]
     assert stats["avg_bpm"] == 60.0
     assert stats["valid_count"] == 1
+
+
+def test_bed_stats_bed_name_filter_separates_shared_location(client_with_db):
+    client, db = client_with_db
+    # Two beds share one Kachaka destination AND one patrol task_id — without
+    # the bed_name filter, one bed's stats absorb the roommate's readings.
+    _insert(db, task_id="T1", location_id="辦公室222", bed_name="102-3",
+            timestamp="2026-05-01T10:00:00", bpm=60, rpm=10)
+    _insert(db, task_id="T1", location_id="辦公室222", bed_name="103-3",
+            timestamp="2026-05-01T10:05:00", bpm=90, rpm=20)
+    a = client.get("/api/bio-sensor/bed-stats",
+                   params={"location_id": "辦公室222", "bed_name": "102-3"}).json()["stats"]
+    b = client.get("/api/bio-sensor/bed-stats",
+                   params={"location_id": "辦公室222", "bed_name": "103-3"}).json()["stats"]
+    assert a["avg_bpm"] == 60.0 and a["valid_count"] == 1
+    assert b["avg_bpm"] == 90.0 and b["valid_count"] == 1

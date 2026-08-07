@@ -10,8 +10,9 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
     """Get historical bio-sensor scan data from database.
 
     location_id is the canonical join key, not bed_name which is free-text.
-    before_id is the pagination cursor: id is AUTOINCREMENT, so id order and
-    timestamp order agree.
+    before_id is the pagination cursor; rows sort by id DESC so the cursor
+    and the sort always agree (timestamps are wall-clock strings that can go
+    backwards on tz changes or NTP steps — id is true insert order).
     """
     client = get_bio_sensor_client()
     if client is None:
@@ -44,7 +45,7 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
                    status, bpm, rpm, is_valid, data_json, details
             FROM sensor_scan_data
             {where}
-            ORDER BY timestamp DESC, retry_count ASC
+            ORDER BY id DESC
             LIMIT ?
             """,
             params,
@@ -59,13 +60,15 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
             conn.close()
 
 @router.get("/bed-stats")
-async def get_bed_stats(location_id: str, window: int = 30):
+async def get_bed_stats(location_id: str, window: int = 30, bed_name: str = None):
     """Rolling stats + trend for one bed over its most recent runs.
 
     A failed scan writes one row per retry, so rows are collapsed into runs by
     task_id first — success_rate counts runs, not retries. Averages come from
     the newest `window` VALID runs only; success_rate from the newest `window`
-    runs including failures.
+    runs including failures. Pass bed_name too when beds share a Kachaka
+    destination — one patrol stamps the same task_id for both beds, and
+    location_id alone would merge the roommates' readings into one run.
     """
     client = get_bio_sensor_client()
     if client is None:
@@ -78,15 +81,20 @@ async def get_bed_stats(location_id: str, window: int = 30):
         conn = sqlite3.connect(client.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
+        clauses = ["location_id = ?"]
+        params = [location_id]
+        if bed_name:
+            clauses.append("bed_name = ?")
+            params.append(bed_name)
         cursor.execute(
-            """
+            f"""
             SELECT task_id, timestamp, bpm, rpm, is_valid
             FROM sensor_scan_data
-            WHERE location_id = ?
+            WHERE {' AND '.join(clauses)}
             ORDER BY id DESC
             LIMIT 2000
             """,
-            (location_id,),
+            params,
         )
 
         runs = []      # newest-first, one entry per task_id

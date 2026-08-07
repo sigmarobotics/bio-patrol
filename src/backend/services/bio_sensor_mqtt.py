@@ -99,6 +99,11 @@ class BioSensorMQTTClient:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_scan_bed_ts ON sensor_scan_data(bed_name, timestamp DESC)"
         )
+        # idx_scan_loc_id covers the drawer's id-cursor pagination and the
+        # /bed-stats per-location ORDER BY id DESC scan.
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scan_loc_id ON sensor_scan_data(location_id, id DESC)"
+        )
         conn.commit()
         conn.close()
     

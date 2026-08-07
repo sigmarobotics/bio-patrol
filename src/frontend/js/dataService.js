@@ -146,10 +146,10 @@ class DataService {
     return res.data;
   }
 
-  async getBedStats(locationId, window = 30) {
-    const res = await axios.get('/api/bio-sensor/bed-stats', {
-      params: { location_id: locationId, window }
-    });
+  async getBedStats(locationId, window = 30, bedName = null) {
+    const params = { location_id: locationId, window };
+    if (bedName) params.bed_name = bedName;
+    const res = await axios.get('/api/bio-sensor/bed-stats', { params });
     return res.data;
   }
 
