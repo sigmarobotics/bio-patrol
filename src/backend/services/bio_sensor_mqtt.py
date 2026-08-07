@@ -172,6 +172,12 @@ class BioSensorMQTTClient:
 
         if task_id is None:
             task_id = get_now().strftime("%Y%m%d%H%M%S")
+        if target_bed is None:
+            # location_id is NOT NULL in sensor_scan_data, so the fallback for
+            # task-less (ad-hoc) scans lives here where the DB write happens —
+            # not at call sites. bed_name intentionally stays None so ad-hoc
+            # rows never surface in the per-bed latest view.
+            target_bed = "manual"
 
         if not self.connected:
             # paho's loop is already retrying in the background; nudge it once
@@ -201,11 +207,16 @@ class BioSensorMQTTClient:
 
         await asyncio.sleep(INT_WAIT_TIME)
         for retry_count in range(RETRY_COUNT):
-            if self.latest_data and 'records' in self.latest_data:
+            # Snapshot the reference: the paho thread reassigns latest_data
+            # wholesale, and concurrent scans (patrol + ad-hoc) iterate the
+            # same record dicts — label a copy, never the shared original.
+            latest = self.latest_data
+            if latest and 'records' in latest:
                 has_any_data = True
-                for data in self.latest_data['records']:
+                for data in latest['records']:
                     logger.debug("scan_data: %s", data)
                     is_valid = is_valid_scan(data, VALID_STATUS)
+                    data = dict(data)
                     data['details'] = '量測正常' if is_valid else '無有效量測數値'
                     data['location_id'] = target_bed
                     data['bed_name'] = bed_name
