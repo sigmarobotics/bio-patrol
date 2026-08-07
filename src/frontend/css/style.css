@@ -1922,14 +1922,12 @@ input[type="checkbox"]:checked::after {
 .bed-stat { display: flex; flex-direction: column; gap: 2px; }
 .bed-stat__label { color: var(--text-muted); font-size: 9px; }
 .bed-stat__value { font-family: var(--font-mono); font-size: 13px; color: var(--text-bright); }
-.bed-stats__spark { display: block; width: 100%; height: 48px; margin-top: 8px; }
-.bed-stats__legend {
-  display: flex; align-items: center; gap: 4px;
-  color: var(--text-muted); font-size: 9px;
+.bed-stats__spark { display: block; width: 100%; height: 32px; margin-top: 2px; }
+.bed-stats__series-label {
+  display: flex; justify-content: space-between; align-items: baseline;
+  color: var(--text-muted); font-size: 9px; margin-top: 8px;
 }
-.bed-stats__key { width: 10px; height: 2px; display: inline-block; }
-.bed-stats__key--bpm { background: var(--amber); }
-.bed-stats__key--rpm { background: var(--teal); margin-left: 8px; }
+.bed-stats__series-range { font-family: var(--font-mono); }
 .bed-stats__empty { color: var(--text-muted); font-size: 11px; margin-top: 8px; }
 .bed-drawer-body {
   flex: 1; overflow-y: auto; padding: 12px 16px;

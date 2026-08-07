@@ -187,24 +187,26 @@
     return WINDOW_OPTIONS.includes(saved) ? saved : DEFAULT_WINDOW;
   }
 
-  // Both series share one scale — a second y-scale would misstate BPM vs RPM.
+  // One chart per series, each normalized to its own min/max — BPM (~60-90)
+  // and RPM (~12-20) on a shared scale would flatten the RPM trend.
   function _renderSparkline(trend) {
     if (trend.length < 2) return '<p class="bed-stats__empty">尚無有效量測</p>';
-    const W = 100, H = 48, PAD = 4;
-    const values = trend.flatMap(p => [p.bpm, p.rpm]);
-    const min = Math.min(...values);
-    const span = Math.max(...values) - min || 1;
+    const W = 100, H = 32, PAD = 3;
     const px = i => (i / (trend.length - 1)) * W;
-    const py = v => PAD + (1 - (v - min) / span) * (H - 2 * PAD);
-    const points = key => trend.map((p, i) => `${px(i).toFixed(1)},${py(p[key]).toFixed(1)}`).join(' ');
-    return `<svg class="bed-stats__spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="BPM 與 RPM 趨勢">
-      <polyline points="${points('bpm')}" fill="none" stroke="var(--amber)" stroke-width="1.5" vector-effect="non-scaling-stroke" />
-      <polyline points="${points('rpm')}" fill="none" stroke="var(--teal)" stroke-width="1.5" vector-effect="non-scaling-stroke" />
-    </svg>
-    <div class="bed-stats__legend">
-      <span class="bed-stats__key bed-stats__key--bpm"></span>BPM
-      <span class="bed-stats__key bed-stats__key--rpm"></span>RPM
-    </div>`;
+    const chart = (key, label, color) => {
+      const values = trend.map(p => p[key]);
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const span = max - min || 1;
+      const py = v => PAD + (1 - (v - min) / span) * (H - 2 * PAD);
+      const points = trend.map((p, i) => `${px(i).toFixed(1)},${py(p[key]).toFixed(1)}`).join(' ');
+      const range = min === max ? `${min}` : `${min}–${max}`;
+      return `<div class="bed-stats__series-label">${label}<span class="bed-stats__series-range">${range}</span></div>
+      <svg class="bed-stats__spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${label} 趨勢">
+        <polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke" />
+      </svg>`;
+    };
+    return chart('bpm', 'BPM', 'var(--amber)') + chart('rpm', 'RPM', 'var(--teal)');
   }
 
   function _renderStats(res) {

@@ -79,7 +79,9 @@ test.describe('IT-9 dashboard bed-grid E2E', () => {
     await expect(page.locator('#bed-drawer-stats-title')).toHaveText('近 30 次有效量測');
     await expect(page.locator('#bed-stat-bpm')).toHaveText('84');
     await expect(page.locator('#bed-stat-rpm')).toHaveText('20.7');
-    await expect(page.locator('.bed-stats__spark')).toBeVisible();
+    await expect(page.locator('.bed-stats__spark')).toHaveCount(2);  // BPM + RPM 各一張
+    await expect(page.locator('.bed-stats__spark').first()).toBeVisible();
+    await expect(page.locator('.bed-stats__spark').last()).toBeVisible();
     await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'it15-drawer-stats.png') });
   });
 
