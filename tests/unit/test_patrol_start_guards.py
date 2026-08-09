@@ -1,9 +1,10 @@
 """TODO-018: start_patrol duplicate-submit dedup + low-battery gate.
 
-Two runs of the same mode on one shelf fight each other on the robot, so a
-second submit while one is queued/executing returns the live task instead of
-creating another. The battery gate refuses to start a doomed run, but stays
-fail-open when the robot cannot be queried at all.
+Two runs on one shelf fight each other on the robot, so a second submit while
+one is queued/executing returns the live task instead of creating another. The
+battery gate refuses to start a doomed run, but stays fail-open when the robot
+cannot be queried at all. Every patrol entry point — manual, demo button,
+schedule, resume — goes through start_patrol, so all of them are covered.
 """
 import asyncio
 
@@ -85,14 +86,19 @@ def test_in_progress_task_also_blocks(patched):
     assert len(submitted) == 1
 
 
-def test_other_mode_is_not_deduped(patched):
+def test_other_mode_is_also_deduped(patched):
+    """One robot, one shelf: a demo pressed mid-patrol would run the same shelf
+    right after the patrol, so it is a duplicate too. The reply names the mode
+    that is actually running, not the one that was asked for."""
     _, submitted = patched
 
-    _start(mode="patrol")
+    patrol_run = _start(mode="patrol")
     demo = _start(mode="demo")
 
-    assert demo["status"] == "ok"
-    assert len(submitted) == 2
+    assert demo["status"] == "already_running"
+    assert demo["task_id"] == patrol_run["task_id"]
+    assert demo["mode"] == "patrol"
+    assert len(submitted) == 1
 
 
 def test_finished_task_does_not_block(patched):
@@ -115,8 +121,9 @@ def test_task_carries_mode_metadata(patched):
 
 
 def test_unrelated_task_without_metadata_does_not_block(patched):
-    """Scheduler-created tasks carry no mode — they must not swallow a manual
-    start via a None == None match."""
+    """Only patrol-family runs carry a mode. A generic /api/tasks submission has
+    none and must not swallow a patrol start via a None == None match. (Scheduled
+    runs go through start_patrol, so they are tagged and DO block.)"""
     _, submitted = patched
     tasks_db["other"] = Task(
         task_id="other",
@@ -165,4 +172,83 @@ def test_missing_percentage_field_fails_open(patched):
     set_battery({"ok": False})
 
     assert _start()["status"] == "ok"
+    assert len(submitted) == 1
+
+
+# ── the other entry points inherit both guards ───────────────────────────────
+
+def _run_scheduled():
+    """Fire the APScheduler job body directly, as the 23:00 trigger would."""
+    from services.scheduler import scheduler_service
+    asyncio.run(scheduler_service._run_patrol("night"))
+
+
+def test_scheduled_run_is_tagged_and_blocks_a_manual_start(patched):
+    """The scheduled run used to build its own Task, so it carried no mode and a
+    manual start beside it queued a second full route behind the live one."""
+    _, submitted = patched
+
+    _run_scheduled()
+
+    assert len(submitted) == 1
+    assert submitted[0].metadata == {"mode": "patrol"}
+    assert _start()["status"] == "already_running"
+    assert len(submitted) == 1
+
+
+def test_manual_run_blocks_a_scheduled_run(patched):
+    _, submitted = patched
+    manual = _start()
+
+    _run_scheduled()
+
+    assert len(submitted) == 1
+    assert list(tasks_db) == [manual["task_id"]]
+
+
+def test_scheduled_run_respects_battery_gate(patched):
+    """The unattended night run is the one that most needs the gate; it used to
+    be the only patrol path without it. The refusal must not crash the job."""
+    set_battery, submitted = patched
+    set_battery({"ok": True, "percentage": 9.0, "power_status": "IDLE"})
+
+    _run_scheduled()
+
+    assert submitted == []
+
+
+def test_resumed_run_is_tagged_and_blocks_a_manual_start(patched, monkeypatch):
+    """A resume (including the Zigbee shelf_resume button) is a patrol run too —
+    starting another one lands two runs on the same shelf."""
+    _, submitted = patched
+
+    class _Result:
+        success = True
+        error_code = 0
+
+    class _Client:
+        def reset_shelf_pose(self, shelf_id):
+            return _Result()
+
+    class _Fleet:
+        def get_raw_client(self, robot_id):
+            return _Client()
+
+    monkeypatch.setattr(dependencies, "get_fleet", lambda: _Fleet())
+    tasks_db["dropped"] = Task(
+        task_id="dropped",
+        robot_id="kachaka",
+        steps=[TaskStep(step_id="s", action="bio_scan", params={})],
+        status=TaskStatus.SHELF_DROPPED,
+        metadata={
+            "shelf_drop": True,
+            "shelf_id": "S_04",
+            "remaining_beds": [{"bed_key": "B_101-1", "location_id": "L_101-1"}],
+        },
+    )
+
+    asyncio.run(patrol.resume_patrol(patrol.ResumePatrolRequest(task_id="dropped")))
+
+    assert submitted[0].metadata == {"mode": "patrol"}
+    assert _start()["status"] == "already_running"
     assert len(submitted) == 1

@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["Maps"])
 
 
+def _safe_map_id(robot_map_id: str) -> str:
+    """Local map id for a robot map id — it is the on-disk filename stem."""
+    return robot_map_id.replace("/", "_").replace("\\", "_")
+
+
 def _save_map_png_and_meta(map_pb, robot_map_id: str, locations: list, entry_name: str = "") -> dict | None:
     """Save a protobuf Map to data/maps/ as PNG + JSON. Returns metadata dict."""
     from google.protobuf.json_format import MessageToDict
@@ -26,7 +31,7 @@ def _save_map_png_and_meta(map_pb, robot_map_id: str, locations: list, entry_nam
     if not png_bytes:
         return None
 
-    safe_id = robot_map_id.replace("/", "_").replace("\\", "_")
+    safe_id = _safe_map_id(robot_map_id)
     os.makedirs(MAPS_DIR, exist_ok=True)
     with open(os.path.join(MAPS_DIR, f"{safe_id}.png"), "wb") as f:
         f.write(png_bytes)
@@ -77,21 +82,13 @@ async def fetch_maps_from_robot():
     from dependencies import get_fleet
     fleet = get_fleet()
 
-    # 0. Clear stale local data so we don't surface deleted maps. Local map ids
-    #    are derived from robot_map_id and survive a refetch, so remember the
-    #    active one and restore it below if the robot still has that map.
+    # Local map ids are derived from robot_map_id and survive a refetch, so
+    # remember the active one and restore it below if the robot still has it.
     previous_active = get_runtime_settings().get("active_map", "")
 
-    if os.path.isdir(MAPS_DIR):
-        for fname in os.listdir(MAPS_DIR):
-            fpath = os.path.join(MAPS_DIR, fname)
-            if os.path.isfile(fpath):
-                os.remove(fpath)
-
-    if previous_active:
-        update_settings(active_map="")
-
-    # 1. Map list + locations in parallel
+    # 1. Map list + locations in parallel. Nothing local is touched until the
+    #    robot has answered — an offline or rebooting robot used to leave the
+    #    dashboard with zero maps and no active map.
     map_res, loc_res = await asyncio.gather(
         fleet.get_map_list("kachaka"),
         fleet.get_locations("kachaka"),
@@ -101,10 +98,21 @@ async def fetch_maps_from_robot():
         raise HTTPException(status_code=502, detail=f"Failed to get map list: {map_res}")
 
     maps = map_res.get("maps", [])
+    current_map_id = map_res.get("current_map_id", "")
+
+    # 2. Clear stale local data so we don't surface maps deleted on the robot
+    if os.path.isdir(MAPS_DIR):
+        for fname in os.listdir(MAPS_DIR):
+            fpath = os.path.join(MAPS_DIR, fname)
+            if os.path.isfile(fpath):
+                os.remove(fpath)
+
+    if previous_active:
+        update_settings(active_map="")
+
     if not maps:
         return {"status": "ok", "maps": [], "active_map": "", "message": "No maps on robot"}
 
-    current_map_id = map_res.get("current_map_id", "")
     locations = []
     if not isinstance(loc_res, Exception) and loc_res.get("ok"):
         for loc in loc_res.get("locations", []):
@@ -114,7 +122,7 @@ async def fetch_maps_from_robot():
                 "pose": loc.get("pose", {}),
             })
 
-    # 2. Load all map previews in parallel and persist
+    # 3. Load all map previews in parallel and persist
     client = fleet.get_raw_client("kachaka")
     targets = [(e.get("id", ""), e.get("name", "")) for e in maps if e.get("id")]
     previews = await asyncio.gather(
@@ -141,13 +149,19 @@ async def fetch_maps_from_robot():
                 "height": meta["height"],
             })
 
-    # 3. Restore the previously active map if it came back in this fetch
+    # 4. Restore the previously active map if it came back in this fetch
     active_map = ""
     if previous_active and any(m["id"] == previous_active for m in saved):
         update_settings(active_map=previous_active)
         active_map = previous_active
     elif previous_active:
-        logger.info("Previously active map %s no longer on robot — cleared", previous_active)
+        if any(_safe_map_id(rid) == previous_active for rid, _ in targets):
+            logger.warning(
+                "Active map %s is still on the robot but its preview failed — cleared",
+                previous_active,
+            )
+        else:
+            logger.info("Previously active map %s no longer on robot — cleared", previous_active)
 
     return {
         "status": "ok",

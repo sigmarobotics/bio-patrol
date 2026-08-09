@@ -8,6 +8,7 @@ by hand. It stays cleared only when the robot no longer has that map.
 import asyncio
 
 import pytest
+from fastapi import HTTPException
 
 import routers.maps as maps
 
@@ -88,3 +89,28 @@ def test_no_maps_on_robot_reports_empty_active(patched):
 
     assert res["active_map"] == ""
     assert saved_settings["active_map"] == ""
+
+
+def test_unreachable_robot_leaves_local_maps_untouched(patched, tmp_path, monkeypatch):
+    """Nothing local may be wiped before the robot has answered: a refetch
+    against an offline or rebooting robot used to 502 having already deleted
+    every local map and cleared active_map — the blank dashboard itself."""
+    import dependencies
+
+    _, saved_settings = patched
+    (tmp_path / "map_a.json").write_text("{}")
+    (tmp_path / "map_a.png").write_bytes(b"png")
+
+    class _DeadFleet(_FakeFleet):
+        async def get_map_list(self, robot_id):
+            raise RuntimeError("robot unreachable")
+
+    monkeypatch.setattr(dependencies, "get_fleet", lambda: _DeadFleet([]))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(maps.fetch_maps_from_robot())
+
+    assert exc.value.status_code == 502
+    assert saved_settings["active_map"] == "map_a"
+    assert (tmp_path / "map_a.json").exists()
+    assert (tmp_path / "map_a.png").exists()

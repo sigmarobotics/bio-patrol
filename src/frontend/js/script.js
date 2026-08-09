@@ -502,12 +502,24 @@ async function returnHome() {
   }
 }
 
+// The backend dedups duplicate starts and answers "already_running" with the
+// live task instead of queueing a second run — say so rather than claiming a
+// new run started.
+function _startedMessage(res, okText) {
+  if (res?.status === 'already_running') {
+    return `已有巡邏執行中（${res.task_id}），未重複啟動`;
+  }
+  return okText;
+}
+
+// Neither start resets the shelf pose client-side first: the run's own step 0
+// is reset_shelf_pose, and doing it here sent the reset to the robot even when
+// the backend refused the start — resetting a mid-carry pose estimate is what
+// turns into move_shelf 11005 and phantom drop alerts.
 async function startDemoRun() {
   try {
-    // Defensively return shelf to home before starting
-    try { await _returnShelfQuiet(); } catch (_) {}
     const res = await dataService.startPatrol('demo');
-    alert('Demo Run started!');
+    alert(_startedMessage(res, 'Demo Run started!'));
   } catch (e) {
     alert('Failed to start demo run: ' + (e.message || e));
   }
@@ -515,10 +527,8 @@ async function startDemoRun() {
 
 async function startPatrol() {
   try {
-    // Defensively return shelf to home before starting
-    try { await _returnShelfQuiet(); } catch (_) {}
     const res = await dataService.startPatrol('patrol');
-    alert('Patrol started!');
+    alert(_startedMessage(res, 'Patrol started!'));
   } catch (e) {
     alert('Failed to start patrol: ' + (e.message || e));
   }
@@ -532,12 +542,6 @@ async function cancelPatrol() {
   } catch (e) {
     console.error('Cancel patrol failed:', e);
   }
-}
-
-async function _returnShelfQuiet() {
-  const settings = await dataService.getSettings();
-  const shelfId = settings?.shelf_id || 'S_04';
-  await dataService.resetShelfPose(shelfId);
 }
 
 // Manual control (D-pad)
@@ -1057,7 +1061,8 @@ async function loadSensorData() {
 }
 
 function formatRunLabel(taskId) {
-  if (/^\d{14}$/.test(taskId)) {
+  // 14-digit timestamp, optionally followed by a "-<rand>" collision suffix
+  if (/^\d{14}(-|$)/.test(taskId)) {
     return `${taskId.slice(4, 6)}/${taskId.slice(6, 8)} ${taskId.slice(8, 10)}:${taskId.slice(10, 12)} 巡房`;
   }
   return taskId.slice(0, 8);

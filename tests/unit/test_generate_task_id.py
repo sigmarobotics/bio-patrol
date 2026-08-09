@@ -5,6 +5,7 @@ id — the second Task overwrote the first in tasks_db and cancel only reached
 the survivor, leaving the first run executing untracked.
 """
 import re
+from datetime import datetime
 
 from common_types import generate_task_id
 
@@ -19,4 +20,4 @@ def test_id_keeps_14_digit_timestamp_prefix():
     frontend parses the leading 14 digits — both must keep working."""
     task_id = generate_task_id()
     assert re.match(r"^\d{14}-[0-9a-f]+$", task_id), task_id
-    assert task_id.startswith(task_id[:14])
+    datetime.strptime(task_id[:14], "%Y%m%d%H%M%S")  # prefix is a real timestamp
