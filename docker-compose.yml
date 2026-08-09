@@ -18,6 +18,14 @@ services:
       - bio-patrol-net
     depends_on:
       - mqtt-broker
+    # `local` driver: the default json-file leaves NUL bytes after a hard
+    # power cut (`docker logs --since` dies) and has no size cap. Mirrors
+    # deploy/docker-compose.prod.yml — this file also runs on devices.
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   mqtt-broker:
     image: eclipse-mosquitto:2.0
@@ -28,6 +36,11 @@ services:
       - ./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     networks:
       - bio-patrol-net
+    logging:
+      driver: local
+      options:
+        max-size: "5m"
+        max-file: "3"
 
   zigbee2mqtt:
     # Pinned: overriding entrypoint wipes the image CMD, so `command` below
@@ -69,6 +82,11 @@ services:
       - mqtt-broker
     networks:
       - bio-patrol-net
+    logging:
+      driver: local
+      options:
+        max-size: "5m"
+        max-file: "3"
 
 networks:
   bio-patrol-net:
