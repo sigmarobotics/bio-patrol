@@ -57,12 +57,57 @@ async def _reregister_robot(new_ip: str) -> dict:
     return result
 
 
+# ─── Secret masking ──────────────────────────────────────────────────────────
+# /api/settings is unauthenticated on the ward LAN, so credentials never leave
+# the backend in the clear. mqtt_tls_cert/key are file PATHS, not secrets, and
+# stay readable. Internal consumers all call get_runtime_settings() directly —
+# masking lives at the route layer only.
+
+SECRET_KEYS = (
+    "mqtt_password",
+    "telegram_bot_token",
+    "notify_hub_token",
+    "line_channel_access_token",
+    "line_webhook_api_key",
+    "gemini_api_key",
+)
+MASK_PREFIX = "••••"
+
+
+def _mask_secret(value: str) -> str:
+    """Non-empty secret -> ••••<last 4>. Empty stays empty so the UI can still
+    tell "not configured" from "configured but hidden"."""
+    return f"{MASK_PREFIX}{value[-4:]}" if value else ""
+
+
+def _mask_settings(cfg: dict) -> dict:
+    masked = dict(cfg)
+    for key in SECRET_KEYS:
+        if key in masked:
+            masked[key] = _mask_secret(str(masked[key] or ""))
+    return masked
+
+
+def _drop_unchanged_secrets(body: dict, cfg: dict) -> dict:
+    """Strip secret fields whose incoming value is just the mask we handed out.
+
+    The Settings page POSTs every field at once, so an untouched form would
+    otherwise overwrite the real credential with its own mask. A genuinely new
+    value differs from the mask and is saved; an empty value clears the secret.
+    """
+    cleaned = dict(body)
+    for key in SECRET_KEYS:
+        if key in cleaned and cleaned[key] == _mask_secret(str(cfg.get(key) or "")):
+            del cleaned[key]
+    return cleaned
+
+
 # ─── Settings GET / POST + manual reconnect ──────────────────────────────────
 
 @router.get("/settings")
 async def get_settings():
-    """Return DEFAULT_SETTINGS merged with settings.json."""
-    return get_runtime_settings()
+    """Return DEFAULT_SETTINGS merged with settings.json, secrets masked."""
+    return _mask_settings(get_runtime_settings())
 
 
 @router.post("/settings/reconnect-robot")
@@ -83,6 +128,7 @@ async def reconnect_robot():
 @router.post("/settings")
 async def save_settings(body: dict):
     """Merge incoming JSON into settings.json. Re-register the robot on IP change."""
+    body = _drop_unchanged_secrets(body, get_runtime_settings())
     if "robot_ip" in body:
         body["robot_ip"] = _normalize_robot_ip(body["robot_ip"])
 
@@ -92,7 +138,7 @@ async def save_settings(body: dict):
     save_json(SETTINGS_FILE, current)
     new_ip = current.get("robot_ip", "")
 
-    response: dict = {"status": "ok", "data": get_runtime_settings()}
+    response: dict = {"status": "ok", "data": _mask_settings(get_runtime_settings())}
     if new_ip and new_ip != old_ip:
         try:
             result = await _reregister_robot(new_ip)
