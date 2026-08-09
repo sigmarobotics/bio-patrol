@@ -110,4 +110,10 @@ def get_now():
     return datetime.now(tz)
 
 def generate_task_id() -> str:
-    return get_now().strftime("%Y%m%d%H%M%S")
+    """Timestamp + random suffix. The bare second-resolution timestamp collided
+    when two runs started in the same second: the second Task overwrote the
+    first in tasks_db, so cancel only reached the survivor while the first
+    runtime object kept executing. Consumers match on the 14-digit prefix
+    (bio_sensor history LIKE, frontend formatTaskId), so the suffix is safe."""
+    import uuid
+    return f"{get_now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"

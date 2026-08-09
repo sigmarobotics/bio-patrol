@@ -201,6 +201,46 @@ async def start_patrol(req: PatrolStartRequest):
         {"bed_key": b["bed_key"], "location_id": beds_map.get(b["bed_key"], {}).get("location_id", b["bed_key"])}
         for b in enabled
     ]
+    # Dedup: a patrol-family run already queued/executing means this start is a
+    # duplicate — an impatient operator, a schedule firing onto a manual run, a
+    # demo button pressed mid-patrol, a resume still going. There is one robot
+    # and one shelf, so the mode is not what conflicts; any live run is. Return
+    # that run instead of queueing a second one on the same shelf behind it.
+    # Tasks without a mode are not patrols (generic /api/tasks submissions).
+    for existing in tasks_db.values():
+        if existing.status not in (TaskStatus.QUEUED, TaskStatus.IN_PROGRESS):
+            continue
+        running_mode = (existing.metadata or {}).get("mode")
+        if not running_mode:
+            continue
+        logger.warning(
+            f"Patrol start ignored (mode={req.mode}): task {existing.task_id} "
+            f"(mode={running_mode}) is already {existing.status.value}"
+        )
+        return {
+            "status": "already_running",
+            "task_id": existing.task_id,
+            "mode": running_mode,
+            "beds_count": len(enabled),
+        }
+
+    # Battery gate — fail-open: a robot we cannot query is a robot whose patrol
+    # will fail on its own; blocking start adds nothing.
+    min_battery = cfg.get("patrol_min_battery_pct", 30)
+    try:
+        from dependencies import get_fleet
+        battery = await get_fleet().get_battery_info("kachaka")
+        pct = battery.get("percentage")
+        if pct is not None and pct < min_battery:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Battery too low to start patrol: {pct:.0f}% < {min_battery}%",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Battery check failed, starting patrol anyway: {e}")
+
     steps = build_patrol_steps(beds, shelf_id, mode=req.mode)
 
     task = Task(
@@ -208,6 +248,7 @@ async def start_patrol(req: PatrolStartRequest):
         robot_id="kachaka",
         steps=steps,
         status=TaskStatus.QUEUED,
+        metadata={"mode": req.mode},
     )
     tasks_db[task.task_id] = task
     await submit_task(task)
@@ -287,6 +328,9 @@ async def resume_patrol(req: ResumePatrolRequest):
         robot_id="kachaka",
         steps=steps,
         status=TaskStatus.QUEUED,
+        # Same mode tag as a fresh start, so a resumed run is visible to the
+        # start_patrol dedup and nobody starts a second run on the same shelf.
+        metadata={"mode": "patrol"},
     )
     tasks_db[new_task.task_id] = new_task
     await submit_task(new_task)
