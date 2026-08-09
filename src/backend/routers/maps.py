@@ -77,14 +77,18 @@ async def fetch_maps_from_robot():
     from dependencies import get_fleet
     fleet = get_fleet()
 
-    # 0. Clear stale local data so we don't surface deleted maps
+    # 0. Clear stale local data so we don't surface deleted maps. Local map ids
+    #    are derived from robot_map_id and survive a refetch, so remember the
+    #    active one and restore it below if the robot still has that map.
+    previous_active = get_runtime_settings().get("active_map", "")
+
     if os.path.isdir(MAPS_DIR):
         for fname in os.listdir(MAPS_DIR):
             fpath = os.path.join(MAPS_DIR, fname)
             if os.path.isfile(fpath):
                 os.remove(fpath)
 
-    if get_runtime_settings().get("active_map"):
+    if previous_active:
         update_settings(active_map="")
 
     # 1. Map list + locations in parallel
@@ -98,7 +102,7 @@ async def fetch_maps_from_robot():
 
     maps = map_res.get("maps", [])
     if not maps:
-        return {"status": "ok", "maps": [], "message": "No maps on robot"}
+        return {"status": "ok", "maps": [], "active_map": "", "message": "No maps on robot"}
 
     current_map_id = map_res.get("current_map_id", "")
     locations = []
@@ -137,7 +141,20 @@ async def fetch_maps_from_robot():
                 "height": meta["height"],
             })
 
-    return {"status": "ok", "current_robot_map": current_map_id, "maps": saved}
+    # 3. Restore the previously active map if it came back in this fetch
+    active_map = ""
+    if previous_active and any(m["id"] == previous_active for m in saved):
+        update_settings(active_map=previous_active)
+        active_map = previous_active
+    elif previous_active:
+        logger.info("Previously active map %s no longer on robot — cleared", previous_active)
+
+    return {
+        "status": "ok",
+        "current_robot_map": current_map_id,
+        "maps": saved,
+        "active_map": active_map,
+    }
 
 
 class SwitchMapRequest(BaseModel):

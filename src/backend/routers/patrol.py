@@ -201,6 +201,42 @@ async def start_patrol(req: PatrolStartRequest):
         {"bed_key": b["bed_key"], "location_id": beds_map.get(b["bed_key"], {}).get("location_id", b["bed_key"])}
         for b in enabled
     ]
+    # Dedup: a run of this mode already queued/executing means this is a double
+    # submit (impatient operator, or a schedule firing onto a manual run).
+    # Return the live task instead of starting a second one on the same shelf.
+    for existing in tasks_db.values():
+        if (
+            existing.status in (TaskStatus.QUEUED, TaskStatus.IN_PROGRESS)
+            and (existing.metadata or {}).get("mode") == req.mode
+        ):
+            logger.warning(
+                f"Patrol start ignored (mode={req.mode}): task {existing.task_id} "
+                f"is already {existing.status.value}"
+            )
+            return {
+                "status": "already_running",
+                "task_id": existing.task_id,
+                "mode": req.mode,
+                "beds_count": len(enabled),
+            }
+
+    # Battery gate — fail-open: a robot we cannot query is a robot whose patrol
+    # will fail on its own; blocking start adds nothing.
+    min_battery = cfg.get("patrol_min_battery_pct", 30)
+    try:
+        from dependencies import get_fleet
+        battery = await get_fleet().get_battery_info("kachaka")
+        pct = battery.get("percentage")
+        if pct is not None and pct < min_battery:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Battery too low to start patrol: {pct:.0f}% < {min_battery}%",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Battery check failed, starting patrol anyway: {e}")
+
     steps = build_patrol_steps(beds, shelf_id, mode=req.mode)
 
     task = Task(
@@ -208,6 +244,7 @@ async def start_patrol(req: PatrolStartRequest):
         robot_id="kachaka",
         steps=steps,
         status=TaskStatus.QUEUED,
+        metadata={"mode": req.mode},
     )
     tasks_db[task.task_id] = task
     await submit_task(task)

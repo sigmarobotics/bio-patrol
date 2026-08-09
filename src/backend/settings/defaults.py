@@ -48,6 +48,8 @@ DEFAULT_SETTINGS = {
     "bed_card_stale_hours": 24,
     # IT-10: 機器人連續斷線多久才推 OFFLINE 通知（秒）。預設 5 min — mesh 漫遊瞬斷不算事故。
     "robot_offline_debounce_seconds": 300,
+    # TODO-018: 低於此電量（%）不讓巡邏起跑；查詢不到電量時 fail-open 放行。
+    "patrol_min_battery_pct": 30,
 }
 
 DEFAULT_BEDS = {

@@ -1108,8 +1108,9 @@ function updateSensorStats() {
 
 function formatTaskId(taskId) {
   if (!taskId) return '--';
-  // Parse "YYYYMMDDHHmmSS" → "YYYY/MM/DD HH:mm:SS"
-  if (/^\d{14}$/.test(taskId)) {
+  // Parse "YYYYMMDDHHmmSS" (optionally followed by a "-<rand>" collision
+  // suffix) → "YYYY/MM/DD HH:mm:SS"
+  if (/^\d{14}(-|$)/.test(taskId)) {
     return `${taskId.slice(0,4)}/${taskId.slice(4,6)}/${taskId.slice(6,8)} ${taskId.slice(8,10)}:${taskId.slice(10,12)}:${taskId.slice(12,14)}`;
   }
   // Fallback for old UUID-style task_ids
