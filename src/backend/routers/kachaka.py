@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Response, HTTPException, Depends
+from fastapi import APIRouter, Response, HTTPException, Depends, File, UploadFile
+from pathlib import Path
 from typing import Optional
 from pydantic import BaseModel
 from google.protobuf.json_format import MessageToJson
@@ -7,6 +8,9 @@ from dependencies import get_fleet
 
 import asyncio
 import json
+import os
+import re
+import tempfile
 
 router = APIRouter(prefix='/kachaka', tags=['KACHAKA Robot Fleet'])
 
@@ -122,18 +126,56 @@ async def map_list(robot_id: str, fleet: FleetAPI = Depends(get_fleet)):
     return await fleet.get_map_list(robot_id)
 
 @router.get("/{robot_id}/export_map")
-async def export_map(robot_id: str, fleet: FleetAPI = Depends(get_fleet)):
-    """Export robot map"""
-    client = fleet.get_raw_client(robot_id)
-    res = await asyncio.to_thread(client.export_map)
-    return Response(content=MessageToJson(res), media_type='application/json')
+async def export_map(robot_id: str, map_id: Optional[str] = None, fleet: FleetAPI = Depends(get_fleet)):
+    """Export a robot map archive (defaults to the current map).
 
-@router.get("/{robot_id}/import_map")
-async def import_map(robot_id: str, fleet: FleetAPI = Depends(get_fleet)):
-    """Import robot map"""
+    The SDK signature is ``export_map(map_id, output_file_path) -> pb2.Result``:
+    it streams the archive into a file and returns only a status. Calling it
+    bare (the pre-fix code) raised TypeError -> HTTP 500 (新營 2026-07-30).
+    """
     client = fleet.get_raw_client(robot_id)
-    res = await asyncio.to_thread(client.import_map)
-    return Response(content=MessageToJson(res), media_type='application/json')
+
+    def _export():
+        target = map_id or client.get_current_map_id()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "map.bin")
+            result = client.export_map(target, path)
+            # The SDK writes the file only on success.
+            data = Path(path).read_bytes() if result.success else b""
+        return result, target, data
+
+    result, target, data = await asyncio.to_thread(_export)
+    if not result.success:
+        raise HTTPException(status_code=502, detail=f"export_map failed: error {result.error_code}")
+    filename = re.sub(r"[^A-Za-z0-9_.-]", "_", target or "map") + ".kmap"
+    return Response(
+        content=data,
+        media_type='application/octet-stream',
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+@router.post("/{robot_id}/import_map")
+async def import_map(robot_id: str, file: UploadFile = File(...), fleet: FleetAPI = Depends(get_fleet)):
+    """Import a map archive uploaded as multipart form data.
+
+    The SDK signature is ``import_map(target_file_path, chunk_size)`` and it
+    returns a ``(pb2.Result, map_id)`` tuple — not a protobuf message, so the
+    pre-fix ``MessageToJson(res)`` could only raise.
+    """
+    client = fleet.get_raw_client(robot_id)
+    payload = await file.read()
+
+    def _import():
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "map.bin")
+            with open(path, "wb") as fh:
+                fh.write(payload)
+            return client.import_map(path)
+
+    result, new_map_id = await asyncio.to_thread(_import)
+    if not result.success:
+        raise HTTPException(status_code=502, detail=f"import_map failed: error {result.error_code}")
+    return {"ok": True, "map_id": new_map_id}
 
 # ====== ROS-level endpoints (raw SDK client) ======
 

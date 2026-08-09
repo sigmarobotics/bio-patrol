@@ -66,6 +66,19 @@ def _engine_with_event():
     return engine, fleet
 
 
+def _raw_shelf_pose(fleet, shelf_id, x, y):
+    """Stub the raw-SDK shelf list: kachaka_core's list_shelves() has no pose,
+    so the pose check reads pb2.Shelf through fleet.get_raw_client()."""
+    shelf = MagicMock()
+    shelf.id = shelf_id
+    shelf.name = shelf_id
+    shelf.HasField = MagicMock(return_value=True)
+    shelf.pose.x, shelf.pose.y, shelf.pose.theta = x, y, 0.0
+    client = MagicMock()
+    client.get_shelves = MagicMock(return_value=[shelf])
+    fleet.get_raw_client = MagicMock(return_value=client)
+
+
 def test_successful_return_shelf_is_not_a_drop():
     from common_types import TaskStep
     engine, fleet = _engine_with_event()
@@ -82,11 +95,12 @@ def test_failed_return_with_shelf_at_home_is_not_a_drop():
     fleet.return_shelf = AsyncMock(return_value={"ok": False, "error": "TIMEOUT"})
     fleet.get_slot_or_none = MagicMock(return_value=None)
     fleet.get_shelves = AsyncMock(return_value={"ok": True, "shelves": [
-        {"id": "S01", "home_location_id": "S01_home", "pose": {"x": -0.10, "y": 3.28}}
+        {"id": "S01", "home_location_id": "S01_home"}
     ]})
     fleet.get_locations = AsyncMock(return_value={"ok": True, "locations": [
         {"id": "S01_home", "pose": {"x": -0.04, "y": 3.25}}
     ]})
+    _raw_shelf_pose(fleet, "S01", -0.10, 3.28)
     step = TaskStep(step_id="r-1", action="return_shelf", params={"shelf_id": "S01"})
     asyncio.run(engine._do_return_shelf(step))
     assert not engine.shelf_drop_event.is_set()
@@ -98,11 +112,12 @@ def test_failed_return_with_shelf_en_route_is_a_drop():
     fleet.return_shelf = AsyncMock(return_value={"ok": False, "error": "TIMEOUT"})
     fleet.get_slot_or_none = MagicMock(return_value=None)
     fleet.get_shelves = AsyncMock(return_value={"ok": True, "shelves": [
-        {"id": "S01", "home_location_id": "S01_home", "pose": {"x": -15.0, "y": 6.0}}
+        {"id": "S01", "home_location_id": "S01_home"}
     ]})
     fleet.get_locations = AsyncMock(return_value={"ok": True, "locations": [
         {"id": "S01_home", "pose": {"x": -0.04, "y": 3.25}}
     ]})
+    _raw_shelf_pose(fleet, "S01", -15.0, 6.0)
     step = TaskStep(step_id="r-1", action="return_shelf", params={"shelf_id": "S01"})
     asyncio.run(engine._do_return_shelf(step))
     assert engine.shelf_drop_event.is_set()
@@ -129,11 +144,12 @@ def test_stale_drop_signal_cleared_on_failed_return_with_shelf_at_home():
     fleet.return_shelf = AsyncMock(return_value={"ok": False, "error": "TIMEOUT"})
     fleet.get_slot_or_none = MagicMock(return_value=None)
     fleet.get_shelves = AsyncMock(return_value={"ok": True, "shelves": [
-        {"id": "S01", "home_location_id": "S01_home", "pose": {"x": -0.10, "y": 3.28}}
+        {"id": "S01", "home_location_id": "S01_home"}
     ]})
     fleet.get_locations = AsyncMock(return_value={"ok": True, "locations": [
         {"id": "S01_home", "pose": {"x": -0.04, "y": 3.25}}
     ]})
+    _raw_shelf_pose(fleet, "S01", -0.10, 3.28)
     engine.shelf_drop_event.set()
     step = TaskStep(step_id="r-1", action="return_shelf", params={"shelf_id": "S01"})
     asyncio.run(engine._do_return_shelf(step))
