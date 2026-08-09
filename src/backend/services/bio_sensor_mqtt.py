@@ -9,6 +9,7 @@ import os
 import asyncio
 import sqlite3
 from common_types import get_now
+from utils.sqlite_wal import connect_db
 
 logger = logging.getLogger("BioSensorMQTTClient")
 
@@ -59,7 +60,7 @@ class BioSensorMQTTClient:
         self._init_database()
     
     def _init_database(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS sensor_scan_data (
@@ -144,7 +145,7 @@ class BioSensorMQTTClient:
         self.client.loop_start()
 
     def _save_scan_data(self, task_id, data, retry_count, is_valid=False):
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
         timestamp = get_now().isoformat()
         cursor.execute('''

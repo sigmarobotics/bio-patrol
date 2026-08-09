@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 from dependencies import get_bio_sensor_client
+from utils.sqlite_wal import connect_db
 
 router = APIRouter(prefix='/api/bio-sensor', tags=['Bio Sensor'])
 
@@ -21,7 +22,7 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
 
     conn = None
     try:
-        conn = sqlite3.connect(client.db_path)
+        conn = connect_db(client.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -78,7 +79,7 @@ async def get_bed_stats(location_id: str, window: int = 30, bed_name: str = None
     window = max(1, min(window, 200))
     conn = None
     try:
-        conn = sqlite3.connect(client.db_path)
+        conn = connect_db(client.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         clauses = ["location_id = ?"]
@@ -145,7 +146,7 @@ async def get_latest_by_bed():
 
     conn = None
     try:
-        conn = sqlite3.connect(client.db_path)
+        conn = connect_db(client.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(

@@ -2,7 +2,6 @@
 Utility script to generate fake vital sensor scan data for testing and verification.
 This script can be run independently to populate the sensor_data.db with test data.
 """
-import sqlite3
 import json
 import uuid
 import random
@@ -15,6 +14,8 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(o
 # Add src/backend/ to path for imports
 sys.path.append(os.path.join(project_root, "src", "backend"))
 
+from utils.sqlite_wal import connect_db  # noqa: E402  (needs sys.path above)
+
 def get_db_path():
     """Get the database path consistent with the project structure."""
     data_dir = os.path.join(project_root, "data")
@@ -23,7 +24,7 @@ def get_db_path():
 
 def init_database(db_path):
     """Initialize database with the same schema as the project."""
-    conn = sqlite3.connect(db_path)
+    conn = connect_db(db_path)
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS sensor_scan_data (
@@ -45,7 +46,7 @@ def init_database(db_path):
 
 def save_scan_data(db_path, task_id, data, retry_count, is_valid, timestamp):
     """Save scan data to database."""
-    conn = sqlite3.connect(db_path)
+    conn = connect_db(db_path)
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO sensor_scan_data 
@@ -194,7 +195,7 @@ def generate_fake_scan_tasks(db_path, num_tasks=10):
 
 def print_database_stats(db_path):
     """Print statistics about the generated data."""
-    conn = sqlite3.connect(db_path)
+    conn = connect_db(db_path)
     cursor = conn.cursor()
     
     # Total records

@@ -12,6 +12,7 @@ import sqlite3
 from typing import Any
 
 from common_types import get_now
+from utils.sqlite_wal import connect_db
 
 logger = logging.getLogger("services.button_db")
 
@@ -43,7 +44,7 @@ def _conn(db_path: str | None = None) -> sqlite3.Connection:
     if cached is not None:
         return cached
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = connect_db(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     _CONN_CACHE[path] = conn
     return conn
