@@ -1206,6 +1206,19 @@ const SETTINGS_MAP = [
   { id: 'robot-offline-debounce-seconds', key: 'robot_offline_debounce_seconds', type: 'number' },
 ];
 
+// GET /api/settings 回來的憑證是遮罩（••••＋末碼），原封送回後端會剔除、保住原值。
+// 但欄位是 type=password，使用者看不見自己是「整段重打」還是「在圓點後面接著打」——
+// 後者會被當成新值寫進 settings.json，把憑證靜默改壞。載入時記下遮罩，存檔前擋掉
+// 「含圓點但又不等於遮罩」的值。（不能改用 focus 清空：空字串在後端＝清除憑證。）
+const SECRET_SETTING_KEYS = new Set([
+  'mqtt_password',
+  'telegram_bot_token',
+  'line_channel_access_token',
+  'line_webhook_api_key',
+  'gemini_api_key',
+]);
+const loadedSecretMasks = {};
+
 // ─── LINE 通報群組選擇 ──────────────────────────────────────────────────────
 // line_group_ids 是陣列，不走 SETTINGS_MAP 的 scalar 流程。清單成功載入後
 // 以 #line-group-list 的 data-loaded 標記，saveSettings 才收集勾選。
@@ -1388,6 +1401,7 @@ async function loadSettings() {
         el.checked = !!settings[key];
       } else {
         el.value = settings[key] ?? '';
+        if (SECRET_SETTING_KEYS.has(key)) loadedSecretMasks[key] = el.value;
       }
     });
     const savedLineIds = Array.isArray(settings.line_group_ids) ? settings.line_group_ids : [];
@@ -1452,6 +1466,7 @@ async function uploadTlsCerts() {
 
 async function saveSettings() {
   const data = {};
+  const halfEdited = [];
   SETTINGS_MAP.forEach(({ id, key, type }) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -1461,8 +1476,18 @@ async function saveSettings() {
       data[key] = parseFloat(el.value) || 0;
     } else {
       data[key] = el.value;
+      if (SECRET_SETTING_KEYS.has(key) && el.value.includes('•')
+          && el.value !== loadedSecretMasks[key]) {
+        halfEdited.push(key);
+      }
     }
   });
+
+  if (halfEdited.length) {
+    alert(`以下憑證欄位混到了遮罩圓點，直接存會把憑證改壞：\n${halfEdited.join('\n')}\n\n`
+      + '請把該欄位全選刪除後整段重打（或重新載入頁面放棄修改）。');
+    return;
+  }
 
   // 群組清單只有在成功載入後才收集，避免未載入時把已存的勾選洗掉。
   const lineList = document.getElementById('line-group-list');

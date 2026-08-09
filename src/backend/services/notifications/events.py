@@ -23,6 +23,7 @@ class Source(str, Enum):
     VITALS_OUT_OF_BAND = "vitals_out_of_band"
     ROBOT_OFFLINE = "robot_offline"
     ROBOT_RECOVERED = "robot_recovered"
+    SCHEDULE_NOT_RUN = "schedule_not_run"
 
 
 @dataclass

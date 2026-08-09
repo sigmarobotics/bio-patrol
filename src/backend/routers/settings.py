@@ -72,12 +72,21 @@ SECRET_KEYS = (
     "gemini_api_key",
 )
 MASK_PREFIX = "••••"
+# Below this length a 4-char tail gives away half the credential or more
+# (mqtt_password is a short word — "sigmabot" is 8), so short secrets are
+# masked whole. Bot tokens and API keys are far longer and keep their tail.
+MIN_LENGTH_FOR_TAIL = 12
 
 
 def _mask_secret(value: str) -> str:
-    """Non-empty secret -> ••••<last 4>. Empty stays empty so the UI can still
+    """Non-empty secret -> ••••<last 4>, or all dots when it is short enough
+    that the tail would leak most of it. Empty stays empty so the UI can still
     tell "not configured" from "configured but hidden"."""
-    return f"{MASK_PREFIX}{value[-4:]}" if value else ""
+    if not value:
+        return ""
+    if len(value) < MIN_LENGTH_FOR_TAIL:
+        return MASK_PREFIX + "••••"
+    return f"{MASK_PREFIX}{value[-4:]}"
 
 
 def _mask_settings(cfg: dict) -> dict:

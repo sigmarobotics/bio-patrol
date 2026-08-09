@@ -16,23 +16,19 @@ import routers.settings as settings_router
 def settings_file(monkeypatch, tmp_path):
     """Point both the router and get_runtime_settings at a temp settings.json."""
     path = tmp_path / "settings.json"
-
-    def _write(data: dict):
-        path.write_text(json.dumps(data), encoding="utf-8")
-
-    _write({
+    path.write_text(json.dumps({
         "telegram_bot_token": "1234567890:AAbbccddeeffSECRET",
         "notify_hub_token": "hub_token_wxyz",
+        "mqtt_password": "sigmabot",
         "line_channel_access_token": "",
         "mqtt_tls_key": "wisleep-key/sigmabot.key",
-    })
+    }), encoding="utf-8")
     monkeypatch.setattr(settings_router, "SETTINGS_FILE", str(path))
     monkeypatch.setattr("settings.config.SETTINGS_FILE", str(path))
 
     def _read() -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
 
-    _read.write = _write
     return _read
 
 
@@ -49,6 +45,17 @@ def test_get_masks_configured_secrets(settings_file):
 
     assert data["telegram_bot_token"] == "••••CRET"
     assert data["notify_hub_token"] == "••••wxyz"
+
+
+def test_get_masks_a_short_secret_whole(settings_file):
+    """mqtt_password is a short word — a 4-char tail would hand over half of it."""
+    assert _get()["mqtt_password"] == "••••••••"
+
+
+def test_post_of_a_whole_masked_short_secret_keeps_it(settings_file):
+    _post({"mqtt_password": "••••••••"})
+
+    assert settings_file()["mqtt_password"] == "sigmabot"
 
 
 def test_get_returns_empty_for_unset_secret(settings_file):

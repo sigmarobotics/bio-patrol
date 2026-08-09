@@ -5,7 +5,6 @@ Manages recurring patrol tasks using APScheduler, driven by schedule.json.
 import asyncio
 import logging
 from datetime import datetime
-from html import escape
 from typing import Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -34,6 +33,28 @@ def _refusal_reason(detail: str) -> str:
         if threshold:
             return f"電量 {pct} 低於門檻 {threshold}"
     return _REFUSAL_ZH.get(detail, detail)
+
+
+async def notify_schedule_issue(title: str, body: str, raw: Optional[dict] = None) -> None:
+    """排程「今晚不會跑」的任何一種形狀都推一則通報。
+
+    走 dispatcher 而不是直接呼叫 send_telegram_message：只設定 LINE 的站點
+    （enable_telegram=False）用 telegram 送等於完全靜默的 no-op，而這正是最不能
+    漏掉的一類訊息。title/body 由各 sink 自行跳脫，這裡送純文字即可。
+    通報失敗不能拖垮呼叫端（排程執行、設定存檔）。
+    """
+    from services.notifications import AnomalyEvent, Severity, Source, dispatcher
+
+    try:
+        await dispatcher.dispatch(AnomalyEvent(
+            severity=Severity.WARN,
+            source=Source.SCHEDULE_NOT_RUN,
+            title=title,
+            body=body,
+            raw=raw or {},
+        ))
+    except Exception:
+        logger.exception("Failed to dispatch schedule notice")
 
 
 class TaskSchedulerService:
@@ -89,7 +110,13 @@ class TaskSchedulerService:
             try:
                 hour, minute = map(int, time_str.split(":"))
             except (ValueError, TypeError):
+                # 啟用中卻建不出 job：UI 上看起來排好了，到點卻什麼都不會發生。
                 logger.warning(f"Invalid time format for schedule '{schedule_id}': {time_str}")
+                await notify_schedule_issue(
+                    "⚠️ 排程設定有誤，不會執行",
+                    f"排程「{schedule_id}」的時間格式無法解析：{time_str}",
+                    raw={"schedule_id": schedule_id, "time": time_str},
+                )
                 continue
 
             job_id = f"patrol_{schedule_id}"
@@ -141,14 +168,11 @@ class TaskSchedulerService:
         return datetime.now().strftime("%H:%M")
 
     async def _notify_not_started(self, schedule_id: str, reason: str):
-        """排程沒開跑就推一則通報 —— 夜間沒人在看 log，只寫 log 等於沒發生。
-        send_telegram_message 內部已把所有例外吞掉，不會影響排程主流程。
-        reason 可能夾帶例外字串（gRPC 的是 <AioRpcError ...>），送出去是
-        parse_mode=HTML，不跳脫的話整則會被 Telegram 退掉。"""
-        from services.telegram_service import send_telegram_message
-
-        await send_telegram_message(
-            f"⚠️ {self._schedule_time(schedule_id)} 排程巡房未啟動：{escape(reason)}"
+        """排程沒開跑就推一則通報 —— 夜間沒人在看 log，只寫 log 等於沒發生。"""
+        await notify_schedule_issue(
+            "⚠️ 排程巡房未啟動",
+            f"排程時間：{self._schedule_time(schedule_id)}\n原因：{reason}",
+            raw={"schedule_id": schedule_id, "reason": reason},
         )
 
     async def _run_patrol(self, schedule_id: str):
