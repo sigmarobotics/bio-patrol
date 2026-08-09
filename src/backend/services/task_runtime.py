@@ -11,6 +11,7 @@ from common_types import (
     NON_CRITICAL_ACTIONS, get_now,
 )
 from dependencies import get_bio_sensor_client
+from utils.sqlite_wal import connect_db
 
 logger = logging.getLogger("kachaka.task_runtime")
 
@@ -642,7 +643,7 @@ class TaskEngine:
         if client is None:
             return None
         try:
-            conn = sqlite3.connect(client.db_path)
+            conn = connect_db(client.db_path)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT bed_name, status, is_valid, retry_count "
