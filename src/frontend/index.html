@@ -536,14 +536,14 @@
   <!-- ========== SHELF DROP ALERT MODAL ========== -->
   <div id="shelf-drop-overlay" class="alert-overlay" style="display:none">
     <div class="alert-modal alert-modal--wide">
-      <h3>⚠️ 架子掉落警示</h3>
+      <h3 id="shelf-drop-title">⚠️ 架子掉落警示</h3>
       <div class="shelf-drop-map-wrap">
         <canvas id="shelf-drop-map-canvas"></canvas>
       </div>
-      <p>請依照地圖標示位置找到感測器並推回初始位置</p>
+      <p id="shelf-drop-hint">請依照地圖標示位置找到感測器並推回初始位置</p>
       <div id="shelf-drop-remaining" style="display:none;margin:12px 0;"></div>
       <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
-        <button class="btn-secondary" onclick="recoverShelf()">僅歸位感測器</button>
+        <button class="btn-secondary" id="btn-recover-shelf" onclick="recoverShelf()">僅歸位感測器</button>
         <button class="btn-premium" id="btn-resume-patrol" onclick="resumePatrol()">歸位並繼續巡房</button>
       </div>
       <div id="shelf-recovery-status"></div>

@@ -11,6 +11,7 @@ from common_types import (
     NON_CRITICAL_ACTIONS, get_now,
 )
 from dependencies import get_bio_sensor_client
+from utils.grpc_errors import is_connection_error
 from utils.sqlite_wal import connect_db
 
 logger = logging.getLogger("kachaka.task_runtime")
@@ -32,16 +33,30 @@ _CHARGING_POWER_STATUSES = {
     "POWER_SUPPLY_STATUS_CHARGING", "POWER_SUPPLY_STATUS_FULL",
 }
 
+# A robot that stopped answering is not a robot that dropped its shelf
+# (2026-08-10 新營: the robot left the network mid-patrol and the failed reads
+# became a CRITICAL drop alarm). The state watcher must see this many
+# consecutive failed polls before calling the robot gone — a single transient
+# gRPC hiccup is normal and stays silent.
+DISCONNECT_POLL_THRESHOLD = 3
 
-def classify_shelf_release(battery: dict, command_state: dict) -> str:
-    """Why the moving-shelf id vanished: ``low_battery_return`` or ``drop``.
+
+def classify_shelf_release(battery: dict, command_state: dict,
+                           *, disconnected: bool = False) -> str:
+    """Why the moving-shelf id vanished: ``disconnected`` /
+    ``low_battery_return`` / ``drop``.
 
     ``battery`` is a kachaka_core ``get_battery`` dict
     ({ok, percentage, power_status}); ``command_state`` a ``get_command_state``
-    dict ({ok, state, command, is_running}). Anything unreadable stays a drop:
-    a missed drop leaves a shelf loose in a hospital corridor, so the ambiguous
-    case must keep alerting.
+    dict ({ok, state, command, is_running}). ``disconnected`` says the robot
+    itself is unreachable — then nothing was actually observed, and claiming
+    either "dropped" or "did not drop" would be a guess, so the release is
+    reported as unknown. A robot that answers keeps the old rules: anything
+    unreadable stays a drop, because a missed drop leaves a shelf loose in a
+    hospital corridor.
     """
+    if disconnected:
+        return "disconnected"
     if not battery.get("ok"):
         return "drop"
     pct = battery.get("percentage")
@@ -87,6 +102,9 @@ class TaskEngine:
         # True while return_shelf is placing the shelf — the moving-shelf id
         # legitimately disappears then, and the watcher must not call it a drop.
         self._shelf_release_expected = False
+        # True once the robot stopped answering: the run still pauses, but the
+        # shelf state is reported as unknown instead of dropped.
+        self._disconnect_suspected = False
         self._action_handlers: Dict[str, Any] = {
             StepAction.SPEAK.value: self._do_speak,
             StepAction.MOVE_TO_POSE.value: self._do_move_to_pose,
@@ -147,9 +165,11 @@ class TaskEngine:
             return
         last_seen_id: Optional[str] = None
         confirmed_docked = False
+        fail_streak = 0
         while not self._state_watcher_stop:
             try:
                 mid = await asyncio.to_thread(slot.conn.client.get_moving_shelf_id)
+                fail_streak = 0
                 mid = mid or None
                 if mid:
                     last_seen_id = mid
@@ -167,8 +187,24 @@ class TaskEngine:
                         self.shelf_drop_event.set()
                     confirmed_docked = False
                     last_seen_id = None
-            except Exception:
-                logger.debug("[STATE WATCHER] Transient error", exc_info=True)
+            except Exception as e:
+                # A failed read says nothing about the shelf — only a
+                # successful read reporting no shelf can be a drop. Repeated
+                # failures mean the robot itself is gone (2026-08-10 新營).
+                fail_streak += 1
+                logger.debug(
+                    f"[STATE WATCHER] Read failed ({fail_streak}x): {e}", exc_info=True
+                )
+                if (fail_streak >= DISCONNECT_POLL_THRESHOLD
+                        and is_connection_error(e)
+                        and not self._disconnect_suspected):
+                    logger.error(
+                        f"[STATE WATCHER] Robot {self.robot_id} unreachable for "
+                        f"{fail_streak} polls — treating as disconnect, shelf state unknown"
+                    )
+                    self._disconnect_suspected = True
+                    if self.shelf_drop_event is not None:
+                        self.shelf_drop_event.set()
             try:
                 # 3s matches the legacy _monitor_shelf cadence; in-command
                 # drops are caught faster by the controller's on_shelf_dropped.
@@ -277,20 +313,54 @@ class TaskEngine:
         """Classify the release, reading the robot BEFORE anything is cancelled.
 
         cancel_command wipes the return-home evidence, so this has to run
-        first. Returns ``(kind, battery_dict)``; an unreadable robot yields
-        ``("drop", {})``.
+        first. Returns ``(kind, battery_dict)``. Both reads coming back as
+        connection failures means the robot is gone, not that the shelf fell:
+        that is the ``disconnected`` verdict. A robot that answers is
+        classified exactly as before.
         """
         battery: dict = {}
         command_state: dict = {}
+        battery_err: object = None
+        state_err: object = None
         try:
             battery = await self.fleet.get_battery_info(self.robot_id)
+            battery_err = (battery or {}).get("error")
         except Exception as e:
+            battery_err = e
             logger.warning(f"[SHELF DROP] Battery read failed: {e}")
         try:
             command_state = await self.fleet.get_command_state(self.robot_id)
+            state_err = (command_state or {}).get("error")
         except Exception as e:
+            state_err = e
             logger.warning(f"[SHELF DROP] Command state read failed: {e}")
-        return classify_shelf_release(battery or {}, command_state or {}), (battery or {})
+        disconnected = self._disconnect_suspected or (
+            is_connection_error(battery_err) and is_connection_error(state_err)
+        )
+        kind = classify_shelf_release(
+            battery or {}, command_state or {}, disconnected=disconnected
+        )
+        return kind, (battery or {})
+
+    async def _last_known_robot_pose(self) -> Optional[dict]:
+        """Last robot pose the controller managed to read, or None.
+
+        RobotController's state loop keeps the last successful pose and stops
+        polling while disconnected, so its cached snapshot is exactly the
+        "last known position" — no extra cache to maintain here.
+        """
+        try:
+            st = await self.fleet.get_controller_state(self.robot_id)
+        except Exception as e:
+            logger.warning(f"[SHELF DROP] Last-known pose unavailable: {e}")
+            return None
+        if not st or not st.get("last_updated"):
+            return None
+        return {
+            "x": st.get("pose_x"),
+            "y": st.get("pose_y"),
+            "theta": st.get("pose_theta"),
+        }
 
     async def _handle_shelf_drop(self, task: Task, step_index: int,
                                    trigger_step: Optional[TaskStep] = None,
@@ -298,6 +368,7 @@ class TaskEngine:
         """Handle shelf drop: collect remaining beds, notify, record DB, send robot home."""
         kind, battery = await self._classify_release()
         low_battery = kind == "low_battery_return"
+        disconnected = kind == "disconnected"
         battery_pct = battery.get("percentage")
 
         # Cancel any in-flight robot command
@@ -308,7 +379,12 @@ class TaskEngine:
             logger.debug(f"[SHELF DROP] cancel_command failed (non-critical): {ce}")
 
         source = f"error {error_code}" if error_code else "state watcher"
-        if low_battery:
+        if disconnected:
+            logger.warning(
+                f"[SHELF DROP] Release via {source} on robot {self.robot_id} came "
+                f"from an unreachable robot — shelf state unknown, pausing task"
+            )
+        elif low_battery:
             logger.warning(
                 f"[SHELF DROP] Release via {source} on robot {self.robot_id} is a "
                 f"low-battery auto-recharge (battery={battery_pct}), pausing task"
@@ -322,6 +398,10 @@ class TaskEngine:
             shelf_id = getattr(self, "_current_shelf_id", "unknown")
 
         shelf_pose = await self._query_shelf_pose(shelf_id)
+        # No shelf pose means the map has nothing to point the operator at —
+        # the frontend must say "position unknown" instead of "look at the
+        # marker", so hand it the robot's last known position to draw instead.
+        last_known_robot_pose = None if shelf_pose else await self._last_known_robot_pose()
         remaining_beds = self._collect_remaining_beds(task, step_index, trigger_step, location_id)
 
         # Store shelf-drop context in task metadata
@@ -333,14 +413,28 @@ class TaskEngine:
             "dropped_at": get_now().isoformat(),
             "remaining_beds": remaining_beds,
             "shelf_pose": shelf_pose,
+            "pose_unknown": shelf_pose is None,
+            "last_known_robot_pose": last_known_robot_pose,
             "low_battery": low_battery,
             "battery_pct": battery_pct,
+            "disconnect": disconnected,
         }
         task.status = TaskStatus.SHELF_DROPPED
 
-        if low_battery:
+        if disconnected:
+            severity = Severity.WARN
+            source_kind = Source.ROBOT_OFFLINE
+            title = "🔌 機器人失聯（巡房中斷）"
+            body = (
+                f"棚車狀態未知\n"
+                f"中斷位置：{location_id}\n"
+                f"剩餘 {len(remaining_beds)} 床尚未巡視\n"
+                f"請確認機器人電源與網路"
+            )
+        elif low_battery:
             pct_txt = f"{battery_pct:.0f}%" if isinstance(battery_pct, (int, float)) else "未知"
             severity = Severity.WARN
+            source_kind = Source.SHELF_DROP
             title = "🔋 電量不足，任務中止待充電"
             body = (
                 f"機器人電量 {pct_txt}，已自行放下貨架返回充電\n"
@@ -350,6 +444,7 @@ class TaskEngine:
             )
         else:
             severity = Severity.CRITICAL
+            source_kind = Source.SHELF_DROP
             title = "⚠️ 貨架掉落，請協助歸位"
             body = (
                 f"掉落位置：{location_id}\n"
@@ -359,7 +454,7 @@ class TaskEngine:
         try:
             await dispatcher.dispatch(AnomalyEvent(
                 severity=severity,
-                source=Source.SHELF_DROP,
+                source=source_kind,
                 bed_key=location_id,
                 task_id=task.task_id,
                 title=title,
@@ -369,6 +464,7 @@ class TaskEngine:
                     "remaining_beds": remaining_beds,
                     "low_battery": low_battery,
                     "battery_pct": battery_pct,
+                    "disconnect": disconnected,
                 },
             ))
         except Exception:
@@ -386,7 +482,12 @@ class TaskEngine:
             if future.action == StepAction.BIO_SCAN and future.status == StepStatus.PENDING and future not in steps_to_skip:
                 steps_to_skip.append(future)
 
-        skip_detail = "電量不足，巡房中止待充電" if low_battery else "貨架掉落，巡房中斷"
+        if disconnected:
+            skip_detail = "機器人失聯，巡房中斷"
+        elif low_battery:
+            skip_detail = "電量不足，巡房中止待充電"
+        else:
+            skip_detail = "貨架掉落，巡房中斷"
         for s in steps_to_skip:
             self._record_skipped_scan(s, skip_detail, location_id=s.params.get("location_id", ""))
             s.status = StepStatus.SKIPPED
@@ -416,6 +517,7 @@ class TaskEngine:
         self.shelf_drop_event = slot_evt if isinstance(slot_evt, asyncio.Event) else asyncio.Event()
         self.shelf_drop_event.clear()
         self._shelf_release_expected = False
+        self._disconnect_suspected = False
         self._state_watcher_stop = False
         self._state_watcher_task = asyncio.create_task(self._watch_shelf_state())
 
@@ -823,8 +925,14 @@ class TaskEngine:
             dx = sp["x"] - hp.get("x", 0)
             dy = sp["y"] - hp.get("y", 0)
             return (dx * dx + dy * dy) ** 0.5 > 1.5
-        except Exception:
+        except Exception as e:
             logger.warning("[SHELF] Could not verify shelf state after failed return", exc_info=True)
+            if is_connection_error(e):
+                # The robot is gone, so the verification never ran: the run
+                # still stops, but as "state unknown", not a CRITICAL drop
+                # (2026-08-10 新營: an offline robot raised a drop alarm for a
+                # shelf nobody could confirm had moved).
+                self._disconnect_suspected = True
             return True
 
     async def _do_return_home(self, step: TaskStep) -> StepResult:
