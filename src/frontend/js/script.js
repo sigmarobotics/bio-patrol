@@ -311,12 +311,18 @@ function checkShelfDrop() {
       hintEl.textContent = hint;
     }
 
-    // A robot we cannot reach cannot reset its shelf pose — the button would
-    // only produce a 503.
+    // Never disable this button: task.metadata is written once when the drop
+    // is handled and never refreshed, so a disabled-on-disconnect button stays
+    // disabled after the robot comes back — and with the resume button hidden
+    // when no beds remain, the full-screen overlay would have zero usable
+    // actions until the backend restarts. Pressing it while offline is
+    // harmless: the endpoint answers 503 and recoverShelf() shows its detail.
     const recoverBtn = document.getElementById('btn-recover-shelf');
     if (recoverBtn) {
-      recoverBtn.disabled = disconnected;
-      recoverBtn.title = disconnected ? '機器人失聯中，無法下達歸位指令' : '';
+      recoverBtn.disabled = false;
+      recoverBtn.title = disconnected
+        ? '機器人失聯中，連線恢復後按此歸位（現在按會顯示失聯訊息）'
+        : '';
     }
 
     // Draw mini-map with shelf drop marker

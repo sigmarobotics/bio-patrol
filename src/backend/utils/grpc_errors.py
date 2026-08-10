@@ -21,8 +21,6 @@ _CONNECTION_MARKERS = (
     "connection reset",
     "network is unreachable",
     "socket closed",
-    "timeout",
-    "timed out",
 )
 
 

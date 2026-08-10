@@ -170,6 +170,14 @@ class TaskEngine:
             try:
                 mid = await asyncio.to_thread(slot.conn.client.get_moving_shelf_id)
                 fail_streak = 0
+                if self._disconnect_suspected:
+                    # The robot answers again, so the suspicion is over. Left
+                    # sticky it would downgrade a later real drop to "offline".
+                    logger.info(
+                        f"[STATE WATCHER] Robot {self.robot_id} reachable again — "
+                        f"clearing disconnect suspicion"
+                    )
+                    self._disconnect_suspected = False
                 mid = mid or None
                 if mid:
                     last_seen_id = mid
@@ -493,7 +501,14 @@ class TaskEngine:
             s.status = StepStatus.SKIPPED
 
         # Robot return home — controller failures come back as {"ok": False},
-        # not exceptions, so check the result explicitly.
+        # not exceptions, so check the result explicitly. An unreachable robot
+        # takes no commands, so sending it home would only burn the
+        # controller's 240s timeout inside the drop handler.
+        if disconnected:
+            logger.info(
+                f"[SHELF DROP] Robot {self.robot_id} unreachable — skipping return_home"
+            )
+            return
         try:
             rh = await self.fleet.return_home(self.robot_id)
             if rh.get("ok"):

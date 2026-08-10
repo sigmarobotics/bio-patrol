@@ -322,6 +322,12 @@ async def resume_patrol(req: ResumePatrolRequest):
         raise
     except Exception as e:
         logger.error(f"Resume patrol - shelf reset failed: {e}")
+        if is_connection_error(e):
+            # Same failure as recover-shelf, so the same answer: 503 plus text
+            # the ward can act on, not a raw gRPC string.
+            raise HTTPException(
+                status_code=503, detail="機器人失聯，請先確認機器人電源與網路"
+            )
         raise HTTPException(status_code=500, detail=f"Shelf reset failed: {e}")
 
     old_task.status = TaskStatus.DONE

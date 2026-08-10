@@ -10,6 +10,7 @@ cases surface as such in the metadata and in the recover endpoint.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -42,10 +43,25 @@ def test_connection_errors_are_recognised():
     assert is_connection_error(OSError("No route to host"))
 
 
+def test_status_code_alone_is_enough():
+    """The raw SDK path raises grpc.RpcError, whose text may carry no marker."""
+
+    class _RpcError(Exception):
+        def code(self):
+            return SimpleNamespace(name="UNAVAILABLE")
+
+    err = _RpcError("robot said no")
+    assert not any(m in str(err) for m in ("unavailable", "connect", "socket"))
+    assert is_connection_error(err)
+
+
 def test_robot_errors_are_not_connection_errors():
     assert not is_connection_error(None)
     assert not is_connection_error(ValueError("shelf S_99 not found"))
     assert not is_connection_error("error_code=11005: shelf pose mismatch")
+    # A robot that answers and then times out is online — treating that as a
+    # disconnect would downgrade a real drop to "offline".
+    assert not is_connection_error(TimeoutError("move_shelf timed out after 240s"))
 
 
 # ── classifier ───────────────────────────────────────────────────────────────
@@ -64,16 +80,22 @@ def test_connected_robot_classification_is_unchanged():
 
 # ── state watcher ────────────────────────────────────────────────────────────
 
-def _watcher_engine(responses):
-    """TaskEngine whose watcher reads ``responses`` then stops the loop."""
+def _watcher_engine(responses, *, final="S_04"):
+    """TaskEngine whose watcher reads ``responses`` then stops the loop.
+
+    ``final`` is the read that ends the loop: a neutral "shelf still docked"
+    by default, so ending the script cannot itself look like a release. Pass
+    the failure instead when the run must end with the robot still unreachable
+    — a successful read is what clears the disconnect suspicion.
+    """
     fake_client = MagicMock()
 
     def _next():
         if not responses:
-            # Neutral final read (shelf still docked) so ending the script
-            # cannot itself look like a release.
             eng._state_watcher_stop = True
-            return "S_04"
+            if isinstance(final, Exception):
+                raise final
+            return final
         item = responses.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -103,7 +125,7 @@ def no_sleep(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_repeated_read_failures_are_a_disconnect_not_a_drop(no_sleep):
-    eng = _watcher_engine(["S_04", UNAVAILABLE, UNAVAILABLE, UNAVAILABLE])
+    eng = _watcher_engine(["S_04", UNAVAILABLE, UNAVAILABLE], final=UNAVAILABLE)
 
     await eng._watch_shelf_state()
 
@@ -130,6 +152,19 @@ async def test_two_failures_below_threshold_do_not_trigger(no_sleep):
 
     assert eng._disconnect_suspected is False
     assert not eng.shelf_drop_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_suspicion_clears_when_the_robot_answers_again(no_sleep):
+    """The flag is per-incident, not per-run: a sticky one downgrades a later
+    real drop to "offline" for the rest of the patrol."""
+    eng = _watcher_engine(["S_04", UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, "S_04"])
+
+    await eng._watch_shelf_state()
+
+    assert eng._disconnect_suspected is False
+    # The pause raised while it was unreachable still stands.
+    assert eng.shelf_drop_event.is_set()
 
 
 @pytest.mark.asyncio
@@ -227,6 +262,25 @@ def test_reachable_robot_drop_is_still_critical(monkeypatch):
     assert task.metadata["last_known_robot_pose"] is None
 
 
+def test_disconnected_drop_skips_return_home(monkeypatch):
+    """An unreachable robot takes no commands — sending it home would only
+    burn the controller's 240s timeout inside the drop handler."""
+    eng = _engine(UNREACHABLE_READ, UNREACHABLE_READ)
+
+    _run_drop(monkeypatch, eng)
+
+    eng.fleet.return_home.assert_not_awaited()
+
+
+def test_reachable_drop_still_sends_the_robot_home(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD,
+                  shelf_pose={"x": 1.0, "y": 2.0, "theta": 0.0})
+
+    _run_drop(monkeypatch, eng)
+
+    eng.fleet.return_home.assert_awaited_once()
+
+
 def test_one_failed_read_alone_is_not_a_disconnect(monkeypatch):
     """Battery unreadable but the robot still answers -> unchanged drop path."""
     eng = _engine(UNREACHABLE_READ, IDLE_CMD)
@@ -314,6 +368,43 @@ def test_recover_shelf_returns_503_when_robot_unreachable(monkeypatch):
 
 def test_recover_shelf_keeps_500_for_real_errors(monkeypatch):
     err = _recover(monkeypatch, ValueError("shelf S_04 not registered"))
+
+    assert err.status_code == 500
+    assert "機器人失聯" not in str(err.detail)
+
+
+# ── resume endpoint ──────────────────────────────────────────────────────────
+
+def _resume(monkeypatch, exc):
+    task = Task(
+        task_id="t-drop", robot_id="kachaka", status=TaskStatus.SHELF_DROPPED,
+        steps=[],
+        metadata={
+            "shelf_drop": True,
+            "shelf_id": "S_04",
+            "remaining_beds": [{"bed_key": "B_101-1", "location_id": "L1"}],
+        },
+    )
+    patrol.tasks_db["t-drop"] = task
+    monkeypatch.setattr(dependencies, "get_fleet", lambda: _fleet_raising(exc))
+    try:
+        with pytest.raises(HTTPException) as excinfo:
+            asyncio.run(patrol.resume_patrol(patrol.ResumePatrolRequest(task_id="t-drop")))
+    finally:
+        patrol.tasks_db.pop("t-drop", None)
+    return excinfo.value
+
+
+def test_resume_returns_503_when_robot_unreachable(monkeypatch):
+    """Same failure as recover-shelf, so the same answer — not a bare 500."""
+    err = _resume(monkeypatch, UNAVAILABLE)
+
+    assert err.status_code == 503
+    assert "機器人失聯" in err.detail
+
+
+def test_resume_keeps_500_for_real_errors(monkeypatch):
+    err = _resume(monkeypatch, ValueError("shelf S_04 not registered"))
 
     assert err.status_code == 500
     assert "機器人失聯" not in str(err.detail)
