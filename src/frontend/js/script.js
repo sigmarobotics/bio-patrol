@@ -9,6 +9,7 @@ let currentTab = 'dashboard';
 let pollingInterval = null;
 let robotData = { battery: null, pose: null, status: 'unknown' };
 let shelfDropPose = null;  // {x, y, theta} or null — set by checkShelfDrop()
+let shelfDropLastKnownPose = null;  // robot's last known {x, y, theta} when the shelf pose is unknown
 let _cancelledDismissed = new Set();  // task IDs dismissed after showing "cancelled"
 let _cancelHideTimer = null;
 let connectionStateInterval = null;  // setInterval handle for Settings tab poller
@@ -284,6 +285,45 @@ function checkShelfDrop() {
   if (shelfDropTask) {
     const meta = shelfDropTask.metadata || {};
     shelfDropPose = meta.shelf_pose || null;
+    // No shelf pose = nothing to point at. Saying "look at the marker" on a
+    // markerless map sent staff hunting for a sensor the app never located
+    // (2026-08-10 新營), so the wording follows what is actually known.
+    const poseUnknown = meta.pose_unknown === true || !shelfDropPose;
+    const disconnected = meta.disconnect === true;
+    shelfDropLastKnownPose = poseUnknown ? (meta.last_known_robot_pose || null) : null;
+
+    const titleEl = document.getElementById('shelf-drop-title');
+    const hintEl = document.getElementById('shelf-drop-hint');
+    if (titleEl) titleEl.textContent = disconnected ? '🔌 機器人失聯' : '⚠️ 架子掉落警示';
+    if (hintEl) {
+      let hint;
+      if (!poseUnknown) {
+        hint = '請依照地圖標示位置找到感測器並推回初始位置';
+      } else {
+        hint = disconnected
+          ? '掉落位置未知（偵測當下機器人已失聯）'
+          : '掉落位置未知（機器人未回報貨架座標）';
+        if (shelfDropLastKnownPose) hint += '，最後已知位置：地圖空心標記處';
+      }
+      if (disconnected) {
+        hint += '。棚車狀態未知，請確認機器人電源是否開啟、是否仍在 WiFi 範圍內，連線恢復後再操作歸位';
+      }
+      hintEl.textContent = hint;
+    }
+
+    // Never disable this button: task.metadata is written once when the drop
+    // is handled and never refreshed, so a disabled-on-disconnect button stays
+    // disabled after the robot comes back — and with the resume button hidden
+    // when no beds remain, the full-screen overlay would have zero usable
+    // actions until the backend restarts. Pressing it while offline is
+    // harmless: the endpoint answers 503 and recoverShelf() shows its detail.
+    const recoverBtn = document.getElementById('btn-recover-shelf');
+    if (recoverBtn) {
+      recoverBtn.disabled = false;
+      recoverBtn.title = disconnected
+        ? '機器人失聯中，連線恢復後按此歸位（現在按會顯示失聯訊息）'
+        : '';
+    }
 
     // Draw mini-map with shelf drop marker
     drawShelfDropMiniMap();
@@ -311,6 +351,7 @@ function checkShelfDrop() {
   } else {
     overlay.style.display = 'none';
     shelfDropPose = null;
+    shelfDropLastKnownPose = null;
   }
 }
 
@@ -375,6 +416,25 @@ function drawShelfDropMiniMap() {
 
       ctx.restore();
     }
+  } else if (shelfDropLastKnownPose) {
+    // Hollow marker = "this is where the robot was last seen", not where the
+    // shelf is. The solid marker above is the only one that claims a position.
+    const lastPos = tfROS2Canvas(gMapDesc, shelfDropLastKnownPose);
+    if (Number.isFinite(lastPos.x) && Number.isFinite(lastPos.y)) {
+      ctx.save();
+      ctx.translate(lastPos.x, lastPos.y);
+      ctx.strokeStyle = '#f5a623';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.arc(0, 0, 10, 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(0, 0, 3, 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   ctx.restore();
@@ -395,7 +455,9 @@ async function recoverShelf() {
       if (statusEl) statusEl.textContent = '';
     }, 2000);
   } catch (e) {
-    if (statusEl) statusEl.textContent = `歸位失敗: ${e.message || e}`;
+    // The backend's detail carries the actionable text (e.g. the 503
+    // "機器人失聯，請先確認機器人電源與網路"); e.message is just "Request failed".
+    if (statusEl) statusEl.textContent = `歸位失敗: ${e.response?.data?.detail || e.message || e}`;
   }
 }
 
