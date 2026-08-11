@@ -17,6 +17,7 @@ from utils.json_io import load_json, save_json
 from common_types import (
     StepAction, StepStatus, Task, TaskStatus, TaskStep, generate_task_id,
 )
+from services.fleet_api import RobotNotRegistered
 from services.task_runtime import submit_task, tasks_db
 
 logger = logging.getLogger(__name__)
@@ -281,9 +282,11 @@ async def recover_shelf(req: RecoverShelfRequest):
         return {"status": "ok", "message": "Shelf pose reset successfully"}
     except Exception as e:
         logger.error(f"Shelf recovery failed: {e}")
-        if is_connection_error(e):
+        if is_connection_error(e) or isinstance(e, RobotNotRegistered):
             # An unreachable robot is not a server fault — and a raw 500 with a
-            # gRPC traceback tells the ward nurse nothing actionable.
+            # gRPC traceback tells the ward nurse nothing actionable. Covers
+            # RobotNotRegistered too: on this single-robot appliance the only
+            # way registration is missing is that the robot was offline at boot.
             raise HTTPException(
                 status_code=503, detail="機器人失聯，請先確認機器人電源與網路"
             )
@@ -322,7 +325,7 @@ async def resume_patrol(req: ResumePatrolRequest):
         raise
     except Exception as e:
         logger.error(f"Resume patrol - shelf reset failed: {e}")
-        if is_connection_error(e):
+        if is_connection_error(e) or isinstance(e, RobotNotRegistered):
             # Same failure as recover-shelf, so the same answer: 503 plus text
             # the ward can act on, not a raw gRPC string.
             raise HTTPException(
