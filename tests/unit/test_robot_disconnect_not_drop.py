@@ -408,3 +408,25 @@ def test_resume_keeps_500_for_real_errors(monkeypatch):
 
     assert err.status_code == 500
     assert "機器人失聯" not in str(err.detail)
+
+
+# ── robot never registered (offline at app boot) ─────────────────────────────
+# 2026-08-11 新營實測：機器人在 app 開機時已離線 → 註冊失敗 → RobotNotRegistered
+# 走了裸 500 而非 503 人話。單機設備上「未註冊」唯一成因就是機器人不在線。
+
+def test_recover_shelf_returns_503_when_robot_never_registered(monkeypatch):
+    from services.fleet_api import RobotNotRegistered
+
+    err = _recover(monkeypatch, RobotNotRegistered("Robot kachaka not registered"))
+
+    assert err.status_code == 503
+    assert "機器人失聯" in err.detail
+
+
+def test_resume_returns_503_when_robot_never_registered(monkeypatch):
+    from services.fleet_api import RobotNotRegistered
+
+    err = _resume(monkeypatch, RobotNotRegistered("Robot kachaka not registered"))
+
+    assert err.status_code == 503
+    assert "機器人失聯" in err.detail
