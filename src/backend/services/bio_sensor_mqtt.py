@@ -177,7 +177,11 @@ class BioSensorMQTTClient:
         from services.notifications.evaluator import ScanOutcome
 
         if task_id is None:
-            task_id = get_now().strftime("%Y%m%d%H%M%S")
+            # "manual-" prefix keeps ad-hoc runs out of the patrol namespace:
+            # a bare 14-digit stamp collides with a patrol task started in the
+            # same second (both /scan-history's `task_id LIKE '<ts>%'` filter
+            # and the frontend run dropdown would then mix the two).
+            task_id = f"manual-{get_now().strftime('%Y%m%d%H%M%S')}"
         if target_bed is None:
             # location_id is NOT NULL in sensor_scan_data, so the fallback for
             # task-less (ad-hoc) scans lives here where the DB write happens —
@@ -211,6 +215,13 @@ class BioSensorMQTTClient:
         last_record_processed: dict | None = None
         retry_count = 0  # loop variable; pre-init covers the RETRY_COUNT == 0 edge
 
+        # Window start: drop whatever the paho thread left behind. latest_data
+        # is never cleared elsewhere, so a sensor that goes silent would leave
+        # the previous bed's reading in place and this window would pick it up
+        # and file it under this bed. The only race left is the paho thread
+        # writing right after the clear — that is data from inside this window,
+        # which is exactly what we want.
+        self.latest_data = None
         await asyncio.sleep(INT_WAIT_TIME)
         for retry_count in range(RETRY_COUNT):
             # Snapshot the reference: the paho thread reassigns latest_data

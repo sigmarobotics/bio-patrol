@@ -1097,6 +1097,12 @@ async function saveBedsConfig() {
 
 let sensorData = [];
 
+// Patrol runs are stamped "YYYYMMDDHHmmSS" (optionally + a "-<rand>" collision
+// suffix); ad-hoc /api/bio-sensor/scan runs carry a "manual-" prefix in front
+// of the same stamp, so a bare match identifies a patrol round.
+const RUN_TS_RE = /^\d{14}(-|$)/;
+const MANUAL_RUN_PREFIX = 'manual-';
+
 // The unit of viewing is one patrol run (task_id), not a calendar day —
 // the 23:00 night run crosses midnight but all its rows share the task_id
 // stamped at launch time.
@@ -1112,7 +1118,9 @@ async function loadSensorData() {
     const runs = [...new Set(rows.map(d => d.task_id))];
     populateRunFilter(runSel, runs, selectedRun);
 
-    const activeRun = selectedRun || runs[0] || '';
+    // Default to the newest PATROL run: an ad-hoc scan is newer but is a debug
+    // reading, not the round an operator opens this tab to see.
+    const activeRun = selectedRun || runs.find(t => RUN_TS_RE.test(t)) || runs[0] || '';
     sensorData = dedupeScans(rows.filter(d => d.task_id === activeRun));
 
     updateSensorStats();
@@ -1123,9 +1131,10 @@ async function loadSensorData() {
 }
 
 function formatRunLabel(taskId) {
-  // 14-digit timestamp, optionally followed by a "-<rand>" collision suffix
-  if (/^\d{14}(-|$)/.test(taskId)) {
-    return `${taskId.slice(4, 6)}/${taskId.slice(6, 8)} ${taskId.slice(8, 10)}:${taskId.slice(10, 12)} 巡房`;
+  const manual = taskId.startsWith(MANUAL_RUN_PREFIX);
+  const ts = manual ? taskId.slice(MANUAL_RUN_PREFIX.length) : taskId;
+  if (RUN_TS_RE.test(ts)) {
+    return `${ts.slice(4, 6)}/${ts.slice(6, 8)} ${ts.slice(8, 10)}:${ts.slice(10, 12)} ${manual ? '手動掃描' : '巡房'}`;
   }
   return taskId.slice(0, 8);
 }
@@ -1176,9 +1185,12 @@ function updateSensorStats() {
 function formatTaskId(taskId) {
   if (!taskId) return '--';
   // Parse "YYYYMMDDHHmmSS" (optionally followed by a "-<rand>" collision
-  // suffix) → "YYYY/MM/DD HH:mm:SS"
-  if (/^\d{14}(-|$)/.test(taskId)) {
-    return `${taskId.slice(0,4)}/${taskId.slice(4,6)}/${taskId.slice(6,8)} ${taskId.slice(8,10)}:${taskId.slice(10,12)}:${taskId.slice(12,14)}`;
+  // suffix, or preceded by the ad-hoc "manual-" prefix) → "YYYY/MM/DD HH:mm:SS"
+  const manual = taskId.startsWith(MANUAL_RUN_PREFIX);
+  const ts = manual ? taskId.slice(MANUAL_RUN_PREFIX.length) : taskId;
+  if (RUN_TS_RE.test(ts)) {
+    const clock = `${ts.slice(0,4)}/${ts.slice(4,6)}/${ts.slice(6,8)} ${ts.slice(8,10)}:${ts.slice(10,12)}:${ts.slice(12,14)}`;
+    return manual ? `${clock}（手動）` : clock;
   }
   // Fallback for old UUID-style task_ids
   return taskId.slice(0, 8);
