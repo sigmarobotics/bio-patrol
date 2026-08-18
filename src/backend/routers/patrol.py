@@ -111,12 +111,15 @@ async def set_demo_preset(name: str):
 
 # ── Patrol step builder ──────────────────────────────────────────────────────
 
-def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode) -> List[TaskStep]:
+def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
+                       final_wait_seconds: int = 5) -> List[TaskStep]:
     """Build a reset_shelf_pose + (move_shelf -> action -> ...)+ + return_shelf list.
 
     `beds`: ordered list of {bed_key, location_id} for the run. Empty/invalid
             entries are skipped silently (resume_patrol may carry partial dicts).
     `mode`: "demo" -> action is wait(5s); "patrol" -> bio_scan.
+    `final_wait_seconds`: demo only — dwell at the LAST bed (site demos park the
+            robot at the endpoint for the audience before auto-returning).
 
     The shelf sits at its home whenever a run starts, so the run opens by
     resetting the robot's shelf-pose estimate — a drifted estimate is what
@@ -156,6 +159,8 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode) -> 
         counter += 1
 
     if steps:
+        if mode == "demo":
+            steps[-1].params = {"seconds": final_wait_seconds}
         steps.insert(0, TaskStep(
             step_id="reset_shelf",
             action=StepAction.RESET_SHELF_POSE.value,
@@ -243,7 +248,10 @@ async def start_patrol(req: PatrolStartRequest):
     except Exception as e:
         logger.warning(f"Battery check failed, starting patrol anyway: {e}")
 
-    steps = build_patrol_steps(beds, shelf_id, mode=req.mode)
+    steps = build_patrol_steps(
+        beds, shelf_id, mode=req.mode,
+        final_wait_seconds=cfg.get("demo_final_wait_seconds", 5),
+    )
 
     task = Task(
         task_id=generate_task_id(),

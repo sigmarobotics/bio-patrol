@@ -50,6 +50,9 @@ DEFAULT_SETTINGS = {
     "robot_offline_debounce_seconds": 300,
     # TODO-018: 低於此電量（%）不讓巡邏起跑；查詢不到電量時 fail-open 放行。
     "patrol_min_battery_pct": 30,
+    # Demo run 最後一床的停留秒數（其餘床固定 5s）。現場展示要機器人停在
+    # 終點讓來賓看量測，時間到才自動歸還棚車回充。
+    "demo_final_wait_seconds": 5,
 }
 
 DEFAULT_BEDS = {
