@@ -90,3 +90,16 @@ def test_final_return_shelf_carries_shelf_id():
     last = steps[-1]
     assert last.action == StepAction.RETURN_SHELF.value
     assert last.params == {"shelf_id": "S_04"}
+
+
+def test_demo_mode_final_wait_overrides_last_bed_only():
+    steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
+                               final_wait_seconds=300)
+    wait_steps = [s for s in steps if s.action == StepAction.WAIT.value]
+    assert [s.params["seconds"] for s in wait_steps] == [5, 300]
+
+
+def test_patrol_mode_ignores_final_wait_seconds():
+    steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="patrol",
+                               final_wait_seconds=300)
+    assert StepAction.WAIT.value not in [s.action for s in steps]

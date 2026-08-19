@@ -90,6 +90,36 @@ async def submit_task(task: Task):
     logger.info(f"Task {task.task_id} submitted to robot {robot_id}")
 
 
+async def submit_cleanup_task(robot_id: str) -> Optional[str]:
+    """取消載棚車任務後的收工:身上還有棚車就先歸位,再回充。
+
+    操作者按「停止」的語意是「收工」,不是「原地棄置」。持棚車與否問機器人
+    本人(get_moving_shelf)——引擎的 _current_shelf_id 只在 move_shelf 完整
+    跑完後才設,第一段移動途中取消會漏抓(2026-08-18 板橋現場)。
+    """
+    from dependencies import get_fleet
+    from common_types import generate_task_id
+    shelf_id = None
+    try:
+        res = await get_fleet().get_moving_shelf(robot_id)
+        shelf_id = res.get("shelf_id")
+    except Exception as e:
+        logger.warning(f"Cleanup: moving-shelf query failed, assuming none held: {e}")
+    steps = []
+    if shelf_id:
+        steps.append(TaskStep(
+            step_id="cleanup_return_shelf", action=StepAction.RETURN_SHELF.value,
+            params={"shelf_id": shelf_id}, status=StepStatus.PENDING))
+    steps.append(TaskStep(
+        step_id="cleanup_return_home", action=StepAction.RETURN_HOME.value,
+        params={}, status=StepStatus.PENDING))
+    task = Task(task_id=generate_task_id(), robot_id=robot_id, steps=steps,
+                status=TaskStatus.QUEUED, metadata={"mode": "cleanup"})
+    await submit_task(task)
+    logger.info(f"Cleanup task {task.task_id} queued (shelf={shelf_id or 'none'})")
+    return task.task_id
+
+
 class TaskEngine:
     def __init__(self, fleet_api: FleetAPI, robot_id: str):
         self.fleet = fleet_api
@@ -676,15 +706,16 @@ class TaskEngine:
                 self._state_watcher_task = None
             cancelled = task.status == TaskStatus.CANCELLED
 
-            # Cancelled cleanup: return shelf and go home
-            if cancelled and getattr(self, "_current_shelf_id", None):
+            # Cancelled cleanup — queued as its own task so it is visible in
+            # the dashboard and, crucially, decides "is a shelf held" from the
+            # robot itself instead of _current_shelf_id (which misses a cancel
+            # during the first move_shelf). Guard keeps a cancelled cleanup
+            # from spawning another cleanup.
+            if cancelled and (task.metadata or {}).get("mode") != "cleanup":
                 try:
-                    await self.fleet.return_shelf(self.robot_id, self._current_shelf_id)
-                    logger.info(f"[{tag}] Cancelled: returned shelf {self._current_shelf_id}")
-                    await self.fleet.return_home(self.robot_id)
-                    logger.info(f"[{tag}] Cancelled: robot sent home")
+                    await submit_cleanup_task(self.robot_id)
                 except Exception as e:
-                    logger.error(f"[{tag}] Cancelled cleanup error: {e}")
+                    logger.error(f"[{tag}] Failed to queue cancel cleanup: {e}")
 
             try:
                 bio_steps = [s for s in task.steps if s.action == StepAction.BIO_SCAN]
@@ -952,6 +983,10 @@ class TaskEngine:
 
     async def _do_return_home(self, step: TaskStep) -> StepResult:
         result = await self.fleet.return_home(self.robot_id)
+        # 10267 = "It is already charged": the robot is already on the charger,
+        # which is exactly what return_home wants — not a failure.
+        if isinstance(result, dict) and result.get("error_code") == 10267:
+            result = {**result, "ok": True, "success": True}
         return self._make_result(result, step.action, {})
 
     async def _await_or_drop(self, coro):

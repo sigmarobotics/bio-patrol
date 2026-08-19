@@ -104,19 +104,39 @@ async def _action_return_home(_params: dict) -> dict:
     return result if isinstance(result, dict) else {"ok": True, "data": str(result)}
 
 
-async def _action_speak(params: dict) -> dict:
-    text = str(params.get("text") or "").strip()
-    if not text:
-        return {"ok": False, "error": "speak action requires non-empty text"}
-    from dependencies import get_fleet
-    fleet = get_fleet()
-    try:
-        result = await fleet.speak("kachaka", text)
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    if isinstance(result, dict):
-        return {**result, "text": text}
-    return {"ok": True, "text": text}
+async def _action_shelf_to_ns(params: dict) -> dict:
+    """Deliver a sensor shelf to the nursing station, then send the robot home.
+
+    Replaces the old TTS test action; the registry key stays "speak" so an
+    existing button binding keeps firing without re-pairing.
+    """
+    shelf_id = str(params.get("shelf_id") or "S05")
+    location_id = str(params.get("location_id") or "NS")
+    from common_types import (
+        StepAction, StepStatus, Task, TaskStatus, TaskStep, generate_task_id,
+    )
+    from services.task_runtime import submit_task, tasks_db
+    # Same one-robot/one-shelf dedup as start_patrol: any live patrol-family
+    # task means this press is a duplicate or a conflict — refuse, don't queue.
+    for existing in tasks_db.values():
+        if existing.status not in (TaskStatus.QUEUED, TaskStatus.IN_PROGRESS):
+            continue
+        if (existing.metadata or {}).get("mode"):
+            return {"ok": False, "error": f"task {existing.task_id} already running"}
+    steps = [
+        TaskStep(step_id="reset_shelf", action=StepAction.RESET_SHELF_POSE.value,
+                 params={"shelf_id": shelf_id}, status=StepStatus.PENDING),
+        TaskStep(step_id="deliver", action=StepAction.MOVE_SHELF.value,
+                 params={"shelf_id": shelf_id, "location_id": location_id},
+                 status=StepStatus.PENDING),
+        TaskStep(step_id="go_home", action=StepAction.RETURN_HOME.value,
+                 params={}, status=StepStatus.PENDING),
+    ]
+    task = Task(task_id=generate_task_id(), robot_id="kachaka", steps=steps,
+                status=TaskStatus.QUEUED, metadata={"mode": "delivery"})
+    tasks_db[task.task_id] = task
+    await submit_task(task)
+    return {"ok": True, "task_id": task.task_id}
 
 
 DEFAULT_ACTIONS: list[tuple[str, str, ActionHandler, dict]] = [
@@ -125,7 +145,8 @@ DEFAULT_ACTIONS: list[tuple[str, str, ActionHandler, dict]] = [
     ("patrol_start",  "Start patrol",              _action_patrol_start,  {}),
     ("patrol_cancel", "Cancel running patrol",     _action_patrol_cancel, {}),
     ("return_home",   "Return home",               _action_return_home,   {}),
-    ("speak",         "Speak (test announcement)", _action_speak,         {"text": "こんにちは、シグマです"}),
+    ("speak",         "送 S_01 到護理站＋回家充電", _action_shelf_to_ns,
+     {"shelf_id": "S05", "location_id": "NS"}),
 ]
 
 
