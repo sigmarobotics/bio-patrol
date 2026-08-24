@@ -177,8 +177,9 @@ class TaskSchedulerService:
 
     async def _run_patrol(self, schedule_id: str):
         """Execute a scheduled patrol through the same entry point as a manual
-        start, so the unattended night run gets the duplicate-run dedup and the
-        low-battery gate instead of queueing a second route behind a live one."""
+        start, so the unattended night run gets the duplicate-run dedup, the
+        low-battery gate and the robot-offline gate instead of queueing a
+        second route behind a live one."""
         logger.info(f"Scheduled patrol triggered: {schedule_id}")
         try:
             from fastapi import HTTPException

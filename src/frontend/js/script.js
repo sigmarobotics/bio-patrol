@@ -583,7 +583,8 @@ async function startDemoRun() {
     const res = await dataService.startPatrol('demo');
     alert(_startedMessage(res, 'Demo Run started!'));
   } catch (e) {
-    alert('Failed to start demo run: ' + (e.message || e));
+    // detail carries the actionable refusal text (offline/battery gate 中文).
+    alert('Failed to start demo run: ' + (e.response?.data?.detail || e.message || e));
   }
 }
 
@@ -592,7 +593,7 @@ async function startPatrol() {
     const res = await dataService.startPatrol('patrol');
     alert(_startedMessage(res, 'Patrol started!'));
   } catch (e) {
-    alert('Failed to start patrol: ' + (e.message || e));
+    alert('Failed to start patrol: ' + (e.response?.data?.detail || e.message || e));
   }
 }
 

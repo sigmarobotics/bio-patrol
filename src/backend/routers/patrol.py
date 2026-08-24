@@ -18,7 +18,7 @@ from common_types import (
     StepAction, StepStatus, Task, TaskStatus, TaskStep, generate_task_id,
 )
 from services.fleet_api import RobotNotRegistered
-from services.task_runtime import submit_task, tasks_db
+from services.task_runtime import clear_shelf_dropped_tasks, submit_task, tasks_db
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +182,27 @@ class PatrolStartRequest(BaseModel):
     mode: PatrolMode = "patrol"
 
 
+def _robot_offline() -> bool:
+    """Robot confirmed offline? A blip still inside the debounce grace window
+    counts as online — the 300s window exists exactly so mesh-WiFi hiccups
+    don't cancel a whole night's run. Fail-open: a state query that itself
+    blows up must not block the patrol (same philosophy as the battery gate).
+    """
+    try:
+        from dependencies import get_fleet
+        cfg = get_runtime_settings()
+        state = get_fleet().get_connection_state_dict(
+            "kachaka",
+            debounce_seconds=int(cfg.get("robot_offline_debounce_seconds", 300)),
+        )
+        if state.get("state") == "connected":
+            return False
+        return not state.get("offline_pending", False)
+    except Exception as e:
+        logger.warning(f"Connection-state check failed, starting patrol anyway: {e}")
+        return False
+
+
 @router.post("/patrol/start")
 async def start_patrol(req: PatrolStartRequest):
     """Start a patrol run. Demo mode loads the demo_preset (if any) and uses
@@ -231,6 +252,16 @@ async def start_patrol(req: PatrolStartRequest):
             "beds_count": len(enabled),
         }
 
+    # Offline gate — a run started against a confirmed-offline robot cannot
+    # move a single step; all it produces is one more shelf_dropped(disconnect)
+    # alert minutes later (新營/板榮 backlog). Sits in start_patrol so manual,
+    # demo and scheduled starts are all refused up front with the same words.
+    if _robot_offline():
+        raise HTTPException(
+            status_code=503,
+            detail="機器人失聯，無法啟動巡房，請確認機器人電源與網路",
+        )
+
     # Battery gate — fail-open: a robot we cannot query is a robot whose patrol
     # will fail on its own; blocking start adds nothing.
     min_battery = cfg.get("patrol_min_battery_pct", 30)
@@ -274,8 +305,10 @@ class RecoverShelfRequest(BaseModel):
 
 @router.post("/patrol/recover-shelf")
 async def recover_shelf(req: RecoverShelfRequest):
-    """Reset shelf pose so the robot can re-dock it. Marks any active
-    shelf_dropped task as DONE so the dashboard clears the alert."""
+    """Reset shelf pose so the robot can re-dock it. Marks every
+    shelf_dropped task DONE so the dashboard clears the alert — an offline
+    weekend piles up one dropped task per fired schedule, and clearing one
+    per press made the backlog look unclearable (新營/板榮 2026-08)."""
     try:
         from dependencies import get_fleet
         fleet = get_fleet()
@@ -283,10 +316,7 @@ async def recover_shelf(req: RecoverShelfRequest):
         result = await asyncio.to_thread(client.reset_shelf_pose, req.shelf_id)
         if not result.success:
             return {"status": "error", "message": f"Recovery failed: error {result.error_code}"}
-        for task in tasks_db.values():
-            if task.status == TaskStatus.SHELF_DROPPED:
-                task.status = TaskStatus.DONE
-                break
+        clear_shelf_dropped_tasks(reason="manual recover-shelf")
         return {"status": "ok", "message": "Shelf pose reset successfully"}
     except Exception as e:
         logger.error(f"Shelf recovery failed: {e}")

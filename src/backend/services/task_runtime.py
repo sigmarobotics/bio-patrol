@@ -75,6 +75,30 @@ task_queues: Dict[str, asyncio.Queue] = {}
 current_tasks: Dict[str, str] = {}  # robot_id -> task_id
 
 
+def clear_shelf_dropped_tasks(*, only_disconnect: bool = False,
+                              reason: str = "") -> int:
+    """Mark SHELF_DROPPED tasks DONE; returns how many were cleared.
+
+    One robot, one shelf: the manual recover-shelf action means a human has
+    just re-established the physical situation, so every standing drop alert
+    is stale — clear them all. With ``only_disconnect=True`` only
+    offline-type alerts (metadata.disconnect) are swept: the same "robot is
+    offline" fact never needs N alerts, while a real CRITICAL drop is only
+    cleared by an explicit recovery action — never by an automatic sweep.
+    """
+    cleared = 0
+    for task in tasks_db.values():
+        if task.status != TaskStatus.SHELF_DROPPED:
+            continue
+        if only_disconnect and (task.metadata or {}).get("disconnect") is not True:
+            continue
+        task.status = TaskStatus.DONE
+        cleared += 1
+    if cleared:
+        logger.info(f"Cleared {cleared} shelf_dropped task(s) ({reason})")
+    return cleared
+
+
 async def submit_task(task: Task):
     """Submit a task for execution. Routes directly to the robot's queue."""
     robot_id = task.robot_id or "kachaka"
@@ -457,6 +481,15 @@ class TaskEngine:
             "battery_pct": battery_pct,
             "disconnect": disconnected,
         }
+        if disconnected:
+            # One "robot is offline" fact needs one alert: an older
+            # disconnect-type alert is the same outage (or a previous one)
+            # already superseded by this task. Real drops are left standing.
+            # Swept BEFORE this task turns SHELF_DROPPED, so the status guard
+            # naturally skips the current task.
+            clear_shelf_dropped_tasks(
+                only_disconnect=True, reason="superseded by newer disconnect"
+            )
         task.status = TaskStatus.SHELF_DROPPED
 
         if disconnected:
@@ -841,6 +874,17 @@ class TaskEngine:
     async def _do_reset_shelf_pose(self, step: TaskStep) -> StepResult:
         shelf_id = step.params["shelf_id"]
         result = await self.fleet.reset_shelf_pose(self.robot_id, shelf_id)
+        # A successful reset proves the robot answers again, so offline-type
+        # alerts from earlier runs are stale — sweeping them here lets the
+        # first run after an offline weekend clear the backlog by itself.
+        # only_disconnect: the reset is a pure pose write with no physical
+        # verification, and this step also opens non-patrol tasks (the
+        # shelf-to-NS button builds it directly), so it must never eat a real
+        # CRITICAL drop — that takes an explicit recover-shelf.
+        if result.get("ok"):
+            clear_shelf_dropped_tasks(
+                only_disconnect=True, reason="reset_shelf_pose step succeeded"
+            )
         return self._make_result(result, step.action, {"shelf_id": shelf_id})
 
     async def _do_move_shelf(self, step: TaskStep) -> StepResult:
