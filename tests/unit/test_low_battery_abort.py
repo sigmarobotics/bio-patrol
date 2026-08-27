@@ -198,3 +198,19 @@ def test_dispatch_failure_still_cancels(monkeypatch):
     assert asyncio.run(eng._maybe_abort_low_battery()) is True
     assert task.status == TaskStatus.CANCELLED
     eng.fleet.cancel_command.assert_awaited_once_with("kachaka")
+
+
+def test_shelf_release_in_cancel_window_does_not_overwrite_cancelled(dispatched):
+    """PR #39 review: after the abort cancels the run, the firmware's own
+    put-down (or cancel_command noise) raises the drop event — the handler
+    must leave CANCELLED alone, or run_task never queues the cleanup that
+    carries the shelf home."""
+    task = _patrol_task()
+    task.status = TaskStatus.CANCELLED
+    eng = _engine(_reading(8))
+
+    asyncio.run(eng._handle_shelf_drop(task, 0))
+
+    assert task.status == TaskStatus.CANCELLED
+    assert dispatched == []
+    eng.fleet.cancel_command.assert_not_awaited()

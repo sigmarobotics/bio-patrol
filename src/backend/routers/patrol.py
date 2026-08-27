@@ -182,15 +182,16 @@ class PatrolStartRequest(BaseModel):
     mode: PatrolMode = "patrol"
 
 
-def _robot_offline() -> bool:
+def _robot_offline(cfg: dict) -> bool:
     """Robot confirmed offline? A blip still inside the debounce grace window
     counts as online — the 300s window exists exactly so mesh-WiFi hiccups
     don't cancel a whole night's run. Fail-open: a state query that itself
     blows up must not block the patrol (same philosophy as the battery gate).
+    ``cfg`` comes from the caller's already-loaded runtime settings — this
+    runs on every start, and get_runtime_settings() is a disk read.
     """
     try:
         from dependencies import get_fleet
-        cfg = get_runtime_settings()
         state = get_fleet().get_connection_state_dict(
             "kachaka",
             debounce_seconds=int(cfg.get("robot_offline_debounce_seconds", 300)),
@@ -256,7 +257,7 @@ async def start_patrol(req: PatrolStartRequest):
     # move a single step; all it produces is one more shelf_dropped(disconnect)
     # alert minutes later (新營/板榮 backlog). Sits in start_patrol so manual,
     # demo and scheduled starts are all refused up front with the same words.
-    if _robot_offline():
+    if _robot_offline(cfg):
         raise HTTPException(
             status_code=503,
             detail="機器人失聯，無法啟動巡房，請確認機器人電源與網路",

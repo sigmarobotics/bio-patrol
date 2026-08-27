@@ -159,9 +159,6 @@ class TaskEngine:
         # True once the robot stopped answering: the run still pauses, but the
         # shelf state is reported as unknown instead of dropped.
         self._disconnect_suspected = False
-        # One abort per run — the watcher keeps polling while the cancel works
-        # its way to a step boundary, and a second one would re-notify.
-        self._battery_abort_fired = False
         self._action_handlers: Dict[str, Any] = {
             StepAction.SPEAK.value: self._do_speak,
             StepAction.MOVE_TO_POSE.value: self._do_move_to_pose,
@@ -308,8 +305,6 @@ class TaskEngine:
         # the shelf exactly where this check exists to prevent.
         if (task.metadata or {}).get("mode") == "cleanup":
             return False
-        if self._battery_abort_fired:
-            return False
 
         # Settings first: with the feature disabled the battery gRPC read
         # would be pure waste — every 30s, on exactly the weak-WiFi sites
@@ -339,7 +334,8 @@ class TaskEngine:
         if task.status != TaskStatus.IN_PROGRESS:
             return False
 
-        self._battery_abort_fired = True
+        # No once-only flag needed: the CANCELLED status set below makes the
+        # IN_PROGRESS guards above refuse any later call for this run.
         logger.warning(
             f"[BATTERY ABORT] Robot {self.robot_id} at {pct}% (threshold "
             f"{threshold}%) — cancelling task {task.task_id} to return the shelf"
@@ -527,6 +523,17 @@ class TaskEngine:
                                    trigger_step: Optional[TaskStep] = None,
                                    error_code: int = 0):
         """Handle shelf drop: collect remaining beds, notify, record DB, send robot home."""
+        if task.status == TaskStatus.CANCELLED:
+            # An operator (or the battery abort) already decided this run's
+            # ending. A release signal in the cancel window is the firmware's
+            # own low-battery put-down or noise from cancel_command cutting a
+            # dock short — overwriting CANCELLED here would stop run_task from
+            # queueing the cleanup that carries the shelf home (PR #39 review).
+            logger.info(
+                f"[SHELF DROP] Ignoring release on cancelled task "
+                f"{task.task_id} — cleanup owns the wrap-up"
+            )
+            return
         kind, battery = await self._classify_release()
         low_battery = kind == "low_battery_return"
         disconnected = kind == "disconnected"
@@ -695,7 +702,6 @@ class TaskEngine:
         self.shelf_drop_event.clear()
         self._shelf_release_expected = False
         self._disconnect_suspected = False
-        self._battery_abort_fired = False
         self._state_watcher_stop = False
         self._state_watcher_task = asyncio.create_task(self._watch_shelf_state())
 
