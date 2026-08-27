@@ -68,6 +68,49 @@ async def test_state_callback_mirrors_to_slot_and_delegates_to_controller(monkey
 
 
 @pytest.mark.asyncio
+async def test_reconnect_sweeps_disconnect_type_shelf_dropped_tasks(monkeypatch):
+    """IT-16 (PR #39 review): reconnect is the authoritative end of the
+    "robot offline" fact — an idle reconnect must clear the 失聯 overlay
+    instead of leaving it until the next run's reset step. Real drops stay."""
+    from common_types import Task, TaskStatus
+    from services.task_runtime import tasks_db
+
+    fake_conn = MagicMock()
+    fake_conn.ping.return_value = {"ok": True, "serial": "BKP"}
+    fake_conn.serial = "BKP"
+    monkeypatch.setattr(
+        "services.fleet_api.KachakaConnection",
+        MagicMock(get=MagicMock(return_value=fake_conn)),
+    )
+    monkeypatch.setattr(
+        "services.fleet_api.RobotController", MagicMock(return_value=MagicMock())
+    )
+    monkeypatch.setattr("services.fleet_api.KachakaCommands", MagicMock())
+    monkeypatch.setattr("services.fleet_api.KachakaQueries", MagicMock())
+
+    tasks_db.clear()
+    tasks_db["off"] = Task(task_id="off", robot_id="kachaka", steps=[],
+                           status=TaskStatus.SHELF_DROPPED,
+                           metadata={"shelf_drop": True, "disconnect": True})
+    tasks_db["real"] = Task(task_id="real", robot_id="kachaka", steps=[],
+                            status=TaskStatus.SHELF_DROPPED,
+                            metadata={"shelf_drop": True, "disconnect": False})
+    try:
+        fleet = FleetAPI()
+        await fleet.register_robot("kachaka", "1.2.3.4")
+        cb = fake_conn.start_monitoring.call_args.kwargs["on_state_change"]
+
+        from kachaka_core.connection import ConnectionState
+        cb(ConnectionState.CONNECTED)
+        await asyncio.sleep(0)  # let call_soon_threadsafe callbacks run
+
+        assert tasks_db["off"].status == TaskStatus.DONE
+        assert tasks_db["real"].status == TaskStatus.SHELF_DROPPED
+    finally:
+        tasks_db.clear()
+
+
+@pytest.mark.asyncio
 async def test_unregister_shuts_down_debouncer(monkeypatch):
     fake_conn = MagicMock()
     fake_conn.ping.return_value = {"ok": True, "serial": "BKP"}

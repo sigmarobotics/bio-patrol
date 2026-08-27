@@ -23,13 +23,19 @@ BEDS_CFG = {"beds": {"B_101-1": {"location_id": "L_101-1"}}}
 
 
 class _FakeFleet:
-    def __init__(self, battery):
+    def __init__(self, battery, conn_state=None):
         self._battery = battery
+        self._conn_state = conn_state or {"state": "connected"}
 
     async def get_battery_info(self, robot_id):
         if isinstance(self._battery, Exception):
             raise self._battery
         return self._battery
+
+    def get_connection_state_dict(self, robot_id, *, debounce_seconds):
+        if isinstance(self._conn_state, Exception):
+            raise self._conn_state
+        return self._conn_state
 
 
 @pytest.fixture
@@ -170,6 +176,61 @@ def test_battery_query_failure_fails_open(patched):
 def test_missing_percentage_field_fails_open(patched):
     set_battery, submitted = patched
     set_battery({"ok": False})
+
+    assert _start()["status"] == "ok"
+    assert len(submitted) == 1
+
+
+# ── offline gate (IT-16) ─────────────────────────────────────────────────────
+
+def _set_conn_state(monkeypatch, conn_state):
+    fleet = _FakeFleet({"ok": True, "percentage": 88.0, "power_status": "IDLE"},
+                       conn_state=conn_state)
+    monkeypatch.setattr(dependencies, "get_fleet", lambda: fleet)
+
+
+def test_confirmed_offline_robot_is_refused(patched, monkeypatch):
+    """A run against an offline robot cannot move a step — all it produces is
+    one more shelf_dropped(disconnect) alert minutes later."""
+    _, submitted = patched
+    _set_conn_state(monkeypatch,
+                    {"state": "disconnected", "offline_pending": False})
+
+    with pytest.raises(HTTPException) as exc:
+        _start()
+
+    assert exc.value.status_code == 503
+    assert "機器人失聯" in exc.value.detail
+    assert submitted == []
+
+
+def test_unregistered_robot_is_refused(patched, monkeypatch):
+    """Never registered = offline since app boot — same refusal."""
+    _, submitted = patched
+    _set_conn_state(monkeypatch,
+                    {"state": "unregistered", "offline_pending": False})
+
+    with pytest.raises(HTTPException) as exc:
+        _start()
+
+    assert exc.value.status_code == 503
+    assert submitted == []
+
+
+def test_blip_inside_debounce_grace_still_starts(patched, monkeypatch):
+    """A seconds-long WiFi blip at exactly the schedule slot must not cancel a
+    whole night's run — inside the grace window the robot counts as online."""
+    _, submitted = patched
+    _set_conn_state(monkeypatch,
+                    {"state": "disconnected", "offline_pending": True})
+
+    assert _start()["status"] == "ok"
+    assert len(submitted) == 1
+
+
+def test_connection_state_query_failure_fails_open(patched, monkeypatch):
+    _, submitted = patched
+    _set_conn_state(monkeypatch, RuntimeError("fleet not ready"))
 
     assert _start()["status"] == "ok"
     assert len(submitted) == 1

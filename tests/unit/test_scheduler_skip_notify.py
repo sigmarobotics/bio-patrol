@@ -123,6 +123,18 @@ def test_missing_schedule_entry_still_carries_a_time(events, monkeypatch):
     assert "原因：Something new" in events[0].body
 
 
+def test_offline_refusal_is_notified(events, monkeypatch):
+    """IT-16: start_patrol refuses a confirmed-offline robot with a 503; the
+    scheduler must relay that refusal instead of minting one shelf_dropped
+    alert per fired schedule."""
+    _stub_start(monkeypatch, exc=HTTPException(
+        status_code=503, detail="機器人失聯，無法啟動巡房，請確認機器人電源與網路"))
+
+    _run()
+
+    assert "原因：機器人失聯" in _only(events).body
+
+
 def test_dispatcher_failure_does_not_break_the_patrol_path(events, monkeypatch):
     """The notice is best-effort — a broken dispatcher must not turn a refusal
     into an unhandled error inside the scheduler job."""

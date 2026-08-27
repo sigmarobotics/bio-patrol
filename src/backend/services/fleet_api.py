@@ -156,6 +156,18 @@ class FleetAPI:
                     else slot.debouncer.note_connected
                 )
                 slot.loop.call_soon_threadsafe(fn)
+            if state == ConnectionState.CONNECTED:
+                # Reconnect is the authoritative end of the "robot offline"
+                # fact — sweep the disconnect-type alerts here, or an idle
+                # reconnect leaves 機器人失聯 on the dashboard until the next
+                # run's opening reset step (hours, for a robot that came back
+                # overnight). Scheduled on the loop: tasks_db is loop-owned.
+                def _sweep_offline_alerts() -> None:
+                    from services.task_runtime import clear_shelf_dropped_tasks
+                    clear_shelf_dropped_tasks(
+                        only_disconnect=True, reason="robot reconnected"
+                    )
+                slot.loop.call_soon_threadsafe(_sweep_offline_alerts)
 
         def _on_shelf_dropped(shelf_id: str) -> None:
             slot.last_dropped_shelf_id = shelf_id

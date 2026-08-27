@@ -75,6 +75,30 @@ task_queues: Dict[str, asyncio.Queue] = {}
 current_tasks: Dict[str, str] = {}  # robot_id -> task_id
 
 
+def clear_shelf_dropped_tasks(*, only_disconnect: bool = False,
+                              reason: str = "") -> int:
+    """Mark SHELF_DROPPED tasks DONE; returns how many were cleared.
+
+    One robot, one shelf: the manual recover-shelf action means a human has
+    just re-established the physical situation, so every standing drop alert
+    is stale — clear them all. With ``only_disconnect=True`` only
+    offline-type alerts (metadata.disconnect) are swept: the same "robot is
+    offline" fact never needs N alerts, while a real CRITICAL drop is only
+    cleared by an explicit recovery action — never by an automatic sweep.
+    """
+    cleared = 0
+    for task in tasks_db.values():
+        if task.status != TaskStatus.SHELF_DROPPED:
+            continue
+        if only_disconnect and (task.metadata or {}).get("disconnect") is not True:
+            continue
+        task.status = TaskStatus.DONE
+        cleared += 1
+    if cleared:
+        logger.info(f"Cleared {cleared} shelf_dropped task(s) ({reason})")
+    return cleared
+
+
 async def submit_task(task: Task):
     """Submit a task for execution. Routes directly to the robot's queue."""
     robot_id = task.robot_id or "kachaka"
@@ -196,10 +220,20 @@ class TaskEngine:
         last_seen_id: Optional[str] = None
         confirmed_docked = False
         fail_streak = 0
+        poll_count = 0
         while not self._state_watcher_stop:
             try:
                 mid = await asyncio.to_thread(slot.conn.client.get_moving_shelf_id)
                 fail_streak = 0
+                # Every 10th poll (~30s) — battery moves far slower than the
+                # shelf state, and this rides the successful-read path so an
+                # unreachable robot never gets a spurious abort.
+                if poll_count % 10 == 0:
+                    try:
+                        await self._maybe_abort_low_battery()
+                    except Exception:
+                        logger.exception("[BATTERY ABORT] check failed")
+                poll_count += 1
                 if self._disconnect_suspected:
                     # The robot answers again, so the suspicion is over. Left
                     # sticky it would downgrade a later real drop to "offline".
@@ -249,6 +283,91 @@ class TaskEngine:
                 await asyncio.sleep(3.0)
             except asyncio.CancelledError:
                 break
+
+    async def _maybe_abort_low_battery(self) -> bool:
+        """Cancel the running patrol when the battery drops below the abort
+        threshold; returns whether the abort fired.
+
+        The 30% start gate cannot catch a long run that starts just above it
+        and drains on the way (2026-08-19 板橋榮家: the battery reached 0.89%
+        mid-patrol and the firmware put the shelf down in the corridor and
+        drove itself to the charger). Cancelling first keeps the shelf-return
+        in our hands: the run loop breaks at the next step boundary and
+        run_task queues the cleanup task that carries the shelf home.
+        """
+        from settings.config import get_runtime_settings
+
+        task_id = current_tasks.get(self.robot_id)
+        task = tasks_db.get(task_id) if task_id else None
+        if task is None or task.status != TaskStatus.IN_PROGRESS:
+            return False
+        # The cleanup task is the rescue itself — cancelling it would strand
+        # the shelf exactly where this check exists to prevent.
+        if (task.metadata or {}).get("mode") == "cleanup":
+            return False
+
+        # Settings first: with the feature disabled the battery gRPC read
+        # would be pure waste — every 30s, on exactly the weak-WiFi sites
+        # this code targets.
+        threshold = get_runtime_settings().get("patrol_abort_battery_pct", 10)
+        if not threshold or threshold <= 0:
+            return False
+
+        try:
+            battery = await self.fleet.get_battery_info(self.robot_id)
+        except Exception as e:
+            logger.debug(f"[BATTERY ABORT] Battery read failed: {e}")
+            return False
+        if not (battery or {}).get("ok"):
+            return False
+        pct = battery.get("percentage")
+        if not isinstance(pct, (int, float)):
+            return False
+        if pct > threshold:
+            return False
+        if str(battery.get("power_status", "")).upper() in _CHARGING_POWER_STATUSES:
+            # Already on the charger — the firmware took over, nothing to abort.
+            return False
+        # The battery read yielded — the run may have finished (or dropped its
+        # shelf) meanwhile, and flipping a DONE task to CANCELLED would queue a
+        # spurious cleanup and report a completed patrol as 已取消.
+        if task.status != TaskStatus.IN_PROGRESS:
+            return False
+
+        # No once-only flag needed: the CANCELLED status set below makes the
+        # IN_PROGRESS guards above refuse any later call for this run.
+        logger.warning(
+            f"[BATTERY ABORT] Robot {self.robot_id} at {pct}% (threshold "
+            f"{threshold}%) — cancelling task {task.task_id} to return the shelf"
+        )
+        bio_steps = [s for s in task.steps if s.action == StepAction.BIO_SCAN]
+        done_beds = sum(1 for s in bio_steps if s.status == StepStatus.SUCCESS)
+        try:
+            await dispatcher.dispatch(AnomalyEvent(
+                severity=Severity.WARN,
+                source=Source.LOW_BATTERY_ABORT,
+                task_id=task.task_id,
+                title="🔋 電量不足，巡房自動收工",
+                body=(
+                    f"電量 {pct:.0f}%，低於收工門檻 {threshold}%\n"
+                    f"已自動取消巡房，貨架歸位後回充\n"
+                    f"已量測 {done_beds}/{len(bio_steps)} 床"
+                ),
+                raw={"battery_pct": pct, "threshold": threshold},
+            ))
+        except Exception:
+            # Notification is best-effort; the shelf must come home regardless.
+            logger.exception("Failed to dispatch low-battery abort anomaly")
+
+        task.metadata = {**(task.metadata or {}),
+                         "battery_abort": True, "battery_abort_pct": pct}
+        task.status = TaskStatus.CANCELLED
+        try:
+            await self.fleet.cancel_command(self.robot_id)
+        except Exception as ce:
+            # The step still returns on its own timeout, just later.
+            logger.warning(f"[BATTERY ABORT] cancel_command failed: {ce}")
+        return True
 
     # ── Shelf drop helpers ────────────────────────────────────────────
 
@@ -404,6 +523,17 @@ class TaskEngine:
                                    trigger_step: Optional[TaskStep] = None,
                                    error_code: int = 0):
         """Handle shelf drop: collect remaining beds, notify, record DB, send robot home."""
+        if task.status == TaskStatus.CANCELLED:
+            # An operator (or the battery abort) already decided this run's
+            # ending. A release signal in the cancel window is the firmware's
+            # own low-battery put-down or noise from cancel_command cutting a
+            # dock short — overwriting CANCELLED here would stop run_task from
+            # queueing the cleanup that carries the shelf home (PR #39 review).
+            logger.info(
+                f"[SHELF DROP] Ignoring release on cancelled task "
+                f"{task.task_id} — cleanup owns the wrap-up"
+            )
+            return
         kind, battery = await self._classify_release()
         low_battery = kind == "low_battery_return"
         disconnected = kind == "disconnected"
@@ -457,6 +587,15 @@ class TaskEngine:
             "battery_pct": battery_pct,
             "disconnect": disconnected,
         }
+        if disconnected:
+            # One "robot is offline" fact needs one alert: an older
+            # disconnect-type alert is the same outage (or a previous one)
+            # already superseded by this task. Real drops are left standing.
+            # Swept BEFORE this task turns SHELF_DROPPED, so the status guard
+            # naturally skips the current task.
+            clear_shelf_dropped_tasks(
+                only_disconnect=True, reason="superseded by newer disconnect"
+            )
         task.status = TaskStatus.SHELF_DROPPED
 
         if disconnected:
@@ -841,6 +980,17 @@ class TaskEngine:
     async def _do_reset_shelf_pose(self, step: TaskStep) -> StepResult:
         shelf_id = step.params["shelf_id"]
         result = await self.fleet.reset_shelf_pose(self.robot_id, shelf_id)
+        # A successful reset proves the robot answers again, so offline-type
+        # alerts from earlier runs are stale — sweeping them here lets the
+        # first run after an offline weekend clear the backlog by itself.
+        # only_disconnect: the reset is a pure pose write with no physical
+        # verification, and this step also opens non-patrol tasks (the
+        # shelf-to-NS button builds it directly), so it must never eat a real
+        # CRITICAL drop — that takes an explicit recover-shelf.
+        if result.get("ok"):
+            clear_shelf_dropped_tasks(
+                only_disconnect=True, reason="reset_shelf_pose step succeeded"
+            )
         return self._make_result(result, step.action, {"shelf_id": shelf_id})
 
     async def _do_move_shelf(self, step: TaskStep) -> StepResult:
