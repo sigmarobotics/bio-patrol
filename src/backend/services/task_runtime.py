@@ -159,6 +159,9 @@ class TaskEngine:
         # True once the robot stopped answering: the run still pauses, but the
         # shelf state is reported as unknown instead of dropped.
         self._disconnect_suspected = False
+        # One abort per run — the watcher keeps polling while the cancel works
+        # its way to a step boundary, and a second one would re-notify.
+        self._battery_abort_fired = False
         self._action_handlers: Dict[str, Any] = {
             StepAction.SPEAK.value: self._do_speak,
             StepAction.MOVE_TO_POSE.value: self._do_move_to_pose,
@@ -220,10 +223,20 @@ class TaskEngine:
         last_seen_id: Optional[str] = None
         confirmed_docked = False
         fail_streak = 0
+        poll_count = 0
         while not self._state_watcher_stop:
             try:
                 mid = await asyncio.to_thread(slot.conn.client.get_moving_shelf_id)
                 fail_streak = 0
+                # Every 10th poll (~30s) — battery moves far slower than the
+                # shelf state, and this rides the successful-read path so an
+                # unreachable robot never gets a spurious abort.
+                if poll_count % 10 == 0:
+                    try:
+                        await self._maybe_abort_low_battery()
+                    except Exception:
+                        logger.exception("[BATTERY ABORT] check failed")
+                poll_count += 1
                 if self._disconnect_suspected:
                     # The robot answers again, so the suspicion is over. Left
                     # sticky it would downgrade a later real drop to "offline".
@@ -273,6 +286,92 @@ class TaskEngine:
                 await asyncio.sleep(3.0)
             except asyncio.CancelledError:
                 break
+
+    async def _maybe_abort_low_battery(self) -> bool:
+        """Cancel the running patrol when the battery drops below the abort
+        threshold; returns whether the abort fired.
+
+        The 30% start gate cannot catch a long run that starts just above it
+        and drains on the way (2026-08-19 板橋榮家: the battery reached 0.89%
+        mid-patrol and the firmware put the shelf down in the corridor and
+        drove itself to the charger). Cancelling first keeps the shelf-return
+        in our hands: the run loop breaks at the next step boundary and
+        run_task queues the cleanup task that carries the shelf home.
+        """
+        from settings.config import get_runtime_settings
+
+        task_id = current_tasks.get(self.robot_id)
+        task = tasks_db.get(task_id) if task_id else None
+        if task is None or task.status != TaskStatus.IN_PROGRESS:
+            return False
+        # The cleanup task is the rescue itself — cancelling it would strand
+        # the shelf exactly where this check exists to prevent.
+        if (task.metadata or {}).get("mode") == "cleanup":
+            return False
+        if self._battery_abort_fired:
+            return False
+
+        # Settings first: with the feature disabled the battery gRPC read
+        # would be pure waste — every 30s, on exactly the weak-WiFi sites
+        # this code targets.
+        threshold = get_runtime_settings().get("patrol_abort_battery_pct", 10)
+        if not threshold or threshold <= 0:
+            return False
+
+        try:
+            battery = await self.fleet.get_battery_info(self.robot_id)
+        except Exception as e:
+            logger.debug(f"[BATTERY ABORT] Battery read failed: {e}")
+            return False
+        if not (battery or {}).get("ok"):
+            return False
+        pct = battery.get("percentage")
+        if not isinstance(pct, (int, float)):
+            return False
+        if pct > threshold:
+            return False
+        if str(battery.get("power_status", "")).upper() in _CHARGING_POWER_STATUSES:
+            # Already on the charger — the firmware took over, nothing to abort.
+            return False
+        # The battery read yielded — the run may have finished (or dropped its
+        # shelf) meanwhile, and flipping a DONE task to CANCELLED would queue a
+        # spurious cleanup and report a completed patrol as 已取消.
+        if task.status != TaskStatus.IN_PROGRESS:
+            return False
+
+        self._battery_abort_fired = True
+        logger.warning(
+            f"[BATTERY ABORT] Robot {self.robot_id} at {pct}% (threshold "
+            f"{threshold}%) — cancelling task {task.task_id} to return the shelf"
+        )
+        bio_steps = [s for s in task.steps if s.action == StepAction.BIO_SCAN]
+        done_beds = sum(1 for s in bio_steps if s.status == StepStatus.SUCCESS)
+        try:
+            await dispatcher.dispatch(AnomalyEvent(
+                severity=Severity.WARN,
+                source=Source.LOW_BATTERY_ABORT,
+                task_id=task.task_id,
+                title="🔋 電量不足，巡房自動收工",
+                body=(
+                    f"電量 {pct:.0f}%，低於收工門檻 {threshold}%\n"
+                    f"已自動取消巡房，貨架歸位後回充\n"
+                    f"已量測 {done_beds}/{len(bio_steps)} 床"
+                ),
+                raw={"battery_pct": pct, "threshold": threshold},
+            ))
+        except Exception:
+            # Notification is best-effort; the shelf must come home regardless.
+            logger.exception("Failed to dispatch low-battery abort anomaly")
+
+        task.metadata = {**(task.metadata or {}),
+                         "battery_abort": True, "battery_abort_pct": pct}
+        task.status = TaskStatus.CANCELLED
+        try:
+            await self.fleet.cancel_command(self.robot_id)
+        except Exception as ce:
+            # The step still returns on its own timeout, just later.
+            logger.warning(f"[BATTERY ABORT] cancel_command failed: {ce}")
+        return True
 
     # ── Shelf drop helpers ────────────────────────────────────────────
 
@@ -596,6 +695,7 @@ class TaskEngine:
         self.shelf_drop_event.clear()
         self._shelf_release_expected = False
         self._disconnect_suspected = False
+        self._battery_abort_fired = False
         self._state_watcher_stop = False
         self._state_watcher_task = asyncio.create_task(self._watch_shelf_state())
 
