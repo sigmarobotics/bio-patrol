@@ -33,11 +33,14 @@ def _clean_tasks_db():
     tasks_db.clear()
 
 
-def _dropped(task_id: str, *, disconnect: bool | None = False) -> Task:
+def _dropped(task_id: str, *, disconnect: bool | None = False,
+             shelf_id: str | None = None) -> Task:
     # disconnect=None models a pre-IT-16 task whose metadata never got the key.
     metadata = {"shelf_drop": True}
     if disconnect is not None:
         metadata["disconnect"] = disconnect
+    if shelf_id is not None:
+        metadata["shelf_id"] = shelf_id
     return Task(task_id=task_id, robot_id="kachaka", steps=[],
                 status=TaskStatus.SHELF_DROPPED, metadata=metadata)
 
@@ -160,10 +163,7 @@ def test_failed_reset_step_clears_nothing():
 
 # ── a newer disconnect supersedes older disconnect alerts ────────────────────
 
-def test_new_disconnect_supersedes_old_disconnect_only(monkeypatch):
-    tasks_db["old-off"] = _dropped("old-off", disconnect=True)
-    tasks_db["old-real"] = _dropped("old-real", disconnect=False)
-
+def _drop_engine(monkeypatch) -> task_runtime.TaskEngine:
     fleet = MagicMock()
     fleet.get_battery_info = AsyncMock(return_value=UNREACHABLE_READ)
     fleet.get_command_state = AsyncMock(return_value=UNREACHABLE_READ)
@@ -180,12 +180,23 @@ def test_new_disconnect_supersedes_old_disconnect_only(monkeypatch):
                         AsyncMock(return_value=None))
     monkeypatch.setattr(task_runtime.TaskEngine, "_record_skipped_scan",
                         lambda self, *a, **kw: None)
+    return eng
 
-    task = Task(
-        task_id="t-new", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
+
+def _scan_task(task_id: str = "t-new", *, extra_steps=()) -> Task:
+    return Task(
+        task_id=task_id, robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
         steps=[TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
-                        params={"bed_key": "B_101-1"})],
+                        params={"bed_key": "B_101-1"}), *extra_steps],
     )
+
+
+def test_new_disconnect_supersedes_old_disconnect_only(monkeypatch):
+    tasks_db["old-off"] = _dropped("old-off", disconnect=True)
+    tasks_db["old-real"] = _dropped("old-real", disconnect=False)
+    eng = _drop_engine(monkeypatch)
+
+    task = _scan_task()
     tasks_db[task.task_id] = task
     asyncio.run(eng._handle_shelf_drop(task, 0))
 
@@ -195,31 +206,39 @@ def test_new_disconnect_supersedes_old_disconnect_only(monkeypatch):
     assert tasks_db["old-real"].status == TaskStatus.SHELF_DROPPED
 
 
-# ── a later run's successful return_shelf resolves an earlier drop ───────────
+# ── a later patrol run's successful return_shelf resolves an earlier drop ──
 # 2026-09-07 新營: the noon run dropped S01 at 719, staff pushed it home by
-# hand, the 23:00 run picked it up and returned it — and the CRITICAL alert
-# stayed on the dashboard until someone pressed recover-shelf the next
-# morning. A completed return_shelf is physical proof the drop is resolved.
+# hand, the 23:00 run picked it up, re-scanned the ward and returned it — and
+# the CRITICAL alert stayed on the dashboard until someone pressed
+# recover-shelf the next morning.
 
-def _dropped_shelf(task_id: str, shelf_id) -> Task:
-    metadata = {"shelf_drop": True, "disconnect": False}
-    if shelf_id is not None:
-        metadata["shelf_id"] = shelf_id
-    return Task(task_id=task_id, robot_id="kachaka", steps=[],
-                status=TaskStatus.SHELF_DROPPED, metadata=metadata)
+def test_clear_by_shelf_id_matches_exact_shelf_only():
+    tasks_db["same"] = _dropped("same", shelf_id="S01")
+    tasks_db["other"] = _dropped("other", shelf_id="S02")
+    tasks_db["unknown"] = _dropped("unknown", shelf_id="unknown")
+    tasks_db["none"] = _dropped("none")
 
-
-def test_clear_by_shelf_id_skips_other_shelves():
-    tasks_db["same"] = _dropped_shelf("same", "S01")
-    tasks_db["other"] = _dropped_shelf("other", "S02")
-    tasks_db["unknown"] = _dropped_shelf("unknown", "unknown")
-    tasks_db["none"] = _dropped_shelf("none", None)
-
-    assert clear_shelf_dropped_tasks(shelf_id="S01", reason="test") == 3
+    assert clear_shelf_dropped_tasks(shelf_id="S01", reason="test") == 1
     assert tasks_db["same"].status == TaskStatus.DONE
-    assert tasks_db["unknown"].status == TaskStatus.DONE
-    assert tasks_db["none"].status == TaskStatus.DONE
-    assert tasks_db["other"].status == TaskStatus.SHELF_DROPPED
+    for tid in ("other", "unknown", "none"):
+        assert tasks_db[tid].status == TaskStatus.SHELF_DROPPED
+
+
+def test_drop_during_bio_scan_records_shelf_from_the_run_steps(monkeypatch):
+    """A bio_scan trigger step carries no shelf, and the engine-level
+    _current_shelf_id outlives the task that set it — the run's own
+    move/return steps are the reliable source, so the alert can later be
+    matched by the shelf-scoped sweep instead of recording 'unknown'."""
+    eng = _drop_engine(monkeypatch)
+    eng._current_shelf_id = "S_stale"
+    task = _scan_task(extra_steps=[TaskStep(
+        step_id="return_1", action=StepAction.RETURN_SHELF.value,
+        params={"shelf_id": "S01"})])
+    tasks_db[task.task_id] = task
+
+    asyncio.run(eng._handle_shelf_drop(task, 0))
+
+    assert task.metadata["shelf_id"] == "S01"
 
 
 def _return_engine(return_result) -> task_runtime.TaskEngine:
@@ -229,18 +248,19 @@ def _return_engine(return_result) -> task_runtime.TaskEngine:
     return engine
 
 
-def _return_task() -> Task:
+def _return_task(mode: str | None = "patrol") -> Task:
     return Task(
         task_id="t-run", robot_id="kachaka", status=TaskStatus.QUEUED,
+        metadata={"mode": mode} if mode else None,
         steps=[TaskStep(step_id="return_1",
                         action=StepAction.RETURN_SHELF.value,
                         params={"shelf_id": "S01"}, status=StepStatus.PENDING)],
     )
 
 
-def test_successful_return_shelf_clears_real_drop_of_same_shelf():
-    tasks_db["stale-real"] = _dropped_shelf("stale-real", "S01")
-    tasks_db["stale-other"] = _dropped_shelf("stale-other", "S02")
+def test_patrol_return_shelf_clears_real_drop_of_same_shelf():
+    tasks_db["stale-real"] = _dropped("stale-real", shelf_id="S01")
+    tasks_db["stale-other"] = _dropped("stale-other", shelf_id="S02")
     engine = _return_engine({"ok": True})
     task = _return_task()
     tasks_db[task.task_id] = task
@@ -252,8 +272,22 @@ def test_successful_return_shelf_clears_real_drop_of_same_shelf():
     assert tasks_db["stale-other"].status == TaskStatus.SHELF_DROPPED
 
 
+@pytest.mark.parametrize("mode", ["demo", "cleanup", None])
+def test_non_patrol_return_shelf_leaves_the_alert_standing(mode):
+    """Demo and cleanup runs return the shelf but scan nothing — the dropped
+    run's remaining beds (and its 續巡 handle) are still owed."""
+    tasks_db["stale-real"] = _dropped("stale-real", shelf_id="S01")
+    engine = _return_engine({"ok": True})
+    task = _return_task(mode)
+    tasks_db[task.task_id] = task
+
+    _run_reset(engine, task)
+
+    assert tasks_db["stale-real"].status == TaskStatus.SHELF_DROPPED
+
+
 def test_failed_return_shelf_clears_nothing():
-    tasks_db["stale-real"] = _dropped_shelf("stale-real", "S01")
+    tasks_db["stale-real"] = _dropped("stale-real", shelf_id="S01")
     engine = _return_engine({"ok": False, "error": "TIMEOUT"})
     engine._shelf_dropped_en_route = AsyncMock(return_value=False)
     task = _return_task()
