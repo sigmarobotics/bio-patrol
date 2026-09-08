@@ -76,6 +76,7 @@ current_tasks: Dict[str, str] = {}  # robot_id -> task_id
 
 
 def clear_shelf_dropped_tasks(*, only_disconnect: bool = False,
+                              shelf_id: Optional[str] = None,
                               reason: str = "") -> int:
     """Mark SHELF_DROPPED tasks DONE; returns how many were cleared.
 
@@ -84,13 +85,19 @@ def clear_shelf_dropped_tasks(*, only_disconnect: bool = False,
     is stale — clear them all. With ``only_disconnect=True`` only
     offline-type alerts (metadata.disconnect) are swept: the same "robot is
     offline" fact never needs N alerts, while a real CRITICAL drop is only
-    cleared by an explicit recovery action — never by an automatic sweep.
+    cleared by a recovery that physically verifies the shelf — the manual
+    recover-shelf action, or a later patrol run's successful return_shelf
+    (pass ``shelf_id``: only alerts recorded against that exact shelf are
+    swept).
     """
     cleared = 0
     for task in tasks_db.values():
         if task.status != TaskStatus.SHELF_DROPPED:
             continue
-        if only_disconnect and (task.metadata or {}).get("disconnect") is not True:
+        meta = task.metadata or {}
+        if only_disconnect and meta.get("disconnect") is not True:
+            continue
+        if shelf_id is not None and meta.get("shelf_id") != shelf_id:
             continue
         task.status = TaskStatus.DONE
         cleared += 1
@@ -563,7 +570,13 @@ class TaskEngine:
         location_id = trigger_step.params.get("location_id", "unknown") if trigger_step else "unknown"
         shelf_id = trigger_step.params.get("shelf_id", "unknown") if trigger_step else "unknown"
         if shelf_id == "unknown":
-            shelf_id = getattr(self, "_current_shelf_id", "unknown")
+            # A bio_scan trigger step carries no shelf, but the run's own
+            # move/return steps always do — prefer them over the engine-level
+            # _current_shelf_id, which outlives the task that set it.
+            shelf_id = next(
+                (st.params["shelf_id"] for st in task.steps if st.params.get("shelf_id")),
+                getattr(self, "_current_shelf_id", "unknown"),
+            )
 
         shelf_pose = await self._query_shelf_pose(shelf_id)
         # No shelf pose means the map has nothing to point the operator at —
@@ -1017,6 +1030,17 @@ class TaskEngine:
         # verified at/on home — means any pending drop signal is stale.
         if result.get("ok"):
             dropped = False
+            # A patrol run that carried this shelf around the ward and set it
+            # back down at home has both re-verified the shelf and re-scanned
+            # the beds an earlier drop left behind, so that alert (and its
+            # 續巡 handle) is superseded. Demo and cleanup runs return the
+            # shelf too, but scan nothing — they leave the alert standing.
+            task = tasks_db.get(getattr(self, "current_task_id", None))
+            if task is not None and (task.metadata or {}).get("mode") == "patrol":
+                clear_shelf_dropped_tasks(
+                    shelf_id=shelf_id,
+                    reason=f"shelf {shelf_id} returned home by patrol {task.task_id}",
+                )
         else:
             dropped = await self._shelf_dropped_en_route(shelf_id)
         if dropped:
