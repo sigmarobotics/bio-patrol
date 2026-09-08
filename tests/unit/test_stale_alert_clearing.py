@@ -193,3 +193,72 @@ def test_new_disconnect_supersedes_old_disconnect_only(monkeypatch):
     assert task.status == TaskStatus.SHELF_DROPPED     # current alert stands
     assert tasks_db["old-off"].status == TaskStatus.DONE
     assert tasks_db["old-real"].status == TaskStatus.SHELF_DROPPED
+
+
+# ── a later run's successful return_shelf resolves an earlier drop ───────────
+# 2026-09-07 新營: the noon run dropped S01 at 719, staff pushed it home by
+# hand, the 23:00 run picked it up and returned it — and the CRITICAL alert
+# stayed on the dashboard until someone pressed recover-shelf the next
+# morning. A completed return_shelf is physical proof the drop is resolved.
+
+def _dropped_shelf(task_id: str, shelf_id) -> Task:
+    metadata = {"shelf_drop": True, "disconnect": False}
+    if shelf_id is not None:
+        metadata["shelf_id"] = shelf_id
+    return Task(task_id=task_id, robot_id="kachaka", steps=[],
+                status=TaskStatus.SHELF_DROPPED, metadata=metadata)
+
+
+def test_clear_by_shelf_id_skips_other_shelves():
+    tasks_db["same"] = _dropped_shelf("same", "S01")
+    tasks_db["other"] = _dropped_shelf("other", "S02")
+    tasks_db["unknown"] = _dropped_shelf("unknown", "unknown")
+    tasks_db["none"] = _dropped_shelf("none", None)
+
+    assert clear_shelf_dropped_tasks(shelf_id="S01", reason="test") == 3
+    assert tasks_db["same"].status == TaskStatus.DONE
+    assert tasks_db["unknown"].status == TaskStatus.DONE
+    assert tasks_db["none"].status == TaskStatus.DONE
+    assert tasks_db["other"].status == TaskStatus.SHELF_DROPPED
+
+
+def _return_engine(return_result) -> task_runtime.TaskEngine:
+    engine = _reset_engine({"ok": True})
+    engine.fleet.return_shelf = AsyncMock(return_value=return_result)
+    engine.fleet.get_slot_or_none = MagicMock(return_value=None)
+    return engine
+
+
+def _return_task() -> Task:
+    return Task(
+        task_id="t-run", robot_id="kachaka", status=TaskStatus.QUEUED,
+        steps=[TaskStep(step_id="return_1",
+                        action=StepAction.RETURN_SHELF.value,
+                        params={"shelf_id": "S01"}, status=StepStatus.PENDING)],
+    )
+
+
+def test_successful_return_shelf_clears_real_drop_of_same_shelf():
+    tasks_db["stale-real"] = _dropped_shelf("stale-real", "S01")
+    tasks_db["stale-other"] = _dropped_shelf("stale-other", "S02")
+    engine = _return_engine({"ok": True})
+    task = _return_task()
+    tasks_db[task.task_id] = task
+
+    result = _run_reset(engine, task)
+
+    assert result.status == TaskStatus.DONE
+    assert tasks_db["stale-real"].status == TaskStatus.DONE
+    assert tasks_db["stale-other"].status == TaskStatus.SHELF_DROPPED
+
+
+def test_failed_return_shelf_clears_nothing():
+    tasks_db["stale-real"] = _dropped_shelf("stale-real", "S01")
+    engine = _return_engine({"ok": False, "error": "TIMEOUT"})
+    engine._shelf_dropped_en_route = AsyncMock(return_value=False)
+    task = _return_task()
+    tasks_db[task.task_id] = task
+
+    _run_reset(engine, task)
+
+    assert tasks_db["stale-real"].status == TaskStatus.SHELF_DROPPED

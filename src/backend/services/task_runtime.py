@@ -76,6 +76,7 @@ current_tasks: Dict[str, str] = {}  # robot_id -> task_id
 
 
 def clear_shelf_dropped_tasks(*, only_disconnect: bool = False,
+                              shelf_id: Optional[str] = None,
                               reason: str = "") -> int:
     """Mark SHELF_DROPPED tasks DONE; returns how many were cleared.
 
@@ -84,13 +85,19 @@ def clear_shelf_dropped_tasks(*, only_disconnect: bool = False,
     is stale — clear them all. With ``only_disconnect=True`` only
     offline-type alerts (metadata.disconnect) are swept: the same "robot is
     offline" fact never needs N alerts, while a real CRITICAL drop is only
-    cleared by an explicit recovery action — never by an automatic sweep.
+    cleared by a recovery that physically verifies the shelf — the manual
+    recover-shelf action, or a later run's successful return_shelf (pass
+    ``shelf_id``: only alerts about that shelf, or with no shelf recorded,
+    are swept).
     """
     cleared = 0
     for task in tasks_db.values():
         if task.status != TaskStatus.SHELF_DROPPED:
             continue
-        if only_disconnect and (task.metadata or {}).get("disconnect") is not True:
+        meta = task.metadata or {}
+        if only_disconnect and meta.get("disconnect") is not True:
+            continue
+        if shelf_id is not None and meta.get("shelf_id") not in (None, "unknown", shelf_id):
             continue
         task.status = TaskStatus.DONE
         cleared += 1
@@ -1017,6 +1024,15 @@ class TaskEngine:
         # verified at/on home — means any pending drop signal is stale.
         if result.get("ok"):
             dropped = False
+            # The robot just docked this shelf and set it down at home — the
+            # strongest evidence there is that an earlier drop of the same
+            # shelf was resolved (2026-09-07 新營: staff pushed S01 home by
+            # hand, the 23:00 run completed, and the noon CRITICAL alert
+            # stayed on the dashboard until someone pressed recover-shelf).
+            clear_shelf_dropped_tasks(
+                shelf_id=shelf_id,
+                reason=f"shelf {shelf_id} returned home by a later run",
+            )
         else:
             dropped = await self._shelf_dropped_en_route(shelf_id)
         if dropped:
