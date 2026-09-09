@@ -1263,6 +1263,7 @@ const SETTINGS_MAP = [
   { id: 'setting-bio-scan-retry-count', key: 'bio_scan_retry_count', type: 'number' },
   { id: 'setting-bio-scan-initial-wait', key: 'bio_scan_initial_wait', type: 'number' },
   { id: 'setting-bio-scan-valid-status', key: 'bio_scan_valid_status', type: 'number' },
+  { id: 'setting-arrival-voice-enabled', key: 'arrival_voice_enabled', type: 'checkbox' },
   { id: 'setting-robot-max-retries', key: 'robot_max_retries', type: 'number' },
   { id: 'setting-robot-retry-base-delay', key: 'robot_retry_base_delay', type: 'number' },
   { id: 'setting-robot-retry-max-delay', key: 'robot_retry_max_delay', type: 'number' },

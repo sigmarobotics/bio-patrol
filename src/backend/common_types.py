@@ -39,6 +39,7 @@ class StepAction(str, Enum):
     RETURN_HOME = "return_home"
     BIO_SCAN = "bio_scan"
     WAIT = "wait"
+    PLAY_SOUND = "play_sound"
 
 
 # Actions that should not fail the whole task when they error out.
@@ -48,6 +49,7 @@ NON_CRITICAL_ACTIONS = frozenset({
     StepAction.SPEAK.value,
     StepAction.RETURN_SHELF.value,
     StepAction.RESET_SHELF_POSE.value,
+    StepAction.PLAY_SOUND.value,
 })
 
 # Enhanced Result Models

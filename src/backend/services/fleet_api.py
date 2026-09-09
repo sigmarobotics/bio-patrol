@@ -35,6 +35,7 @@ from kachaka_core.connection import ConnectionState
 import lifespan_state
 from services.notifications import dispatcher
 from services.notifications.offline_debouncer import OfflineDebouncer
+from services.sounds import sound_key, sound_path
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,8 @@ class _RobotSlot:
     last_dropped_shelf_id: Optional[str] = None
     disconnected_at: Optional[float] = None
     last_reconnect_at: Optional[float] = None
+    # content-hash key -> on-robot sound id, so a clip uploads at most once
+    sound_ids: Dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +484,35 @@ class FleetAPI:
         """Text-to-speech on robot speaker."""
         slot = self._get_slot(robot_id)
         return await asyncio.to_thread(slot.cmds.speak, text, **kwargs)
+
+    async def play_sound_by_name(self, robot_id: str, name: str) -> dict:
+        """Play a bundled WAV clip, uploading it to the robot on first use.
+
+        Fire-and-forget: the robot starts playback and returns immediately.
+        """
+        slot = self._get_slot(robot_id)
+
+        def _run() -> dict:
+            data = sound_path(name).read_bytes()
+            key = sound_key(name, data)
+            sid = slot.sound_ids.get(key)
+            if sid is None:
+                res = slot.queries.list_sounds()
+                for sound in res.get("sounds", []):
+                    if sound.get("name") == key:
+                        sid = sound.get("id")
+                        break
+            if sid is None:
+                added = slot.cmds.add_sound(key, data=data)
+                if not added.get("ok"):
+                    return added
+                # add_sound's id is authoritative; list_sounds is eventually
+                # consistent and can still miss the clip right after upload.
+                sid = added["sound_id"]
+            slot.sound_ids[key] = sid
+            return slot.cmds.play_sound(sid)
+
+        return await asyncio.to_thread(_run)
 
     async def dock_shelf(self, robot_id: str, **kwargs: Any) -> dict:
         """Dock the currently held shelf (blocks until completion)."""
