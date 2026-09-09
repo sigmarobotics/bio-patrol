@@ -343,6 +343,10 @@
                 <label>Valid Status Code</label>
                 <input type="number" id="setting-bio-scan-valid-status" placeholder="4">
               </div>
+              <div class="form-group" style="display:flex;align-items:center;gap:12px;">
+                <input type="checkbox" id="setting-arrival-voice-enabled" style="width:auto;">
+                <label for="setting-arrival-voice-enabled" style="margin:0;cursor:pointer;">到床語音播放（日照）</label>
+              </div>
               <button class="btn-secondary" id="btn-test-bioscan" onclick="testBioScan()">Test Bio-Scan</button>
               <p class="test-note">Uses saved settings. Save before testing.</p>
               <div class="log-display" id="bioscan-test-log"></div>

@@ -6,15 +6,17 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi==0.115.6",
     "grpcio==1.66.1",
-    "kachaka-api>=3.16,<4",
+    "kachaka-api>=3.17,<4",
     "protobuf==5.27.2",
     "paho-mqtt==2.1.0",
     "httpx>=0.27.0",
     "uvicorn==0.34.0",
     "apscheduler>=3.10.4",
-    # >=0.7: poll_until_complete verifies command_id; mcp moved to optional
-    # extra so the toolkit no longer forces the mcp->starlette stack
-    "kachaka-sdk-toolkit>=0.6.1,<0.8",
+    # >=0.8: Sound API (add_sound/play_sound/list_sounds) for the arrival
+    # voice; it needs kachaka-api >=3.17 (and robot firmware >=3.17 too).
+    # >=0.7 already gave poll_until_complete command_id verification and
+    # moved mcp to an optional extra, off the mcp->starlette stack.
+    "kachaka-sdk-toolkit>=0.11,<0.12",
     # Explicit guard: toolkit <0.7 pulls mcp (unbounded) -> starlette; a
     # future `uv lock --upgrade` must fail loudly instead of drifting past
     # fastapi 0.115.6's starlette<0.42 requirement

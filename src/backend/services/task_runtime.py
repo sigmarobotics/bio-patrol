@@ -178,6 +178,7 @@ class TaskEngine:
             StepAction.RETURN_HOME.value: self._do_return_home,
             StepAction.BIO_SCAN.value: self._do_bio_scan,
             StepAction.WAIT.value: self._do_wait,
+            StepAction.PLAY_SOUND.value: self._do_play_sound,
         }
 
     async def _refresh_name_cache(self):
@@ -971,6 +972,20 @@ class TaskEngine:
         text = step.params["speak_text"]
         result = await self.fleet.speak(self.robot_id, text)
         return self._make_result(result, step.action, {"speak_text": text})
+
+    async def _do_play_sound(self, step: TaskStep) -> StepResult:
+        """Play a bundled clip. Advisory: an old firmware without the Sound
+        API raises UNIMPLEMENTED, and the bed's scan must still run."""
+        name = step.params["sound_name"]
+        try:
+            result = await self.fleet.play_sound_by_name(self.robot_id, name)
+        except Exception as e:
+            logger.warning(f"play_sound '{name}' failed on robot {self.robot_id}: {e}")
+            return StepResult(
+                success=False, error_code=-1, error_message=str(e),
+                data={"sound_name": name}, timestamp=get_now().isoformat(),
+            )
+        return self._make_result(result, step.action, {"sound_name": name})
 
     async def _do_move_to_pose(self, step: TaskStep) -> StepResult:
         x, y, yaw = float(step.params["x"]), float(step.params["y"]), float(step.params["yaw"])

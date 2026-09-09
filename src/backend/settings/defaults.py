@@ -17,6 +17,7 @@ DEFAULT_SETTINGS = {
     "bio_scan_retry_count": 19,
     "bio_scan_initial_wait": 120,
     "bio_scan_valid_status": 4,
+    "arrival_voice_enabled": False,
     "robot_max_retries": 3,
     "robot_retry_base_delay": 2.0,
     "robot_retry_max_delay": 10.0,

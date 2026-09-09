@@ -18,12 +18,14 @@ from common_types import (
     StepAction, StepStatus, Task, TaskStatus, TaskStep, generate_task_id,
 )
 from services.fleet_api import RobotNotRegistered
+from services.sounds import sound_path, wav_seconds
 from services.task_runtime import clear_shelf_dropped_tasks, submit_task, tasks_db
 
 logger = logging.getLogger(__name__)
 
 PatrolMode = Literal["demo", "patrol"]
 _PRESET_MISSING = object()
+ARRIVAL_SOUND = "arrival_zh"
 
 router = APIRouter(prefix="/api", tags=["Patrol"])
 
@@ -112,7 +114,8 @@ async def set_demo_preset(name: str):
 # ── Patrol step builder ──────────────────────────────────────────────────────
 
 def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
-                       final_wait_seconds: int = 5) -> List[TaskStep]:
+                       final_wait_seconds: int = 5,
+                       arrival_voice: bool = False) -> List[TaskStep]:
     """Build a reset_shelf_pose + (move_shelf -> action -> ...)+ + return_shelf list.
 
     `beds`: ordered list of {bed_key, location_id} for the run. Empty/invalid
@@ -120,6 +123,10 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
     `mode`: "demo" -> action is wait(5s); "patrol" -> bio_scan.
     `final_wait_seconds`: demo only — dwell at the LAST bed (site demos park the
             robot at the endpoint for the audience before auto-returning).
+    `arrival_voice`: insert a play_sound step on arrival at each bed. play_sound
+            is fire-and-forget, so the bio_scan starts while the clip plays; in
+            demo mode there is no scan, so each dwell is stretched to outlast
+            the clip instead.
 
     The shelf sits at its home whenever a run starts, so the run opens by
     resetting the robot's shelf-pose estimate — a drifted estimate is what
@@ -127,6 +134,11 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
     """
     steps: List[TaskStep] = []
     counter = 0
+    # Demo has no bio_scan to cover the clip, so the dwell has to outlast it.
+    clip_dwell = (
+        wav_seconds(sound_path(ARRIVAL_SOUND)) + 0.5
+        if arrival_voice and mode == "demo" else 0.0
+    )
     for bed in beds:
         bed_key = bed.get("bed_key", "")
         location_id = bed.get("location_id", "")
@@ -135,18 +147,26 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
 
         move_id = f"move_{counter}"
         action_id = f"action_{counter}"
+        voice_id = f"voice_{counter}"
         steps.append(TaskStep(
             step_id=move_id,
             action=StepAction.MOVE_SHELF.value,
             params={"shelf_id": shelf_id, "location_id": location_id},
             status=StepStatus.PENDING,
-            skip_on_failure=[action_id],
+            skip_on_failure=[voice_id, action_id] if arrival_voice else [action_id],
         ))
+        if arrival_voice:
+            steps.append(TaskStep(
+                step_id=voice_id,
+                action=StepAction.PLAY_SOUND.value,
+                params={"sound_name": ARRIVAL_SOUND},
+                status=StepStatus.PENDING,
+            ))
         if mode == "demo":
             steps.append(TaskStep(
                 step_id=action_id,
                 action=StepAction.WAIT.value,
-                params={"seconds": 5},
+                params={"seconds": max(5, clip_dwell) if arrival_voice else 5},
                 status=StepStatus.PENDING,
             ))
         else:
@@ -160,7 +180,10 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
 
     if steps:
         if mode == "demo":
-            steps[-1].params = {"seconds": final_wait_seconds}
+            steps[-1].params = {
+                "seconds": max(final_wait_seconds, clip_dwell) if arrival_voice
+                else final_wait_seconds
+            }
         steps.insert(0, TaskStep(
             step_id="reset_shelf",
             action=StepAction.RESET_SHELF_POSE.value,
@@ -283,6 +306,7 @@ async def start_patrol(req: PatrolStartRequest):
     steps = build_patrol_steps(
         beds, shelf_id, mode=req.mode,
         final_wait_seconds=cfg.get("demo_final_wait_seconds", 5),
+        arrival_voice=cfg.get("arrival_voice_enabled", False),
     )
 
     task = Task(
@@ -374,7 +398,10 @@ async def resume_patrol(req: ResumePatrolRequest):
 
     old_task.status = TaskStatus.DONE
 
-    steps = build_patrol_steps(remaining_beds, shelf_id, mode="patrol")
+    steps = build_patrol_steps(
+        remaining_beds, shelf_id, mode="patrol",
+        arrival_voice=get_runtime_settings().get("arrival_voice_enabled", False),
+    )
     if not steps:
         raise HTTPException(status_code=400, detail="No valid beds to resume")
 

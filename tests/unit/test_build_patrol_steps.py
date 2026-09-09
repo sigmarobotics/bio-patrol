@@ -103,3 +103,48 @@ def test_patrol_mode_ignores_final_wait_seconds():
     steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="patrol",
                                final_wait_seconds=300)
     assert StepAction.WAIT.value not in [s.action for s in steps]
+
+
+# ── IT-19 arrival voice ──────────────────────────────────────────────────────
+
+def test_arrival_voice_inserts_play_sound_between_move_and_action():
+    steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="patrol",
+                               arrival_voice=True)
+    assert [s.action for s in steps] == [
+        StepAction.RESET_SHELF_POSE.value,
+        StepAction.MOVE_SHELF.value, StepAction.PLAY_SOUND.value, StepAction.BIO_SCAN.value,
+        StepAction.MOVE_SHELF.value, StepAction.PLAY_SOUND.value, StepAction.BIO_SCAN.value,
+        StepAction.RETURN_SHELF.value,
+    ]
+    voice_steps = [s for s in steps if s.action == StepAction.PLAY_SOUND.value]
+    assert all(s.params == {"sound_name": "arrival_zh"} for s in voice_steps)
+    # A move that never arrived must skip both the greeting and the scan.
+    move_steps = [s for s in steps if s.action == StepAction.MOVE_SHELF.value]
+    bio_steps = [s for s in steps if s.action == StepAction.BIO_SCAN.value]
+    for move, voice, bio in zip(move_steps, voice_steps, bio_steps):
+        assert move.skip_on_failure == [voice.step_id, bio.step_id]
+
+
+def test_arrival_voice_off_is_byte_for_byte_the_default_build():
+    default = build_patrol_steps(_beds(), shelf_id="S_04", mode="patrol")
+    explicit = build_patrol_steps(_beds(), shelf_id="S_04", mode="patrol",
+                                  arrival_voice=False)
+    assert [s.model_dump() for s in explicit] == [s.model_dump() for s in default]
+
+
+def test_demo_arrival_voice_stretches_each_dwell_past_the_clip(monkeypatch):
+    """Demo has no bio_scan to cover the clip — the robot would drive off
+    mid-sentence unless the dwell outlasts it."""
+    monkeypatch.setattr("routers.patrol.wav_seconds", lambda path: 5.36)
+    steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
+                               arrival_voice=True)
+    wait_steps = [s for s in steps if s.action == StepAction.WAIT.value]
+    assert [s.params["seconds"] for s in wait_steps] == [5.86, 5.86]
+
+
+def test_demo_arrival_voice_keeps_a_longer_final_wait(monkeypatch):
+    monkeypatch.setattr("routers.patrol.wav_seconds", lambda path: 5.36)
+    steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
+                               final_wait_seconds=30, arrival_voice=True)
+    wait_steps = [s for s in steps if s.action == StepAction.WAIT.value]
+    assert [s.params["seconds"] for s in wait_steps] == [5.86, 30]
