@@ -15,6 +15,13 @@ DEFAULT_SETTINGS = {
     "mqtt_enabled": False,
     "bio_scan_wait_time": 10,
     "bio_scan_retry_count": 19,
+    # IT-20: bio_scan_initial_wait 是量測開始前的**無條件** sleep —— 資料早到也
+    # 不會提前結束。單床上限 = initial_wait + wait_time × (retry_count − 1)，所以
+    # 調小 initial_wait 必須同步調大 retry_count，否則失敗判定窗跟著縮短，會把
+    # 收斂較慢的床誤判成失敗。感測器取 1 分鐘移動平均、加上停車後感測桿晃動，
+    # 60 秒是物理下限。另外 task_runtime 的低電量中止只採信靜止取樣，而電量是
+    # 每 ~30s 輪詢一次；initial_wait 遠小於輪詢週期時，可用的取樣窗會變稀疏，
+    # 中止機制會變鈍（見 BATTERY_ABORT_CONSECUTIVE）。
     "bio_scan_initial_wait": 120,
     "bio_scan_valid_status": 4,
     "arrival_voice_enabled": False,

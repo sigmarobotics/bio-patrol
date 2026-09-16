@@ -79,7 +79,7 @@ def _patrol_task(mode: str | None = None) -> Task:
 
 
 def _standing_still(eng: task_runtime.TaskEngine) -> None:
-    """Put the engine in a settled stationary window (a bio_scan dwell)."""
+    """Put the engine in a settled stationary window (no motion step in flight)."""
     eng._stationary_since = time.monotonic() - task_runtime.BATTERY_SETTLE_SECONDS - 1
 
 
@@ -339,26 +339,130 @@ def test_every_sample_is_logged_with_its_motion_state(caplog):
     assert "63.0%" in samples[0]
 
 
-def test_bio_scan_opens_and_closes_the_stationary_window(monkeypatch):
-    """The dwell is the only stationary window in the route, and it must close
-    again even when the scan raises — a stuck-open window would let a reading
-    taken mid-drive abort the run."""
+# ── Where the stationary window opens and closes (PR #42 review) ────────────
+
+def _step(action: str) -> TaskStep:
+    return TaskStep(step_id="s", action=action, params={}, status=StepStatus.PENDING)
+
+
+def _run_step(eng: task_runtime.TaskEngine, action: str, handler):
+    eng._action_handlers[action] = handler
+    return asyncio.run(eng._execute_step(_step(action)))
+
+
+@pytest.mark.parametrize("action", sorted(task_runtime.MOTION_ACTIONS))
+def test_motion_steps_close_the_window_and_reopen_it_after(action):
     eng = _engine(_reading(50))
+    _standing_still(eng)
     seen = []
 
-    class _Client:
-        async def get_valid_scan_data(self, **kwargs):
-            seen.append(eng._stationary_since)
-            raise RuntimeError("scan blew up")
+    async def _handler(step):
+        seen.append(eng._stationary_since)
+        return StepResult(success=True, error_code=0, error_message="",
+                          data={}, timestamp="")
 
-    monkeypatch.setattr(task_runtime, "get_bio_sensor_client", lambda: _Client())
-    eng.target_bed = "B_101-1"
-    eng.current_task_id = "t-1"
-    step = TaskStep(step_id="s1", action=StepAction.BIO_SCAN.value,
-                    params={"bed_key": "B_101-1"}, status=StepStatus.PENDING)
+    _run_step(eng, action, _handler)
+    assert seen == [None]                     # closed while the robot drives
+    assert eng._stationary_since is not None   # reopened once it stops
 
-    with pytest.raises(RuntimeError):
-        asyncio.run(eng._do_bio_scan(step))
 
-    assert seen and seen[0] is not None      # open during the dwell
-    assert eng._stationary_since is None      # closed on the way out
+@pytest.mark.parametrize("action", [StepAction.BIO_SCAN.value, StepAction.WAIT.value,
+                                    StepAction.PLAY_SOUND.value, StepAction.SPEAK.value,
+                                    StepAction.RESET_SHELF_POSE.value])
+def test_non_motion_steps_leave_the_window_open(action):
+    """A demo run has WAIT steps and no bio_scan at all; a bed whose move failed
+    has its scan skipped entirely. Both must still be able to abort — they are
+    the runs that burn the most charge (2026-08-19 板橋榮家)."""
+    eng = _engine(_reading(50))
+    _standing_still(eng)
+    opened = eng._stationary_since
+    seen = []
+
+    async def _handler(step):
+        seen.append(eng._stationary_since)
+        return StepResult(success=True, error_code=0, error_message="",
+                          data={}, timestamp="")
+
+    _run_step(eng, action, _handler)
+    assert seen == [opened]
+    assert eng._stationary_since == opened
+
+
+def test_a_failing_motion_step_still_reopens_the_window():
+    """A move that raises must not leave the window shut — with it shut the
+    abort is dead for the rest of the run."""
+    eng = _engine(_reading(50))
+    _standing_still(eng)
+
+    async def _boom(step):
+        raise RuntimeError("move blew up")
+
+    res = _run_step(eng, StepAction.MOVE_SHELF.value, _boom)
+    assert res.success is False
+    assert eng._stationary_since is not None
+
+
+def test_window_opened_during_the_battery_read_does_not_count():
+    """get_battery_info hops to a thread and retries, so on a weak link it can
+    outlast the move it started under. A reading taken mid-drive must not be
+    credited as stationary just because the robot stopped before it returned."""
+    _patrol_task()
+    eng = _engine(_reading(4))
+
+    async def _read_while_the_move_finishes(robot_id):
+        # sampled under motor load; the move completes before the read returns
+        eng._stationary_since = time.monotonic() - task_runtime.BATTERY_SETTLE_SECONDS - 1
+        return {"ok": True, "percentage": 4, "power_status": "3"}
+
+    eng.fleet.get_battery_info = AsyncMock(side_effect=_read_while_the_move_finishes)
+    eng._stationary_since = None  # driving when the read starts
+
+    assert asyncio.run(eng._maybe_abort_low_battery()) is False
+    assert eng._low_battery_streak == 0
+
+
+def test_window_that_closed_during_the_battery_read_does_not_count():
+    """The mirror case: stationary at the start of the read, driving again by
+    the time it returns."""
+    _patrol_task()
+    eng = _engine(_reading(4))
+    _standing_still(eng)
+
+    async def _read_while_the_next_move_starts(robot_id):
+        eng._stationary_since = None
+        return {"ok": True, "percentage": 4, "power_status": "3"}
+
+    eng.fleet.get_battery_info = AsyncMock(side_effect=_read_while_the_next_move_starts)
+
+    assert asyncio.run(eng._maybe_abort_low_battery()) is False
+    assert eng._low_battery_streak == 0
+
+
+def test_abort_wakes_a_dwell_that_is_still_waiting(dispatched):
+    """The abort now fires with no robot command in flight, so cancel_command
+    has nothing to cancel — what has to stop is the scan window the engine is
+    sitting in, or run_task only notices at the next step boundary, up to a
+    full bio_scan window later."""
+    task = _patrol_task()
+    eng = _engine(_reading(8))
+    _standing_still(eng)
+
+    async def _scenario():
+        eng.shelf_drop_event = asyncio.Event()
+        eng._battery_abort_event = asyncio.Event()
+        never = asyncio.Event()
+
+        async def _endless_scan():
+            await never.wait()
+            return "scan finished"
+
+        scan = asyncio.ensure_future(eng._await_or_drop(_endless_scan()))
+        await asyncio.sleep(0)
+        eng._low_battery_streak = task_runtime.BATTERY_ABORT_CONSECUTIVE - 1
+        fired = await eng._maybe_abort_low_battery()
+        return fired, await asyncio.wait_for(scan, timeout=1)
+
+    fired, outcome = asyncio.run(_scenario())
+    assert fired is True
+    assert outcome is None                      # the dwell was cut short
+    assert task.status == TaskStatus.CANCELLED
