@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sqlite3
+import time
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from services.fleet_api import FleetAPI
@@ -39,6 +40,38 @@ _CHARGING_POWER_STATUSES = {
 # consecutive failed polls before calling the robot gone — a single transient
 # gRPC hiccup is normal and stays silent.
 DISCONNECT_POLL_THRESHOLD = 3
+
+# PFR: this pack's BMU has no proper regulation, so motor start/stop swings the
+# rail voltage and the reported percentage with it — their own app shows only
+# high/medium/low rather than a number. The field record matches: all 11 battery
+# aborts up to 2026-09-16 fired while the robot was driving and none during a
+# stationary bio_scan dwell, although the robot stood still for 76% of a run.
+# So a single in-motion reading is the least trustworthy input we have, and it
+# was driving the most irreversible decision in the run. Battery is still READ
+# on the old cadence (every sample is logged, in motion or not — that log is how
+# the sag gets characterised), but only stationary samples can abort, and only
+# this many consecutive ones.
+BATTERY_ABORT_CONSECUTIVE = 2
+
+# Motors stop before the dwell starts, but the rail needs a moment to recover
+# from the stopping transient — ignore samples taken inside this window.
+BATTERY_SETTLE_SECONDS = 5.0
+
+# Steps that put the robot in motion. Everything else (bio_scan, wait, speak,
+# play_sound, reset_shelf_pose) leaves it standing still, and so does the gap
+# between steps — including a bed whose scan was skipped because its move
+# failed. Keying the stationary window off this set rather than off bio_scan
+# keeps the abort alive on demo runs (WAIT steps, no bio_scan at all) and on
+# runs whose moves keep failing — the two cases that burn the most charge.
+MOTION_ACTIONS = frozenset({
+    StepAction.MOVE_TO_POSE.value,
+    StepAction.MOVE_TO_LOCATION.value,
+    StepAction.DOCK_SHELF.value,
+    StepAction.UNDOCK_SHELF.value,
+    StepAction.MOVE_SHELF.value,
+    StepAction.RETURN_SHELF.value,
+    StepAction.RETURN_HOME.value,
+})
 
 
 def classify_shelf_release(battery: dict, command_state: dict,
@@ -166,6 +199,13 @@ class TaskEngine:
         # True once the robot stopped answering: the run still pauses, but the
         # shelf state is reported as unknown instead of dropped.
         self._disconnect_suspected = False
+        # monotonic timestamp of the current stationary window, or None while a
+        # motion step is in flight — see MOTION_ACTIONS / BATTERY_ABORT_CONSECUTIVE.
+        self._stationary_since: Optional[float] = None
+        self._low_battery_streak = 0
+        # Set when the abort fires, so a dwell already waiting out its scan
+        # window stops now instead of at the next step boundary.
+        self._battery_abort_event: Optional[asyncio.Event] = None
         self._action_handlers: Dict[str, Any] = {
             StepAction.SPEAK.value: self._do_speak,
             StepAction.MOVE_TO_POSE.value: self._do_move_to_pose,
@@ -321,6 +361,13 @@ class TaskEngine:
         if not threshold or threshold <= 0:
             return False
 
+        # Snapshot the window BEFORE the read. get_battery_info hops to a thread
+        # and carries @with_retry, so on the weak-WiFi sites this targets it can
+        # span many seconds — long enough for a move to finish and open a window
+        # while a reading taken under motor load is still in flight. Only a
+        # window that was already open and settled when the read started, and is
+        # still the same window when it returns, counts as stationary.
+        window_before = self._stationary_since
         try:
             battery = await self.fleet.get_battery_info(self.robot_id)
         except Exception as e:
@@ -331,10 +378,46 @@ class TaskEngine:
         pct = battery.get("percentage")
         if not isinstance(pct, (int, float)):
             return False
-        if pct > threshold:
-            return False
-        if str(battery.get("power_status", "")).upper() in _CHARGING_POWER_STATUSES:
+
+        charging = str(battery.get("power_status", "")).upper() in _CHARGING_POWER_STATUSES
+        now = time.monotonic()
+        same_window = (window_before is not None
+                       and self._stationary_since == window_before)
+        settled = same_window and (now - window_before) >= BATTERY_SETTLE_SECONDS
+        # Every sample, whatever the robot is doing — this log IS the discharge
+        # curve, and without the motion state there is no way to tell a real
+        # drain from a load sag.
+        if not same_window:
+            state = "moving"
+        elif settled:
+            state = "still"
+        else:
+            state = "settling"
+        logger.info(
+            f"[BATTERY] {pct:.1f}% state={state} threshold={threshold}% "
+            f"charging={charging} "
+            f"streak={self._low_battery_streak}/{BATTERY_ABORT_CONSECUTIVE}"
+        )
+
+        if charging:
             # Already on the charger — the firmware took over, nothing to abort.
+            self._low_battery_streak = 0
+            return False
+        if pct > threshold:
+            self._low_battery_streak = 0
+            return False
+        if not settled:
+            # Low, but read while the motors could be loading the rail. Not
+            # trusted, and deliberately not counted — the streak only advances
+            # on samples taken standing still.
+            return False
+        self._low_battery_streak += 1
+        if self._low_battery_streak < BATTERY_ABORT_CONSECUTIVE:
+            logger.warning(
+                f"[BATTERY] {pct:.1f}% below {threshold}% while stationary "
+                f"({self._low_battery_streak}/{BATTERY_ABORT_CONSECUTIVE}) — "
+                f"waiting for confirmation before aborting"
+            )
             return False
         # The battery read yielded — the run may have finished (or dropped its
         # shelf) meanwhile, and flipping a DONE task to CANCELLED would queue a
@@ -346,7 +429,8 @@ class TaskEngine:
         # IN_PROGRESS guards above refuse any later call for this run.
         logger.warning(
             f"[BATTERY ABORT] Robot {self.robot_id} at {pct}% (threshold "
-            f"{threshold}%) — cancelling task {task.task_id} to return the shelf"
+            f"{threshold}%, {self._low_battery_streak} consecutive stationary "
+            f"samples) — cancelling task {task.task_id} to return the shelf"
         )
         bio_steps = [s for s in task.steps if s.action == StepAction.BIO_SCAN]
         done_beds = sum(1 for s in bio_steps if s.status == StepStatus.SUCCESS)
@@ -370,6 +454,13 @@ class TaskEngine:
         task.metadata = {**(task.metadata or {}),
                          "battery_abort": True, "battery_abort_pct": pct}
         task.status = TaskStatus.CANCELLED
+        # The abort now fires with no robot command in flight, so cancel_command
+        # below has nothing to cancel — what actually has to stop is the scan
+        # window the engine is sitting in. run_task breaks on CANCELLED at the
+        # next step boundary, and without this that boundary is up to a full
+        # bio_scan window away.
+        if self._battery_abort_event is not None:
+            self._battery_abort_event.set()
         try:
             await self.fleet.cancel_command(self.robot_id)
         except Exception as ce:
@@ -716,6 +807,10 @@ class TaskEngine:
         self.shelf_drop_event.clear()
         self._shelf_release_expected = False
         self._disconnect_suspected = False
+        # The run starts at the dock, standing still.
+        self._stationary_since = time.monotonic()
+        self._low_battery_streak = 0
+        self._battery_abort_event = asyncio.Event()
         self._state_watcher_stop = False
         self._state_watcher_task = asyncio.create_task(self._watch_shelf_state())
 
@@ -947,6 +1042,9 @@ class TaskEngine:
                 error_message=f"Unknown action: {action}",
                 data={"action": action}, timestamp=get_now().isoformat(),
             )
+        in_motion = action in MOTION_ACTIONS
+        if in_motion:
+            self._stationary_since = None
         try:
             return await handler(step)
         except ValueError as e:
@@ -965,6 +1063,9 @@ class TaskEngine:
                 data={"action": action, "params": step.params},
                 timestamp=get_now().isoformat(),
             )
+        finally:
+            if in_motion:
+                self._stationary_since = time.monotonic()
 
     # ── Action handlers ───────────────────────────────────────────────
 
@@ -1189,10 +1290,12 @@ class TaskEngine:
         task = asyncio.ensure_future(coro)
         if self.shelf_drop_event is None:
             return await task
-        drop = asyncio.ensure_future(self.shelf_drop_event.wait())
+        waiters = {asyncio.ensure_future(self.shelf_drop_event.wait())}
+        if self._battery_abort_event is not None:
+            waiters.add(asyncio.ensure_future(self._battery_abort_event.wait()))
         try:
             done, _ = await asyncio.wait(
-                {task, drop}, return_when=asyncio.FIRST_COMPLETED
+                {task, *waiters}, return_when=asyncio.FIRST_COMPLETED
             )
         except asyncio.CancelledError:
             # Worker cancelled (shutdown) — take the wrapped call down with us,
@@ -1200,7 +1303,8 @@ class TaskEngine:
             task.cancel()
             raise
         finally:
-            drop.cancel()
+            for w in waiters:
+                w.cancel()
         if task in done:
             return task.result()
         task.cancel()
@@ -1222,6 +1326,16 @@ class TaskEngine:
         outcome = await self._await_or_drop(client.get_valid_scan_data(
             target_bed=self.target_bed, task_id=self.current_task_id, bed_name=bed_key,
         ))
+        dropped = self.shelf_drop_event is not None and self.shelf_drop_event.is_set()
+        aborted = (self._battery_abort_event is not None
+                   and self._battery_abort_event.is_set())
+        if outcome is None and aborted and not dropped:
+            logger.warning(f"Bio scan on robot {self.robot_id} cut short by low-battery abort")
+            return StepResult(
+                success=False, error_code=-1,
+                error_message="Bio scan interrupted by low-battery abort",
+                data={"bed_key": bed_key}, timestamp=get_now().isoformat(),
+            )
         if outcome is None:
             # run_task sees the same event right after this step returns and
             # routes into _handle_shelf_drop.
