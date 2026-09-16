@@ -4,10 +4,18 @@ charger. The 30% start gate cannot catch a run that starts just above it, so
 the state watcher now aborts the run while there is still charge to carry the
 shelf home. These tests pin when the abort fires and, just as importantly,
 when it must not.
+
+2026-09-16 新營: PFR say this pack's BMU has no proper regulation, so motor
+start/stop swings the reported percentage — their own app shows only
+high/medium/low. All 11 field aborts fired while the robot was driving and
+none during a stationary dwell, although it stood still for 76% of a run. The
+abort therefore only counts samples taken standing still, and only after
+BATTERY_ABORT_CONSECUTIVE of them; these tests pin both gates.
 """
 from __future__ import annotations
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -70,6 +78,20 @@ def _patrol_task(mode: str | None = None) -> Task:
     return task
 
 
+def _standing_still(eng: task_runtime.TaskEngine) -> None:
+    """Put the engine in a settled stationary window (a bio_scan dwell)."""
+    eng._stationary_since = time.monotonic() - task_runtime.BATTERY_SETTLE_SECONDS - 1
+
+
+def _abort_after_confirmation(eng: task_runtime.TaskEngine) -> bool:
+    """Run the check until it either aborts or exhausts the streak budget."""
+    for _ in range(task_runtime.BATTERY_ABORT_CONSECUTIVE):
+        fired = asyncio.run(eng._maybe_abort_low_battery())
+        if fired:
+            return True
+    return False
+
+
 def _reading(pct, *, ok=True, power_status="3") -> dict:
     return {"return_value": {"ok": ok, "percentage": pct,
                              "power_status": power_status}}
@@ -78,8 +100,9 @@ def _reading(pct, *, ok=True, power_status="3") -> dict:
 def test_below_threshold_cancels_and_notifies(dispatched):
     task = _patrol_task()
     eng = _engine(_reading(8))
+    _standing_still(eng)
 
-    assert asyncio.run(eng._maybe_abort_low_battery()) is True
+    assert _abort_after_confirmation(eng) is True
     assert task.status == TaskStatus.CANCELLED
     assert task.metadata["battery_abort"] is True
     assert task.metadata["battery_abort_pct"] == 8
@@ -106,8 +129,9 @@ def test_above_threshold_leaves_run_alone(dispatched):
 def test_exactly_at_threshold_aborts(dispatched):
     task = _patrol_task()
     eng = _engine(_reading(10))
+    _standing_still(eng)
 
-    assert asyncio.run(eng._maybe_abort_low_battery()) is True
+    assert _abort_after_confirmation(eng) is True
     assert task.status == TaskStatus.CANCELLED
 
 
@@ -152,8 +176,9 @@ def test_threshold_zero_disables_the_abort(monkeypatch, dispatched):
 def test_abort_fires_only_once(dispatched):
     _patrol_task()
     eng = _engine(_reading(8))
+    _standing_still(eng)
 
-    assert asyncio.run(eng._maybe_abort_low_battery()) is True
+    assert _abort_after_confirmation(eng) is True
     assert asyncio.run(eng._maybe_abort_low_battery()) is False
     assert len(dispatched) == 1
     assert eng.fleet.cancel_command.await_count == 1
@@ -171,6 +196,8 @@ def test_run_finishing_during_battery_read_is_not_cancelled(dispatched):
         return {"ok": True, "percentage": 8, "power_status": "3"}
 
     eng.fleet.get_battery_info = AsyncMock(side_effect=_finishes_meanwhile)
+    _standing_still(eng)
+    eng._low_battery_streak = task_runtime.BATTERY_ABORT_CONSECUTIVE - 1
 
     assert asyncio.run(eng._maybe_abort_low_battery()) is False
     assert task.status == TaskStatus.DONE
@@ -194,8 +221,9 @@ def test_dispatch_failure_still_cancels(monkeypatch):
                         AsyncMock(side_effect=RuntimeError("sink down")))
     task = _patrol_task()
     eng = _engine(_reading(4))
+    _standing_still(eng)
 
-    assert asyncio.run(eng._maybe_abort_low_battery()) is True
+    assert _abort_after_confirmation(eng) is True
     assert task.status == TaskStatus.CANCELLED
     eng.fleet.cancel_command.assert_awaited_once_with("kachaka")
 
@@ -214,3 +242,123 @@ def test_shelf_release_in_cancel_window_does_not_overwrite_cancelled(dispatched)
     assert task.status == TaskStatus.CANCELLED
     assert dispatched == []
     eng.fleet.cancel_command.assert_not_awaited()
+
+
+# ── Motion gate + confirmation streak (2026-09-16 新營) ──────────────────────
+
+def test_low_reading_while_moving_never_aborts(dispatched):
+    """The load-sag case. Every field abort to date fired on a reading like
+    this one, taken with the motors under load — on PFR's own account the
+    percentage is not trustworthy then, so it must not end the run however
+    often it repeats."""
+    task = _patrol_task()
+    eng = _engine(_reading(4))
+    # _stationary_since left None: the robot is driving.
+
+    for _ in range(10):
+        assert asyncio.run(eng._maybe_abort_low_battery()) is False
+    assert task.status == TaskStatus.IN_PROGRESS
+    assert eng._low_battery_streak == 0
+    assert dispatched == []
+    eng.fleet.cancel_command.assert_not_awaited()
+
+
+def test_single_stationary_low_reading_waits_for_confirmation(dispatched):
+    task = _patrol_task()
+    eng = _engine(_reading(8))
+    _standing_still(eng)
+
+    assert asyncio.run(eng._maybe_abort_low_battery()) is False
+    assert task.status == TaskStatus.IN_PROGRESS
+    assert eng._low_battery_streak == 1
+    assert dispatched == []
+
+
+def test_reading_inside_the_settle_window_is_not_counted(dispatched):
+    """The dwell has started but the stopping transient has not died down."""
+    task = _patrol_task()
+    eng = _engine(_reading(8))
+    eng._stationary_since = time.monotonic()  # just arrived
+
+    assert asyncio.run(eng._maybe_abort_low_battery()) is False
+    assert eng._low_battery_streak == 0
+    assert task.status == TaskStatus.IN_PROGRESS
+
+
+def test_a_recovered_reading_resets_the_streak(dispatched):
+    """A sag followed by a normal reading is a sag, not a flat battery — the
+    next low sample must start counting from zero again."""
+    task = _patrol_task()
+    eng = _engine(_reading(8))
+    _standing_still(eng)
+
+    assert asyncio.run(eng._maybe_abort_low_battery()) is False
+    assert eng._low_battery_streak == 1
+
+    eng.fleet.get_battery_info = AsyncMock(
+        return_value={"ok": True, "percentage": 47, "power_status": "3"})
+    assert asyncio.run(eng._maybe_abort_low_battery()) is False
+    assert eng._low_battery_streak == 0
+
+    eng.fleet.get_battery_info = AsyncMock(
+        return_value={"ok": True, "percentage": 8, "power_status": "3"})
+    assert asyncio.run(eng._maybe_abort_low_battery()) is False
+    assert task.status == TaskStatus.IN_PROGRESS
+    assert dispatched == []
+
+
+def test_charging_resets_the_streak(dispatched):
+    task = _patrol_task()
+    eng = _engine(_reading(8))
+    _standing_still(eng)
+    assert asyncio.run(eng._maybe_abort_low_battery()) is False
+    assert eng._low_battery_streak == 1
+
+    eng.fleet.get_battery_info = AsyncMock(
+        return_value={"ok": True, "percentage": 8, "power_status": "1"})
+    assert asyncio.run(eng._maybe_abort_low_battery()) is False
+    assert eng._low_battery_streak == 0
+    assert task.status == TaskStatus.IN_PROGRESS
+
+
+def test_every_sample_is_logged_with_its_motion_state(caplog):
+    """The sample log is the discharge curve — without it there is no way to
+    separate a load sag from a real drain after the fact."""
+    _patrol_task()
+    eng = _engine(_reading(63))
+
+    with caplog.at_level("INFO", logger="kachaka.task_runtime"):
+        asyncio.run(eng._maybe_abort_low_battery())
+        _standing_still(eng)
+        asyncio.run(eng._maybe_abort_low_battery())
+
+    samples = [r.message for r in caplog.records if "[BATTERY]" in r.message]
+    assert len(samples) == 2
+    assert "state=moving" in samples[0]
+    assert "state=still" in samples[1]
+    assert "63.0%" in samples[0]
+
+
+def test_bio_scan_opens_and_closes_the_stationary_window(monkeypatch):
+    """The dwell is the only stationary window in the route, and it must close
+    again even when the scan raises — a stuck-open window would let a reading
+    taken mid-drive abort the run."""
+    eng = _engine(_reading(50))
+    seen = []
+
+    class _Client:
+        async def get_valid_scan_data(self, **kwargs):
+            seen.append(eng._stationary_since)
+            raise RuntimeError("scan blew up")
+
+    monkeypatch.setattr(task_runtime, "get_bio_sensor_client", lambda: _Client())
+    eng.target_bed = "B_101-1"
+    eng.current_task_id = "t-1"
+    step = TaskStep(step_id="s1", action=StepAction.BIO_SCAN.value,
+                    params={"bed_key": "B_101-1"}, status=StepStatus.PENDING)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(eng._do_bio_scan(step))
+
+    assert seen and seen[0] is not None      # open during the dwell
+    assert eng._stationary_since is None      # closed on the way out
