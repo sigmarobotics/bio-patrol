@@ -1,12 +1,16 @@
 import asyncio
 import logging
+import random
 import sqlite3
 import time
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from services.fleet_api import FleetAPI
 from services.notifications import AnomalyEvent, Severity, Source, dispatcher
-from services.notifications.evaluator import BioScanFailureEvaluator
+from services.notifications.evaluator import (
+    BioScanFailureEvaluator, ScanOutcome, VitalsOutOfBandEvaluator,
+)
+from services import demo_data
 from common_types import (
     Task, TaskStep, TaskStatus, StepStatus, StepResult, StepAction,
     NON_CRITICAL_ACTIONS, get_now,
@@ -14,10 +18,12 @@ from common_types import (
 from dependencies import get_bio_sensor_client
 from utils.grpc_errors import is_connection_error
 from utils.sqlite_wal import connect_db
+from settings.config import get_runtime_settings
 
 logger = logging.getLogger("kachaka.task_runtime")
 
 _bio_scan_evaluator = BioScanFailureEvaluator()
+_vitals_evaluator = VitalsOutOfBandEvaluator()
 
 # Kachaka puts its shelf down and drives to the charger on its own when the
 # battery runs out — the moving-shelf id then disappears exactly like a drop
@@ -219,6 +225,7 @@ class TaskEngine:
             StepAction.BIO_SCAN.value: self._do_bio_scan,
             StepAction.WAIT.value: self._do_wait,
             StepAction.PLAY_SOUND.value: self._do_play_sound,
+            StepAction.DEMO_SCAN.value: self._do_demo_scan,
         }
 
     async def _refresh_name_cache(self):
@@ -813,6 +820,8 @@ class TaskEngine:
         self._battery_abort_event = asyncio.Event()
         self._state_watcher_stop = False
         self._state_watcher_task = asyncio.create_task(self._watch_shelf_state())
+        # Captured up front: a shelf drop rewrites task.metadata wholesale.
+        is_demo = (task.metadata or {}).get("mode") == "demo"
 
         try:
             step_index = 0
@@ -966,7 +975,10 @@ class TaskEngine:
                     logger.error(f"[{tag}] Failed to queue cancel cleanup: {e}")
 
             try:
-                bio_steps = [s for s in task.steps if s.action == StepAction.BIO_SCAN]
+                # A demo run's seats are its synthetic demo_scan steps, and
+                # their outcomes live in demo_data.db (IT-21).
+                scan_action = StepAction.DEMO_SCAN if is_demo else StepAction.BIO_SCAN
+                bio_steps = [s for s in task.steps if s.action == scan_action]
                 total_beds = len(bio_steps)
                 success_beds = sum(1 for s in bio_steps if s.status == StepStatus.SUCCESS)
                 if cancelled:
@@ -975,7 +987,7 @@ class TaskEngine:
                     title = "✅ 巡房完成"
                 else:
                     title = "⚠️ 巡房中斷"
-                buckets = self._run_outcome_buckets(task.task_id)
+                buckets = self._run_outcome_buckets(task.task_id, demo=is_demo)
                 if buckets is not None:
                     # Same per-bed buckets as the history view: reaching the
                     # bed is the success bar; restless / empty-bed are reports.
@@ -1013,6 +1025,7 @@ class TaskEngine:
                         "total_beds": total_beds,
                         "success_beds": success_beds,
                     },
+                    demo=is_demo,
                 ))
             except Exception:
                 logger.exception("Failed to dispatch task-summary anomaly")
@@ -1168,14 +1181,23 @@ class TaskEngine:
             self.shelf_drop_event.clear()
         return self._make_result(result, step.action, {"shelf_id": shelf_id})
 
-    def _run_outcome_buckets(self, task_id: str) -> Optional[dict]:
+    def _run_outcome_buckets(self, task_id: str, demo: bool = False) -> Optional[dict]:
         """Per-bed outcome buckets for one run, from the scan DB.
 
         Same classification as the frontend history view: one outcome row per
         bed (the valid row if any, else the final attempt), bucketed into
         valid / restless (status 2) / unreachable (skipped, status 'N/A') /
         no-reading (everything else). None when the DB can't be read.
+        ``demo`` reads the synthetic demo_scan_data instead — a demo run never
+        has rows in sensor_scan_data.
         """
+        if demo:
+            try:
+                rows = demo_data.scan_rows(task_id)
+            except Exception:
+                logger.exception("Failed to load demo scan rows for run summary")
+                return None
+            return self._bucket_rows(rows)
         client = get_bio_sensor_client()
         if client is None:
             return None
@@ -1191,6 +1213,10 @@ class TaskEngine:
         except Exception:
             logger.exception("Failed to load scan rows for run summary")
             return None
+        return self._bucket_rows(rows)
+
+    @staticmethod
+    def _bucket_rows(rows) -> dict:
         best: Dict[str, Any] = {}
         for r in rows:
             bed = r["bed_name"] or "?"
@@ -1354,6 +1380,13 @@ class TaskEngine:
         event = _bio_scan_evaluator.evaluate(outcome)
         if event:
             await dispatcher.dispatch(event)
+        # IT-21 FEAT-025: threshold alert is opt-in per site — off, the real
+        # patrol emits exactly what it did before.
+        cfg = get_runtime_settings()
+        if cfg.get("vitals_alert_enabled", False):
+            vitals = _vitals_evaluator.evaluate(outcome, cfg)
+            if vitals:
+                await dispatcher.dispatch(vitals)
 
         return StepResult(
             success=success,
@@ -1365,6 +1398,70 @@ class TaskEngine:
             data=outcome.valid_record or {
                 "task_id": outcome.task_id, "details": outcome.last_failure_reason,
             },
+            timestamp=get_now().isoformat(),
+        )
+
+    async def _do_demo_scan(self, step: TaskStep) -> StepResult:
+        """IT-21: a synthetic bio_scan for demo runs.
+
+        Waits out the seat's dwell (interruptible by a shelf drop / low-battery
+        abort, like a real scan), then synthesises a reading for the seat's
+        scripted scenario. The reading goes through the REAL evaluators and
+        dispatcher — events marked demo — but is stored only in demo_data.db,
+        never in sensor_scan_data. Vitals are always evaluated here, whatever
+        vitals_alert_enabled says: showing the alert is the point of a demo.
+        """
+        bed_key = step.params.get("bed_key")
+        location_id = step.params.get("location_id", "")
+        scenario = step.params.get("scenario", "normal")
+        seconds = float(step.params.get("seconds", 15))
+        await self._await_or_drop(asyncio.sleep(seconds))
+        dropped = self.shelf_drop_event is not None and self.shelf_drop_event.is_set()
+        aborted = (self._battery_abort_event is not None
+                   and self._battery_abort_event.is_set())
+        if dropped or aborted:
+            reason = "shelf release" if dropped else "low-battery abort"
+            logger.warning(f"Demo scan on robot {self.robot_id} interrupted by {reason}")
+            return StepResult(
+                success=False, error_code=-1,
+                error_message=f"Demo scan interrupted by {reason}",
+                data={"bed_key": bed_key}, timestamp=get_now().isoformat(),
+            )
+
+        cfg = get_runtime_settings()
+        record = demo_data.synth_record(scenario, cfg, random.Random())
+        data, valid = demo_data.save_scan(
+            self.current_task_id, bed_key, location_id, scenario, record, cfg,
+        )
+        outcome = ScanOutcome(
+            task_id=self.current_task_id,
+            location_id=location_id,
+            bed_name=bed_key,
+            valid_record=data if valid else None,
+            # A real scan only gives up after exhausting its retries; mirror
+            # that so the absent-seat alert reads like the real one.
+            retry_count=0 if valid else cfg.get("bio_scan_retry_count", 19),
+            last_record_raw=data,
+            last_failure_reason=None if valid else data["details"],
+        )
+        logger.info(
+            f"Demo scan on robot {self.robot_id}: bed={bed_key} scenario={scenario} "
+            f"status={data['status']} bpm={data['bpm']} rpm={data['rpm']}"
+        )
+        for event in (_bio_scan_evaluator.evaluate(outcome),
+                      _vitals_evaluator.evaluate(outcome, cfg)):
+            if event:
+                event.demo = True
+                await dispatcher.dispatch(event)
+
+        return StepResult(
+            success=valid,
+            error_code=0 if valid else -1,
+            error_message=(
+                "Demo scan completed successfully" if valid
+                else "Demo scan: no valid reading"
+            ),
+            data=data,
             timestamp=get_now().isoformat(),
         )
 

@@ -40,6 +40,7 @@ class StepAction(str, Enum):
     BIO_SCAN = "bio_scan"
     WAIT = "wait"
     PLAY_SOUND = "play_sound"
+    DEMO_SCAN = "demo_scan"  # IT-21: synthetic scan on demo runs (demo_data.db only)
 
 
 # Actions that should not fail the whole task when they error out.
@@ -50,6 +51,7 @@ NON_CRITICAL_ACTIONS = frozenset({
     StepAction.RETURN_SHELF.value,
     StepAction.RESET_SHELF_POSE.value,
     StepAction.PLAY_SOUND.value,
+    StepAction.DEMO_SCAN.value,
 })
 
 # Enhanced Result Models

@@ -1280,6 +1280,14 @@ const SETTINGS_MAP = [
   { id: 'setting-timezone', key: 'timezone' },
   { id: 'setting-bed-card-stale-hours', key: 'bed_card_stale_hours', type: 'number' },
   { id: 'robot-offline-debounce-seconds', key: 'robot_offline_debounce_seconds', type: 'number' },
+  { id: 'setting-vitals-alert-enabled', key: 'vitals_alert_enabled', type: 'checkbox' },
+  { id: 'setting-vitals-hr-low', key: 'vitals_hr_low', type: 'number' },
+  { id: 'setting-vitals-hr-high', key: 'vitals_hr_high', type: 'number' },
+  { id: 'setting-vitals-rr-low', key: 'vitals_rr_low', type: 'number' },
+  { id: 'setting-vitals-rr-high', key: 'vitals_rr_high', type: 'number' },
+  { id: 'setting-demo-dwell-seconds', key: 'demo_dwell_seconds', type: 'number' },
+  { id: 'setting-demo-telegram-bot-token', key: 'demo_telegram_bot_token' },
+  { id: 'setting-demo-telegram-chat-id', key: 'demo_telegram_chat_id' },
 ];
 
 // GET /api/settings 回來的憑證是遮罩（••••＋末碼），原封送回後端會剔除、保住原值。
@@ -1292,6 +1300,7 @@ const SECRET_SETTING_KEYS = new Set([
   'line_channel_access_token',
   'line_webhook_api_key',
   'gemini_api_key',
+  'demo_telegram_bot_token',
 ]);
 const loadedSecretMasks = {};
 

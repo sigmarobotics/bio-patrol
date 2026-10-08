@@ -63,6 +63,19 @@ DEFAULT_SETTINGS = {
     # Demo run 最後一床的停留秒數（其餘床固定 5s）。現場展示要機器人停在
     # 終點讓來賓看量測，時間到才自動歸還棚車回充。
     "demo_final_wait_seconds": 5,
+    # IT-21: demo run 每座位「量測中」停留秒數（仍不短於到床語音長度）。
+    "demo_dwell_seconds": 15,
+    # IT-21: 心跳呼吸閾值警示。正式巡房只在開關打開時評估（新民開、其他站點維持關）；
+    # demo 一律評估。閾值為開區間外才觸發：恰好等於上下限不算異常。
+    "vitals_alert_enabled": False,
+    "vitals_hr_low": 50,
+    "vitals_hr_high": 120,
+    "vitals_rr_low": 10,
+    "vitals_rr_high": 30,
+    # IT-21: demo 通報用的獨立 Telegram bot／chat；空＝沿用正式 bot／收件人。
+    # 設了 token 時直送 Telegram API，不經 notify hub。
+    "demo_telegram_bot_token": "",
+    "demo_telegram_chat_id": "",
 }
 
 DEFAULT_BEDS = {

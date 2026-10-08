@@ -28,6 +28,8 @@ PUBLISH_TIMEOUT_S = 3.0
 
 def _serialize_event(event: AnomalyEvent) -> dict:
     payload = dataclasses.asdict(event)
+    # Demo events never reach this sink, so keep the wire format unchanged.
+    payload.pop("demo", None)
     payload["timestamp"] = event.timestamp.isoformat()
     # Severity / Source are str-Enums so they round-trip through JSON, but make the
     # wire format explicit values rather than relying on str-enum identity.
@@ -44,6 +46,8 @@ class MqttSink:
         return bool(get_runtime_settings().get("enable_mqtt_egress", False))
 
     async def send(self, event: AnomalyEvent) -> None:
+        if event.demo:
+            return  # IT-21: downstream consumers must never see synthetic data
         cfg = get_runtime_settings()
         prefix = cfg.get("mqtt_egress_topic_prefix", "bio-patrol/anomaly")
         topic = f"{prefix}/{event.severity.value}/{event.source.value}"

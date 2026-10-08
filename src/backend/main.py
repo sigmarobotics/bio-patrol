@@ -11,6 +11,7 @@ import routers.maps as maps_router
 import routers.bio_sensor as bio_sensor
 import routers.buttons as buttons_router
 import routers.robot_health as robot_health_router
+import routers.demo as demo_router
 from contextlib import asynccontextmanager
 import asyncio
 import logging
@@ -94,6 +95,10 @@ def _setup_logging():
         for name in names:
             logging.getLogger(name).addHandler(fh)
 
+    # httpx logs every request URL at INFO — and a Telegram Bot API URL
+    # carries the bot token (TODO-047).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
 def get_project_root():
     """Get project root directory. From src/backend/main.py → up 3 levels to project root."""
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -149,10 +154,12 @@ async def lifespan(app: FastAPI):
         from services.notifications.sinks.telegram import TelegramSink
         from services.notifications.sinks.line import LineSink
         from services.notifications.sinks.mqtt import MqttSink
+        from services.notifications.sinks.demo_preview import DemoPreviewSink
         dispatcher.register(TelegramSink(StaticResolver()))
         dispatcher.register(LineSink(StaticResolver()))
         dispatcher.register(MqttSink(zigbee_mqtt=zigbee_mqtt))
-        logger.info("Anomaly dispatcher initialised: TelegramSink + LineSink + MqttSink registered")
+        dispatcher.register(DemoPreviewSink())
+        logger.info("Anomaly dispatcher initialised: TelegramSink + LineSink + MqttSink + DemoPreviewSink registered")
 
         if cfg.get("mqtt_enabled"):
             try:
@@ -260,6 +267,7 @@ app.include_router(maps_router.router)
 app.include_router(bio_sensor.router)
 app.include_router(buttons_router.router)
 app.include_router(robot_health_router.router)
+app.include_router(demo_router.router)
 
 frontend_path = get_resource_path("src/frontend")
 if os.path.exists(frontend_path):

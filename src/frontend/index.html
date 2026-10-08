@@ -521,6 +521,50 @@
             </div>
 
             <div class="glass-panel">
+              <h3>心跳呼吸警示</h3>
+              <p class="test-note">正式巡房量到的心跳或呼吸超出範圍時，發出「心跳呼吸異常」通報。恰好等於上下限不算異常。Demo 不受此開關影響，一律評估。</p>
+              <div class="form-group" style="display:flex;align-items:center;gap:12px;">
+                <input type="checkbox" id="setting-vitals-alert-enabled" style="width:auto;">
+                <label for="setting-vitals-alert-enabled" style="margin:0;cursor:pointer;">啟用心跳呼吸警示</label>
+              </div>
+              <div class="form-group">
+                <label>心跳範圍（次／分）</label>
+                <div style="display:flex;gap:8px;align-items:center;">
+                  <input type="number" id="setting-vitals-hr-low" min="0" step="1" placeholder="50">
+                  <span>–</span>
+                  <input type="number" id="setting-vitals-hr-high" min="0" step="1" placeholder="120">
+                </div>
+              </div>
+              <div class="form-group">
+                <label>呼吸範圍（次／分）</label>
+                <div style="display:flex;gap:8px;align-items:center;">
+                  <input type="number" id="setting-vitals-rr-low" min="0" step="1" placeholder="10">
+                  <span>–</span>
+                  <input type="number" id="setting-vitals-rr-high" min="0" step="1" placeholder="30">
+                </div>
+              </div>
+            </div>
+
+            <div class="glass-panel">
+              <h3>Demo</h3>
+              <p class="test-note">Demo Run 走正常路線，每個座位跑一段合成量測（正常 → 心跳呼吸異常 → 人不在）。合成資料只存在 demo 資料庫，不會出現在 Dashboard 與歷史紀錄；展示畫面在 <code>/demo</code>。</p>
+              <div class="form-group">
+                <label for="setting-demo-dwell-seconds">每座位停留秒數</label>
+                <input type="number" id="setting-demo-dwell-seconds" min="5" step="1" placeholder="15">
+              </div>
+              <div class="form-group">
+                <label>Demo Telegram Bot Token</label>
+                <input type="password" id="setting-demo-telegram-bot-token" placeholder="空白＝沿用正式 bot">
+                <p class="test-note">已儲存的憑證只以圓點顯示。要更換請整段重打，勿在圓點後接著輸入；清空欄位＝清除這組憑證。</p>
+              </div>
+              <div class="form-group">
+                <label>Demo Telegram Chat ID</label>
+                <input type="text" id="setting-demo-telegram-chat-id" placeholder="空白＝沿用正式收件人">
+                <p class="test-note">Demo 通報標題前綴「🧪 DEMO・合成資料」，只送 Telegram，不送 LINE 與 MQTT。</p>
+              </div>
+            </div>
+
+            <div class="glass-panel">
               <h3>AI Integration</h3>
               <p class="test-note">未來的「依班表派送」recipient resolver 將使用此 API key。</p>
               <div class="form-group">

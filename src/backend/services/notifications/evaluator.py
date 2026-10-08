@@ -47,3 +47,41 @@ class BioScanFailureEvaluator:
             ),
             raw=outcome.last_record_raw or {},
         )
+
+
+def vitals_out_of_band(bpm, rpm, cfg: dict) -> bool:
+    """True when heart or respiration rate lies strictly outside its band —
+    a reading sitting exactly on a threshold is still normal."""
+    hr_low, hr_high = cfg.get("vitals_hr_low", 50), cfg.get("vitals_hr_high", 120)
+    rr_low, rr_high = cfg.get("vitals_rr_low", 10), cfg.get("vitals_rr_high", 30)
+    return not (hr_low <= bpm <= hr_high) or not (rr_low <= rpm <= rr_high)
+
+
+class VitalsOutOfBandEvaluator:
+    """Emits VITALS_OUT_OF_BAND / WARN when a VALID reading crosses the
+    configured heart/respiration thresholds (IT-21 FEAT-025). Failed scans
+    are BioScanFailureEvaluator's business."""
+
+    def evaluate(self, outcome: ScanOutcome, cfg: dict) -> AnomalyEvent | None:
+        rec = outcome.valid_record
+        if rec is None:
+            return None
+        bpm, rpm = rec.get("bpm") or 0, rec.get("rpm") or 0
+        if not vitals_out_of_band(bpm, rpm, cfg):
+            return None
+        bed = outcome.bed_name or outcome.location_id
+        return AnomalyEvent(
+            severity=Severity.WARN,
+            source=Source.VITALS_OUT_OF_BAND,
+            bed_key=outcome.bed_name,
+            task_id=outcome.task_id,
+            title=f"⚠️ {bed} 心跳呼吸異常",
+            body=(
+                f"床位：{bed}\n"
+                f"心跳：{bpm} 次／分（正常範圍 "
+                f"{cfg.get('vitals_hr_low', 50)}–{cfg.get('vitals_hr_high', 120)}）\n"
+                f"呼吸：{rpm} 次／分（正常範圍 "
+                f"{cfg.get('vitals_rr_low', 10)}–{cfg.get('vitals_rr_high', 30)}）"
+            ),
+            raw={"bpm": bpm, "rpm": rpm, "status": rec.get("status")},
+        )
