@@ -1,13 +1,26 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from dependencies import get_bio_sensor_client
+from services import demo_data
+from services.notifications.evaluator import vitals_out_of_band
+from settings.config import get_runtime_settings
 from utils.sqlite_wal import connect_db
 
 router = APIRouter(prefix='/api/bio-sensor', tags=['Bio Sensor'])
 
 
+def _scan_source(request: Request):
+    """(db path, table) the read endpoints query. The /demo view sends
+    ``X-Bio-Data: demo`` → the synthetic demo DB (needs no MQTT client);
+    anything else → the real sensor DB, or None when bio-sensor is disabled."""
+    if request.headers.get("x-bio-data") == "demo":
+        return demo_data.db_path(), "demo_scan_data"
+    client = get_bio_sensor_client()
+    return (client.db_path, "sensor_scan_data") if client is not None else None
+
+
 @router.get("/scan-history")
-async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, location_id: str = None,
-                                      before_id: int = None):
+async def get_bio_sensor_scan_history(request: Request, limit: int = 100, task_id: str = None,
+                                      location_id: str = None, before_id: int = None):
     """Get historical bio-sensor scan data from database.
 
     location_id is the canonical join key, not bed_name which is free-text.
@@ -15,14 +28,15 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
     and the sort always agree (timestamps are wall-clock strings that can go
     backwards on tz changes or NTP steps — id is true insert order).
     """
-    client = get_bio_sensor_client()
-    if client is None:
+    source = _scan_source(request)
+    if source is None:
         return {"status": "disabled", "message": "Bio-sensor MQTT is disabled"}
+    db_path, table = source
     import sqlite3
 
     conn = None
     try:
-        conn = connect_db(client.db_path)
+        conn = connect_db(db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -44,7 +58,7 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
             f"""
             SELECT id, task_id, location_id, bed_name, timestamp, retry_count,
                    status, bpm, rpm, is_valid, data_json, details
-            FROM sensor_scan_data
+            FROM {table}
             {where}
             ORDER BY id DESC
             LIMIT ?
@@ -61,7 +75,7 @@ async def get_bio_sensor_scan_history(limit: int = 100, task_id: str = None, loc
             conn.close()
 
 @router.get("/bed-stats")
-async def get_bed_stats(location_id: str, window: int = 30, bed_name: str = None):
+async def get_bed_stats(request: Request, location_id: str, window: int = 30, bed_name: str = None):
     """Rolling stats + trend for one bed over its most recent runs.
 
     A failed scan writes one row per retry, so rows are collapsed into runs by
@@ -71,15 +85,16 @@ async def get_bed_stats(location_id: str, window: int = 30, bed_name: str = None
     destination — one patrol stamps the same task_id for both beds, and
     location_id alone would merge the roommates' readings into one run.
     """
-    client = get_bio_sensor_client()
-    if client is None:
+    source = _scan_source(request)
+    if source is None:
         return {"status": "disabled", "message": "Bio-sensor MQTT is disabled"}
+    db_path, table = source
     import sqlite3
 
     window = max(1, min(window, 200))
     conn = None
     try:
-        conn = connect_db(client.db_path)
+        conn = connect_db(db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         clauses = ["location_id = ?"]
@@ -90,7 +105,7 @@ async def get_bed_stats(location_id: str, window: int = 30, bed_name: str = None
         cursor.execute(
             f"""
             SELECT task_id, timestamp, bpm, rpm, is_valid
-            FROM sensor_scan_data
+            FROM {table}
             WHERE {' AND '.join(clauses)}
             ORDER BY id DESC
             LIMIT 2000
@@ -132,38 +147,49 @@ async def get_bed_stats(location_id: str, window: int = 30, bed_name: str = None
             conn.close()
 
 @router.get("/latest-by-bed")
-async def get_latest_by_bed():
+async def get_latest_by_bed(request: Request):
     """Return one row per bed (bed_name) — the latest scan record.
 
     Partitions by bed_name, not location_id: multiple beds can share a
     Kachaka destination (e.g. two beds at one drop-point), and the
     dashboard's per-bed-card semantics require per-bed_name freshness.
     """
-    client = get_bio_sensor_client()
-    if client is None:
+    source = _scan_source(request)
+    if source is None:
         return {"status": "disabled", "data": [], "count": 0}
+    db_path, table = source
     import sqlite3
 
     conn = None
     try:
-        conn = connect_db(client.db_path)
+        conn = connect_db(db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
-            """
+            f"""
             SELECT id, task_id, location_id, bed_name, timestamp, retry_count,
                    status, bpm, rpm, is_valid, data_json, details
             FROM (
                 SELECT *,
                        ROW_NUMBER() OVER (PARTITION BY bed_name ORDER BY timestamp DESC) AS rn
-                FROM sensor_scan_data
+                FROM {table}
                 WHERE bed_name IS NOT NULL
             )
             WHERE rn = 1
             """
         )
         rows = cursor.fetchall()
-        data = [{**dict(r), "is_valid": bool(r["is_valid"])} for r in rows]
+        # out_of_band drives the bed card's 心跳呼吸異常 state. Demo always
+        # evaluates (like the demo scan itself); real data only when the
+        # site has the vitals alert switched on.
+        cfg = get_runtime_settings()
+        check = table == "demo_scan_data" or cfg.get("vitals_alert_enabled", False)
+        data = [{
+            **dict(r),
+            "is_valid": bool(r["is_valid"]),
+            "out_of_band": bool(check and r["is_valid"]
+                                and vitals_out_of_band(r["bpm"] or 0, r["rpm"] or 0, cfg)),
+        } for r in rows]
         return {"status": "success", "data": data, "count": len(data)}
     except Exception as e:
         return {"status": "error", "message": str(e)}

@@ -6,6 +6,7 @@
     VALID: 'valid',
     STALE: 'stale',
     INVALID: 'invalid',
+    ABNORMAL: 'abnormal',
     UNSCHEDULED: 'unscheduled',
   });
 
@@ -17,7 +18,8 @@
     if (Number.isNaN(ts)) return BED_STATE.STALE;
     const ageMs = now - ts;
     const thresholdMs = staleHours * 3600 * 1000;
-    return ageMs > thresholdMs ? BED_STATE.STALE : BED_STATE.VALID;
+    if (ageMs > thresholdMs) return BED_STATE.STALE;
+    return latest.out_of_band ? BED_STATE.ABNORMAL : BED_STATE.VALID;
   }
 
   function formatRelativeTime(timestamp, now = Date.now()) {
@@ -49,6 +51,7 @@
     } else if (latest) {
       vit = `${latest.bpm ?? '--'}/${latest.rpm ?? '--'}`;
       ts = formatRelativeTime(latest.timestamp, now);
+      if (state === BED_STATE.ABNORMAL) extra = '心跳呼吸異常';
     }
 
     return `<div class="bed-card bed-card--${state}" data-bed-key="${bedKey}" onclick="bedGrid.openDrawer('${bedKey}')">

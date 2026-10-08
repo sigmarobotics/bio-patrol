@@ -1858,6 +1858,8 @@ input[type="checkbox"]:checked::after {
 #bed-grid-main .bed-card--stale { border-left-color: var(--text-muted); opacity: 0.65; }
 #bed-grid-main .bed-card--invalid { border-left-color: var(--accent-red); }
 #bed-grid-main .bed-card--invalid .bed-card__vit { color: var(--accent-red); }
+#bed-grid-main .bed-card--abnormal { border-left-color: var(--accent-red); }
+#bed-grid-main .bed-card--abnormal .bed-card__vit { color: var(--accent-red); }
 #bed-grid-main .bed-card--unscheduled { border-left-color: var(--border-subtle); opacity: 0.4; }
 #bed-grid-main .bed-card--unscheduled .bed-card__vit { color: var(--text-muted); }
 

@@ -43,6 +43,18 @@ test.describe('bedGrid pure functions (via page.evaluate)', () => {
     expect(result).toBe('invalid');
   });
 
+  test('classifyBedState — Abnormal (recent valid reading flagged out_of_band)', async ({ page }) => {
+    const result = await page.evaluate(() => {
+      const now = new Date('2026-05-01T12:00:00Z').getTime();
+      return window.bedGrid.classifyBedState(
+        { bed_key: '101-2' },
+        { is_valid: true, out_of_band: true, timestamp: '2026-05-01T11:55:00Z' },
+        true, 24, now
+      );
+    });
+    expect(result).toBe('abnormal');
+  });
+
   test('classifyBedState — Unscheduled (regardless of latest)', async ({ page }) => {
     const result = await page.evaluate(() => {
       const now = new Date('2026-05-01T12:00:00Z').getTime();

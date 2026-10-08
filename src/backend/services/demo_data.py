@@ -3,13 +3,15 @@ readings, and the separate demo_data.db they live in.
 
 Synthetic readings go through the real evaluators and dispatcher, but they are
 stored ONLY here — never in sensor_data.db, so the dashboard and history views
-can never show a demo value as a resident's reading (CORNER-063).
+can never show a demo value as a resident's reading (CORNER-063). The /demo
+view is the same SPA reading this DB instead (IT-21b, ``X-Bio-Data: demo``).
 
 DB_PATH is read at call time (``_connect``), so tests can point it at a temp
 file with ``monkeypatch.setattr(demo_data, "DB_PATH", ...)``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -19,8 +21,6 @@ from typing import Iterable
 
 from common_types import get_now
 from services.bio_sensor_mqtt import is_valid_scan
-from services.notifications.evaluator import vitals_out_of_band
-from services.notifications.events import AnomalyEvent, display_title
 from utils.sqlite_wal import connect_db
 
 # From src/backend/services/demo_data.py → up 4 levels to project root
@@ -30,8 +30,6 @@ DB_PATH = os.path.join(_PROJECT_ROOT, "data", "demo_data.db")
 # Route order → scenario, cycling: normal → vitals abnormal → person absent.
 SCENARIOS = ("normal", "abnormal", "absent")
 
-# task_id of the synthetic 30-day history rows (never a real run id).
-HISTORY_TASK_ID = "demo-history"
 HISTORY_DAYS = 30
 
 _initialised: set[str] = set()
@@ -66,18 +64,10 @@ def _connect() -> sqlite3.Connection:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_demo_scan_task ON demo_scan_data(task_id)"
         )
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS demo_notifications (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id TEXT NULL,
-                timestamp TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                source TEXT NOT NULL,
-                bed_key TEXT NULL,
-                title TEXT NOT NULL,
-                body TEXT NOT NULL
-            )
-        ''')
+        # IT-21 stored the whole synthetic history under one shared task_id,
+        # which the history tab would list as a single giant run. It is
+        # synthetic — drop it; the next demo start back-fills per-day runs.
+        conn.execute("DELETE FROM demo_scan_data WHERE task_id = 'demo-history'")
         conn.commit()
         _initialised.add(path)
     return conn
@@ -85,10 +75,16 @@ def _connect() -> sqlite3.Connection:
 
 def _has_tables(conn: sqlite3.Connection) -> bool:
     n = conn.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
-        "AND name IN ('demo_scan_data', 'demo_notifications')"
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'demo_scan_data'"
     ).fetchone()[0]
-    return n == 2
+    return n == 1
+
+
+def db_path() -> str:
+    """Path of the demo DB, with its table guaranteed to exist — an empty demo
+    DB reads as no rows, not as an error."""
+    _connect().close()
+    return DB_PATH
 
 
 # ── Script + synthesis ───────────────────────────────────────────────────────
@@ -144,28 +140,43 @@ def save_scan(task_id: str, bed_key: str, location_id: str, scenario: str,
     return data, valid
 
 
-def ensure_history(bed_keys: Iterable[str], cfg: dict | None = None) -> None:
+def history_task_id(ts) -> str:
+    """Real-format run id (YYYYMMDDHHMMSS-xxxxxx) for one synthetic history
+    day, stable per day, so the history tab lists each day as its own run."""
+    suffix = hashlib.sha1(f"demo-history:{ts.date().isoformat()}".encode()).hexdigest()[:6]
+    return f"{ts.strftime('%Y%m%d%H%M%S')}-{suffix}"
+
+
+def ensure_history(beds: Iterable[dict], cfg: dict | None = None) -> None:
     """Back-fill one normal reading per seat per day for the last 30 days
-    (ARCH-034). Today's point is the demo run itself, so the abnormal seat's
-    history is normal except today and the absent seat's history is normal.
-    Fixed seed per (seat, day) and skip-if-present → idempotent."""
+    (ARCH-034). ``beds``: {bed_key, location_id} per seat. Today's point is the
+    demo run itself, so the abnormal seat's history is normal except today and
+    the absent seat's history is normal. Each day is one run at 10:00 across
+    every seat. Fixed seed per (seat, day) and skip-if-present → idempotent."""
     if cfg is None:
         from settings.config import get_runtime_settings
         cfg = get_runtime_settings()
     base = get_now().replace(hour=10, minute=0, second=0, microsecond=0)
     conn = _connect()
-    for bed_key in bed_keys:
-        have = {
+    beds = list(beds)
+    have = {
+        bed["bed_key"]: {
             r[0] for r in conn.execute(
                 "SELECT substr(timestamp, 1, 10) FROM demo_scan_data "
-                "WHERE task_id = ? AND bed_name = ?",
-                (HISTORY_TASK_ID, bed_key),
+                "WHERE scenario = 'history' AND bed_name = ?",
+                (bed["bed_key"],),
             )
         }
-        for days_ago in range(HISTORY_DAYS, 0, -1):
-            ts = base - timedelta(days=days_ago)
-            day = ts.date().isoformat()
-            if day in have:
+        for bed in beds
+    }
+    # Day-major, like real runs: ids follow time, so the history tab's
+    # ORDER BY id DESC LIMIT drops the oldest days, not whole seats.
+    for days_ago in range(HISTORY_DAYS, 0, -1):
+        ts = base - timedelta(days=days_ago)
+        day = ts.date().isoformat()
+        for bed in beds:
+            bed_key = bed["bed_key"]
+            if day in have[bed_key]:
                 continue
             rec = synth_record("normal", cfg, random.Random(f"{bed_key}:{day}"))
             conn.execute('''
@@ -174,39 +185,14 @@ def ensure_history(bed_keys: Iterable[str], cfg: dict | None = None) -> None:
                  data_json, is_valid, details, scenario)
                 VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, 1, '量測正常', 'history')
             ''', (
-                HISTORY_TASK_ID, "", bed_key, ts.isoformat(),
+                history_task_id(ts), bed.get("location_id") or "", bed_key, ts.isoformat(),
                 rec["status"], rec["bpm"], rec["rpm"], json.dumps(rec),
             ))
     conn.commit()
     conn.close()
 
 
-def seat_state(row: dict, cfg: dict) -> str:
-    """normal / abnormal / absent for one stored demo reading — the same rules
-    the evaluators apply (invalid → 偵測不到人, valid out of band → alert)."""
-    if not row.get("is_valid"):
-        return "absent"
-    if vitals_out_of_band(row.get("bpm") or 0, row.get("rpm") or 0, cfg):
-        return "abnormal"
-    return "normal"
-
-
-# ── Notifications preview ────────────────────────────────────────────────────
-
-def save_notification(event: AnomalyEvent) -> None:
-    conn = _connect()
-    conn.execute('''
-        INSERT INTO demo_notifications (task_id, timestamp, severity, source, bed_key, title, body)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        event.task_id, event.timestamp.isoformat(), event.severity.value,
-        event.source.value, event.bed_key, display_title(event), event.body,
-    ))
-    conn.commit()
-    conn.close()
-
-
-# ── Reads (for /api/demo/* and the run summary) ─────────────────────────────
+# ── Reads (for the run summary) ─────────────────────────────────────────────
 
 def scan_rows(task_id: str) -> list[dict]:
     conn = _connect()
@@ -215,43 +201,3 @@ def scan_rows(task_id: str) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
-
-
-def latest_run_task_id() -> str | None:
-    conn = _connect()
-    row = conn.execute(
-        "SELECT task_id FROM demo_scan_data WHERE task_id != ? ORDER BY id DESC LIMIT 1",
-        (HISTORY_TASK_ID,),
-    ).fetchone()
-    conn.close()
-    return row[0] if row else None
-
-
-def history_rows(bed_key: str, days: int = HISTORY_DAYS) -> list[dict]:
-    midnight = get_now().replace(hour=0, minute=0, second=0, microsecond=0)
-    since = (midnight - timedelta(days=days)).isoformat()
-    conn = _connect()
-    rows = conn.execute(
-        "SELECT task_id, timestamp, status, bpm, rpm, is_valid, scenario FROM demo_scan_data "
-        "WHERE bed_name = ? AND timestamp >= ? ORDER BY timestamp",
-        (bed_key, since),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def notification_rows(task_id: str | None) -> tuple[str | None, list[dict]]:
-    """Preview items for one run; ``task_id=None`` → the most recent run."""
-    conn = _connect()
-    if task_id is None:
-        row = conn.execute(
-            "SELECT task_id FROM demo_notifications ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        task_id = row[0] if row else None
-    rows = conn.execute(
-        "SELECT timestamp, severity, source, bed_key, title, body FROM demo_notifications "
-        "WHERE task_id = ? ORDER BY id",
-        (task_id,),
-    ).fetchall() if task_id else []
-    conn.close()
-    return task_id, [dict(r) for r in rows]

@@ -1,6 +1,11 @@
 // Data Service Layer - Kachaka Care Command Center
 // Unified interface for all backend API calls
 
+// /demo serves this same SPA: every request then asks for the synthetic demo
+// data (X-Bio-Data: demo). Set before any request goes out.
+const IS_DEMO_VIEW = location.pathname === '/demo' || location.pathname === '/demo/';
+if (IS_DEMO_VIEW) axios.defaults.headers.common['X-Bio-Data'] = 'demo';
+
 class DataService {
   constructor() {
     this.robotId = 'kachaka';
