@@ -22,6 +22,14 @@
     return latest.out_of_band ? BED_STATE.ABNORMAL : BED_STATE.VALID;
   }
 
+  // Wisleep sensor status, in operator terms.
+  const SENSOR_STATUS_TEXT = { 4: '穩定讀值', 2: '躁動', 0: '沒有資料' };
+
+  function sensorStatusText(status) {
+    if (status == null) return '--';
+    return SENSOR_STATUS_TEXT[status] ?? `status=${status}`;
+  }
+
   function formatRelativeTime(timestamp, now = Date.now()) {
     if (!timestamp) return '--';
     const ts = Date.parse(timestamp);
@@ -46,7 +54,7 @@
     if (state === BED_STATE.UNSCHEDULED) {
       ts = '未排程';
     } else if (state === BED_STATE.INVALID && latest) {
-      extra = latest.details || (latest.status != null ? `status=${latest.status}` : '');
+      extra = latest.details || (latest.status != null ? sensorStatusText(latest.status) : '');
       ts = `${formatRelativeTime(latest.timestamp, now)} 失敗`;
     } else if (latest) {
       vit = `${latest.bpm ?? '--'}/${latest.rpm ?? '--'}`;
@@ -276,7 +284,7 @@
     body.innerHTML = perRun.map(d => `
       <div class="drawer-row drawer-row--${d.is_valid ? 'valid' : 'invalid'}">
         <div class="drawer-row__time">${new Date(d.timestamp).toLocaleString()}</div>
-        <div class="drawer-row__vit">BPM ${d.bpm ?? '--'} · RPM ${d.rpm ?? '--'} · status=${d.status ?? '--'}</div>
+        <div class="drawer-row__vit">BPM ${d.bpm ?? '--'} · RPM ${d.rpm ?? '--'} · ${sensorStatusText(d.status)}</div>
         ${d.details ? `<div class="drawer-row__detail">${d.details}</div>` : ''}
       </div>
     `).join('') + (_drawer.done ? '<p class="drawer-hint" id="bed-drawer-end">已載入至最舊紀錄</p>' : '');
@@ -417,6 +425,7 @@
     refreshConfig,
     classifyBedState,
     formatRelativeTime,
+    sensorStatusText,
     renderBedCard,
     renderBedGrid,
     toggleRoom,

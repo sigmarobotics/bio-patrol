@@ -43,6 +43,12 @@ test.describe('bedGrid pure functions (via page.evaluate)', () => {
     expect(result).toBe('invalid');
   });
 
+  test('sensorStatusText — 4/2/0 in operator terms, others keep the code', async ({ page }) => {
+    const result = await page.evaluate(() =>
+      [4, 2, 0, 3, null].map(s => window.bedGrid.sensorStatusText(s)));
+    expect(result).toEqual(['穩定讀值', '躁動', '沒有資料', 'status=3', '--']);
+  });
+
   test('classifyBedState — Abnormal (recent valid reading flagged out_of_band)', async ({ page }) => {
     const result = await page.evaluate(() => {
       const now = new Date('2026-05-01T12:00:00Z').getTime();
