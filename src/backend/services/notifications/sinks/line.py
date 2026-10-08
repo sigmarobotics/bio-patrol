@@ -17,6 +17,8 @@ class LineSink:
         return bool(get_runtime_settings().get("enable_line", False))
 
     async def send(self, event: AnomalyEvent) -> None:
+        if event.demo:
+            return  # IT-21: synthetic demo data never goes out on LINE
         targets = await self._resolver.resolve(event, channel="line")
         if not targets:
             return

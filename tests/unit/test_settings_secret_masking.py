@@ -22,6 +22,7 @@ def settings_file(monkeypatch, tmp_path):
         "mqtt_password": "sigmabot",
         "line_channel_access_token": "",
         "mqtt_tls_key": "wisleep-key/sigmabot.key",
+        "demo_telegram_bot_token": "9876543210:DEMOSECRET",
     }), encoding="utf-8")
     monkeypatch.setattr(settings_router, "SETTINGS_FILE", str(path))
     monkeypatch.setattr("settings.config.SETTINGS_FILE", str(path))
@@ -106,3 +107,10 @@ def test_post_response_is_masked_too(settings_file):
     res = _post({"telegram_bot_token": "9999999999:NEWTOKEN"})
 
     assert res["data"]["telegram_bot_token"] == "••••OKEN"
+
+
+def test_demo_bot_token_is_masked_and_survives_a_masked_round_trip(settings_file):
+    """IT-21: the demo Telegram bot token is a credential like the real one."""
+    assert _get()["demo_telegram_bot_token"] == "••••CRET"
+    _post({"demo_telegram_bot_token": "••••CRET"})
+    assert settings_file()["demo_telegram_bot_token"] == "9876543210:DEMOSECRET"

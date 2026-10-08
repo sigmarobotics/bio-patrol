@@ -17,6 +17,7 @@ from utils.json_io import load_json, save_json
 from common_types import (
     StepAction, StepStatus, Task, TaskStatus, TaskStep, generate_task_id,
 )
+from services import demo_data
 from services.fleet_api import RobotNotRegistered
 from services.sounds import sound_path, wav_seconds
 from services.task_runtime import clear_shelf_dropped_tasks, submit_task, tasks_db
@@ -115,18 +116,22 @@ async def set_demo_preset(name: str):
 
 def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
                        final_wait_seconds: int = 5,
-                       arrival_voice: bool = False) -> List[TaskStep]:
+                       arrival_voice: bool = False,
+                       demo_dwell_seconds: float = 15) -> List[TaskStep]:
     """Build a reset_shelf_pose + (move_shelf -> action -> ...)+ + return_shelf list.
 
     `beds`: ordered list of {bed_key, location_id} for the run. Empty/invalid
             entries are skipped silently (resume_patrol may carry partial dicts).
-    `mode`: "demo" -> action is wait(5s); "patrol" -> bio_scan.
-    `final_wait_seconds`: demo only — dwell at the LAST bed (site demos park the
-            robot at the endpoint for the audience before auto-returning).
+    `mode`: "demo" -> action is demo_scan (IT-21 synthetic scan, scenario by
+            route order); "patrol" -> bio_scan.
+    `final_wait_seconds`: demo only — extends the dwell at the LAST bed (site
+            demos park the robot at the endpoint for the audience before
+            auto-returning); it never shortens it below the regular dwell.
     `arrival_voice`: insert a play_sound step on arrival at each bed. play_sound
             is fire-and-forget, so the bio_scan starts while the clip plays; in
-            demo mode there is no scan, so each dwell is stretched to outlast
-            the clip instead.
+            demo mode the robot only waits out the synthetic scan, so each
+            dwell is stretched to outlast the clip instead.
+    `demo_dwell_seconds`: demo only — how long each seat shows 量測中.
 
     The shelf sits at its home whenever a run starts, so the run opens by
     resetting the robot's shelf-pose estimate — a drifted estimate is what
@@ -134,7 +139,7 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
     """
     steps: List[TaskStep] = []
     counter = 0
-    # Demo has no bio_scan to cover the clip, so the dwell has to outlast it.
+    # A demo dwell is a timed wait, so it has to outlast the clip.
     clip_dwell = (
         wav_seconds(sound_path(ARRIVAL_SOUND)) + 0.5
         if arrival_voice and mode == "demo" else 0.0
@@ -165,8 +170,13 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
         if mode == "demo":
             steps.append(TaskStep(
                 step_id=action_id,
-                action=StepAction.WAIT.value,
-                params={"seconds": max(5, clip_dwell) if arrival_voice else 5},
+                action=StepAction.DEMO_SCAN.value,
+                params={
+                    "bed_key": bed_key,
+                    "location_id": location_id,
+                    "scenario": demo_data.scenario_for(counter),
+                    "seconds": max(demo_dwell_seconds, clip_dwell),
+                },
                 status=StepStatus.PENDING,
             ))
         else:
@@ -180,10 +190,10 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
 
     if steps:
         if mode == "demo":
-            steps[-1].params = {
-                "seconds": max(final_wait_seconds, clip_dwell) if arrival_voice
-                else final_wait_seconds
-            }
+            # Only the dwell changes — the last seat keeps its scan params.
+            steps[-1].params["seconds"] = max(
+                demo_dwell_seconds, final_wait_seconds, clip_dwell
+            )
         steps.insert(0, TaskStep(
             step_id="reset_shelf",
             action=StepAction.RESET_SHELF_POSE.value,
@@ -229,8 +239,8 @@ def _robot_offline(cfg: dict) -> bool:
 
 @router.post("/patrol/start")
 async def start_patrol(req: PatrolStartRequest):
-    """Start a patrol run. Demo mode loads the demo_preset (if any) and uses
-    wait(5s) per bed instead of bio_scan."""
+    """Start a patrol run. Demo mode loads the demo_preset (if any) and runs a
+    synthetic demo_scan per bed instead of bio_scan (IT-21)."""
     cfg = get_runtime_settings()
     shelf_id = cfg.get("shelf_id", "S_04")
 
@@ -307,7 +317,14 @@ async def start_patrol(req: PatrolStartRequest):
         beds, shelf_id, mode=req.mode,
         final_wait_seconds=cfg.get("demo_final_wait_seconds", 5),
         arrival_voice=cfg.get("arrival_voice_enabled", False),
+        demo_dwell_seconds=cfg.get("demo_dwell_seconds", 15),
     )
+    if req.mode == "demo":
+        # The /demo panel's seat drawer shows a 30-day synthetic trend.
+        try:
+            demo_data.ensure_history([b["bed_key"] for b in beds], cfg)
+        except Exception:
+            logger.exception("Demo history back-fill failed — demo run continues")
 
     task = Task(
         task_id=generate_task_id(),

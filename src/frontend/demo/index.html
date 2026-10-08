@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Served at /demo/: resolve every relative URL (ours and mapView.js's
+       sprite / fallback map) from the site root. -->
+  <base href="/">
+  <title>生理量測 Demo | Sigma Robotics</title>
+  <link rel="stylesheet" href="css/style.css?v=3">
+  <link rel="stylesheet" href="css/demo.css?v=1">
+  <link rel="icon" href="assets/logo.png" type="image/png">
+</head>
+<body class="demo-body">
+
+  <!-- Always-visible watermark: everything on this page is synthetic. -->
+  <div class="demo-watermark" aria-hidden="true">
+    <span>DEMO・合成資料</span><span>DEMO・合成資料</span><span>DEMO・合成資料</span>
+  </div>
+
+  <div class="demo-app">
+    <header class="glass-header demo-header">
+      <div class="logo"><img src="assets/logo.png" alt="Sigma Robotics" class="logo-icon">生理量測巡房</div>
+      <div class="demo-header-right">
+        <span class="demo-badge" id="demo-badge">DEMO・合成資料</span>
+        <span class="status-item">
+          <span class="label">Robot</span>
+          <span class="value" id="demo-robot-state">--</span>
+        </span>
+      </div>
+    </header>
+
+    <div class="demo-banner demo-banner--offline" id="demo-disconnect-banner" hidden>
+      <span class="demo-banner-dot"></span>連線中斷，等待機器人回應
+    </div>
+    <div class="demo-banner demo-banner--alert" id="demo-alert-banner" hidden></div>
+
+    <main class="demo-main">
+      <section class="demo-seats-panel">
+        <div class="demo-panel-head">
+          <h2 id="demo-seats-title">座位量測</h2>
+          <span class="demo-idle-hint" id="demo-idle-hint" hidden>按下 Demo Run 開始</span>
+        </div>
+        <div class="demo-seats" id="demo-seats"></div>
+        <p class="demo-empty" id="demo-empty" hidden>尚無 Demo 紀錄 — 按下 Demo Run 開始</p>
+      </section>
+
+      <aside class="demo-side">
+        <section class="demo-map-panel">
+          <div class="demo-panel-head">
+            <h2>機器人位置</h2>
+            <span class="demo-progress-text" id="demo-progress-text">0 / 0</span>
+          </div>
+          <div class="demo-progress"><div class="demo-progress-bar" id="demo-progress-bar"></div></div>
+          <div class="demo-map-wrap"><canvas id="demo-map-canvas"></canvas></div>
+        </section>
+
+        <section class="demo-notify-panel">
+          <div class="demo-panel-head">
+            <h2>通報預覽</h2>
+            <span class="demo-notify-channel">Telegram</span>
+          </div>
+          <div class="demo-chat" id="demo-chat">
+            <p class="demo-chat-empty">尚無通報</p>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Seat drawer: synthetic 30-day trend -->
+  <div class="demo-drawer" id="demo-drawer" hidden>
+    <div class="demo-drawer-backdrop" id="demo-drawer-backdrop"></div>
+    <aside class="demo-drawer-panel">
+      <header class="demo-drawer-header">
+        <span class="demo-drawer-title" id="demo-drawer-title">座位 —</span>
+        <button class="demo-drawer-close" id="demo-drawer-close" aria-label="Close">×</button>
+      </header>
+      <div class="demo-drawer-body" id="demo-drawer-body"></div>
+    </aside>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <script src="js/dataService.js?v=3"></script>
+  <script src="js/demo.js?v=1"></script>
+  <script src="js/mapView.js?v=1"></script>
+</body>
+</html>

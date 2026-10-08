@@ -38,3 +38,15 @@ class AnomalyEvent:
     bed_key: str | None = None
     task_id: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    # IT-21: synthetic demo data — Telegram prefixes it, MQTT egress and LINE
+    # drop it, and the /demo panel's preview store keeps it.
+    demo: bool = False
+
+
+DEMO_TITLE_PREFIX = "🧪 DEMO・合成資料"
+
+
+def display_title(event: AnomalyEvent) -> str:
+    """Title as the operator sees it — shared by TelegramSink and the demo
+    preview store so the panel shows exactly what Telegram received."""
+    return f"{DEMO_TITLE_PREFIX} {event.title}" if event.demo else event.title

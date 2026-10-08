@@ -36,10 +36,14 @@ async def aclose_client() -> None:
     _client = None
 
 
-async def send_telegram_message(message: str, chat_id: str | None = None):
+async def send_telegram_message(message: str, chat_id: str | None = None,
+                                bot_token: str | None = None):
     """Send a Telegram message if enabled in runtime settings.
 
     chat_id: optional override; defaults to settings.telegram_user_id.
+    bot_token: optional override (IT-21 demo bot) — sent straight to the
+    Telegram API with this token, never through the hub (the hub owns only
+    the real bot).
     When notify_hub_url + notify_hub_token are both set, the message is
     relayed through the cloud hub's /api/notify instead of calling the
     Telegram API directly — the hub owns the bot token.
@@ -55,7 +59,7 @@ async def send_telegram_message(message: str, chat_id: str | None = None):
 
         hub_url = (cfg.get("notify_hub_url") or "").rstrip("/")
         hub_token = cfg.get("notify_hub_token") or ""
-        if hub_url and hub_token:
+        if hub_url and hub_token and not bot_token:
             payload = {"text": message, "source": "bio-patrol", "parse_mode": "HTML"}
             if effective_chat_id:
                 payload["chat_id"] = str(effective_chat_id)
@@ -70,7 +74,7 @@ async def send_telegram_message(message: str, chat_id: str | None = None):
                 logger.warning(f"Hub notify returned {resp.status_code}: {resp.text}")
             return
 
-        token = cfg.get("telegram_bot_token", "")
+        token = bot_token or cfg.get("telegram_bot_token", "")
 
         if not token or not effective_chat_id:
             logger.warning("Telegram enabled but bot_token or chat_id not set")

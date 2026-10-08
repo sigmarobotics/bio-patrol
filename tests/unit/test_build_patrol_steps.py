@@ -33,13 +33,30 @@ def test_patrol_mode_emits_move_then_bio_scan_per_bed_then_return_shelf():
         assert move.skip_on_failure == [bio.step_id]
 
 
-def test_demo_mode_uses_wait_5s_instead_of_bio_scan():
+def test_demo_mode_uses_demo_scan_instead_of_bio_scan():
+    """IT-21: each seat runs a synthetic scan — never bio_scan, never a bare wait."""
     steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo")
-    actions = [s.action for s in steps]
-    assert StepAction.BIO_SCAN.value not in actions
-    wait_steps = [s for s in steps if s.action == StepAction.WAIT.value]
-    assert len(wait_steps) == 2
-    assert all(s.params["seconds"] == 5 for s in wait_steps)
+    assert [s.action for s in steps] == [
+        StepAction.RESET_SHELF_POSE.value,
+        StepAction.MOVE_SHELF.value, StepAction.DEMO_SCAN.value,
+        StepAction.MOVE_SHELF.value, StepAction.DEMO_SCAN.value,
+        StepAction.RETURN_SHELF.value,
+    ]
+    scans = [s for s in steps if s.action == StepAction.DEMO_SCAN.value]
+    assert [s.params for s in scans] == [
+        {"bed_key": "101-1", "location_id": "loc-101-1", "scenario": "normal", "seconds": 15},
+        {"bed_key": "101-2", "location_id": "loc-101-2", "scenario": "abnormal", "seconds": 15},
+    ]
+    move_steps = [s for s in steps if s.action == StepAction.MOVE_SHELF.value]
+    for move, scan in zip(move_steps, scans):
+        assert move.skip_on_failure == [scan.step_id]
+
+
+def test_demo_dwell_seconds_sets_every_seat():
+    steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
+                               demo_dwell_seconds=20)
+    scans = [s for s in steps if s.action == StepAction.DEMO_SCAN.value]
+    assert [s.params["seconds"] for s in scans] == [20, 20]
 
 
 def test_empty_beds_emits_no_steps_and_no_dangling_return_shelf():
@@ -92,11 +109,23 @@ def test_final_return_shelf_carries_shelf_id():
     assert last.params == {"shelf_id": "S_04"}
 
 
-def test_demo_mode_final_wait_overrides_last_bed_only():
+def test_demo_mode_final_wait_extends_last_bed_only():
     steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
                                final_wait_seconds=300)
-    wait_steps = [s for s in steps if s.action == StepAction.WAIT.value]
-    assert [s.params["seconds"] for s in wait_steps] == [5, 300]
+    scans = [s for s in steps if s.action == StepAction.DEMO_SCAN.value]
+    assert [s.params["seconds"] for s in scans] == [15, 300]
+    # Only the dwell changes — the last seat still carries its scan params.
+    assert scans[-1].params["bed_key"] == "101-2"
+    assert scans[-1].params["scenario"] == "abnormal"
+
+
+def test_demo_mode_short_final_wait_never_cuts_the_last_scan():
+    """final_wait_seconds only ever lengthens the last dwell (延長邏輯): the
+    default 5s must not shorten the last seat's 15s synthetic scan."""
+    steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
+                               final_wait_seconds=5)
+    scans = [s for s in steps if s.action == StepAction.DEMO_SCAN.value]
+    assert [s.params["seconds"] for s in scans] == [15, 15]
 
 
 def test_patrol_mode_ignores_final_wait_seconds():
@@ -137,14 +166,49 @@ def test_demo_arrival_voice_stretches_each_dwell_past_the_clip(monkeypatch):
     mid-sentence unless the dwell outlasts it."""
     monkeypatch.setattr("routers.patrol.wav_seconds", lambda path: 5.36)
     steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
+                               arrival_voice=True, demo_dwell_seconds=3)
+    scans = [s for s in steps if s.action == StepAction.DEMO_SCAN.value]
+    assert [s.params["seconds"] for s in scans] == [5.86, 5.86]
+
+
+def test_demo_arrival_voice_shorter_than_dwell_keeps_the_dwell(monkeypatch):
+    monkeypatch.setattr("routers.patrol.wav_seconds", lambda path: 5.36)
+    steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
                                arrival_voice=True)
-    wait_steps = [s for s in steps if s.action == StepAction.WAIT.value]
-    assert [s.params["seconds"] for s in wait_steps] == [5.86, 5.86]
+    scans = [s for s in steps if s.action == StepAction.DEMO_SCAN.value]
+    assert [s.params["seconds"] for s in scans] == [15, 15]
 
 
 def test_demo_arrival_voice_keeps_a_longer_final_wait(monkeypatch):
     monkeypatch.setattr("routers.patrol.wav_seconds", lambda path: 5.36)
     steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
-                               final_wait_seconds=30, arrival_voice=True)
-    wait_steps = [s for s in steps if s.action == StepAction.WAIT.value]
-    assert [s.params["seconds"] for s in wait_steps] == [5.86, 30]
+                               final_wait_seconds=30, arrival_voice=True,
+                               demo_dwell_seconds=3)
+    scans = [s for s in steps if s.action == StepAction.DEMO_SCAN.value]
+    assert [s.params["seconds"] for s in scans] == [5.86, 30]
+
+
+# ── IT-21: the real patrol build is locked byte-for-byte ─────────────────────
+
+_PATROL_DUMP = [
+    {"step_id": "reset_shelf", "action": "reset_shelf_pose", "params": {"shelf_id": "S_04"},
+     "status": StepStatus.PENDING, "result": None, "skip_on_failure": None},
+    {"step_id": "move_0", "action": "move_shelf",
+     "params": {"shelf_id": "S_04", "location_id": "loc-101-1"},
+     "status": StepStatus.PENDING, "result": None, "skip_on_failure": ["action_0"]},
+    {"step_id": "action_0", "action": "bio_scan", "params": {"bed_key": "101-1"},
+     "status": StepStatus.PENDING, "result": None, "skip_on_failure": None},
+    {"step_id": "move_1", "action": "move_shelf",
+     "params": {"shelf_id": "S_04", "location_id": "loc-101-2"},
+     "status": StepStatus.PENDING, "result": None, "skip_on_failure": ["action_1"]},
+    {"step_id": "action_1", "action": "bio_scan", "params": {"bed_key": "101-2"},
+     "status": StepStatus.PENDING, "result": None, "skip_on_failure": None},
+    {"step_id": "return_2", "action": "return_shelf", "params": {"shelf_id": "S_04"},
+     "status": StepStatus.PENDING, "result": None, "skip_on_failure": None},
+]
+
+
+def test_patrol_build_is_unchanged_by_the_demo_settings():
+    steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="patrol",
+                               final_wait_seconds=300, demo_dwell_seconds=42)
+    assert [s.model_dump() for s in steps] == _PATROL_DUMP

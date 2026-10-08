@@ -21,3 +21,11 @@ def _reset_lifespan_state():
     yield
     lifespan_state._register_retry_tasks.clear()
     lifespan_state._worker_tasks.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_demo_db(monkeypatch, tmp_path):
+    """IT-21: any code path that writes demo data (a demo patrol start back-fills
+    the synthetic history) must hit a temp file, never data/demo_data.db."""
+    from services import demo_data
+    monkeypatch.setattr(demo_data, "DB_PATH", str(tmp_path / "demo_data.db"))

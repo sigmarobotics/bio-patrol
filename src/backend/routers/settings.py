@@ -70,6 +70,7 @@ SECRET_KEYS = (
     "line_channel_access_token",
     "line_webhook_api_key",
     "gemini_api_key",
+    "demo_telegram_bot_token",
 )
 MASK_PREFIX = "••••"
 # Below this length a 4-char tail gives away half the credential or more
