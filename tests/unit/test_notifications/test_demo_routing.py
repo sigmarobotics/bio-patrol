@@ -1,17 +1,13 @@
 """IT-21 FEAT-026 / CORNER-064: demo events reach Telegram (prefixed, optional
-demo bot/chat) and the panel's preview store — never MQTT egress or LINE."""
+demo bot/chat) — never MQTT egress or LINE."""
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
-from services import demo_data, telegram_service
+from services import telegram_service
 from services.notifications.dispatcher import AnomalyDispatcher
 from services.notifications.events import AnomalyEvent, Severity, Source
-from services.notifications.sinks.demo_preview import DemoPreviewSink
 from services.notifications.sinks.line import LineSink
 from services.notifications.sinks.mqtt import MqttSink
 from services.notifications.sinks.telegram import TelegramSink
@@ -41,13 +37,6 @@ def _tg_settings(**overrides):
     base.update(overrides)
     return patch("services.notifications.sinks.telegram.get_runtime_settings",
                  return_value=base)
-
-
-@pytest.fixture
-def demo_db(monkeypatch, tmp_path):
-    path = str(tmp_path / "demo_data.db")
-    monkeypatch.setattr(demo_data, "DB_PATH", path)
-    return path
 
 
 # ── Telegram ────────────────────────────────────────────────────────────────
@@ -128,36 +117,15 @@ def test_line_sink_skips_demo_events():
         send.assert_awaited_once()
 
 
-# ── Preview store ───────────────────────────────────────────────────────────
+# ── Dispatcher fan-out ──────────────────────────────────────────────────────
 
-def _preview_rows(path):
-    conn = sqlite3.connect(path)
-    rows = conn.execute(
-        "SELECT task_id, title, body, source, bed_key FROM demo_notifications ORDER BY id"
-    ).fetchall()
-    conn.close()
-    return rows
-
-
-def test_preview_sink_stores_demo_events_exactly_as_telegram_titles_them(demo_db):
-    sink = DemoPreviewSink()
-    assert asyncio.run(sink.is_enabled()) is True
-    asyncio.run(sink.send(_event()))
-    asyncio.run(sink.send(_event(demo=False)))
-    assert _preview_rows(demo_db) == [(
-        "20261008100000-demo01", f"{PREFIX} ⚠️ S2 心跳呼吸異常",
-        "床位：S2\n心跳：132 次／分", "vitals_out_of_band", "S2",
-    )]
-
-
-def test_dispatcher_fans_a_demo_event_to_telegram_and_preview_only(demo_db):
+def test_dispatcher_fans_a_demo_event_to_telegram_only():
     shared = MagicMock()
     shared.publish = AsyncMock(return_value=True)
     d = AnomalyDispatcher()
     d.register(TelegramSink(_Static(["111"])))
     d.register(LineSink(_Static(["Cgroup"])))
     d.register(MqttSink(zigbee_mqtt=shared))
-    d.register(DemoPreviewSink())
 
     async def _run():
         await d.dispatch(_event())
@@ -177,4 +145,3 @@ def test_dispatcher_fans_a_demo_event_to_telegram_and_preview_only(demo_db):
     assert tg.await_count == 1
     line.assert_not_awaited()
     shared.publish.assert_not_awaited()
-    assert len(_preview_rows(demo_db)) == 1

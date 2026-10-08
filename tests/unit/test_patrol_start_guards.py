@@ -126,6 +126,21 @@ def test_task_carries_mode_metadata(patched):
     assert submitted[0].metadata == {"mode": "demo"}
 
 
+def test_demo_start_backfills_history_with_the_seat_location(patched):
+    """IT-21b: /demo's bed drawer filters on location_id, so the synthetic
+    history must carry each seat's location_id."""
+    import sqlite3
+    from services import demo_data
+
+    _start(mode="demo")
+    conn = sqlite3.connect(demo_data.DB_PATH)
+    rows = conn.execute(
+        "SELECT DISTINCT bed_name, location_id FROM demo_scan_data WHERE scenario = 'history'"
+    ).fetchall()
+    conn.close()
+    assert rows == [("B_101-1", "L_101-1")]
+
+
 def test_unrelated_task_without_metadata_does_not_block(patched):
     """Only patrol-family runs carry a mode. A generic /api/tasks submission has
     none and must not swallow a patrol start via a None == None match. (Scheduled

@@ -320,9 +320,9 @@ async def start_patrol(req: PatrolStartRequest):
         demo_dwell_seconds=cfg.get("demo_dwell_seconds", 15),
     )
     if req.mode == "demo":
-        # The /demo panel's seat drawer shows a 30-day synthetic trend.
+        # /demo's history tab and bed drawer show a 30-day synthetic trend.
         try:
-            demo_data.ensure_history([b["bed_key"] for b in beds], cfg)
+            demo_data.ensure_history(beds, cfg)
         except Exception:
             logger.exception("Demo history back-fill failed — demo run continues")
 

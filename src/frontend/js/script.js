@@ -590,7 +590,8 @@ async function startDemoRun() {
 
 async function startPatrol() {
   try {
-    const res = await dataService.startPatrol('patrol');
+    // A visitor on /demo must never trigger a real measurement.
+    const res = await dataService.startPatrol(IS_DEMO_VIEW ? 'demo' : 'patrol');
     alert(_startedMessage(res, 'Patrol started!'));
   } catch (e) {
     alert('Failed to start patrol: ' + (e.response?.data?.detail || e.message || e));
