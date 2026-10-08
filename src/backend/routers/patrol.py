@@ -4,7 +4,7 @@ import logging
 import os
 from typing import List, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from settings.config import (
@@ -33,18 +33,35 @@ router = APIRouter(prefix="/api", tags=["Patrol"])
 
 # ── Patrol config ────────────────────────────────────────────────────────────
 
+def _route_file(request: Request, *, for_write: bool = False) -> str:
+    """The route file a request edits. The /demo view (``X-Bio-Data: demo``)
+    works on the demo route — the `demo_preset` preset — never patrol.json.
+    With no demo preset yet it reads the real route, and its first write
+    creates one named "demo"."""
+    if request.headers.get("x-bio-data") != "demo":
+        return PATROL_FILE
+    name = get_runtime_settings().get("demo_preset", "")
+    if not name:
+        if not for_write:
+            return PATROL_FILE
+        name = "demo"
+        os.makedirs(PATROL_PRESETS_DIR, exist_ok=True)
+        update_settings(demo_preset=name)
+    return os.path.join(PATROL_PRESETS_DIR, f"{name}.json")
+
+
 @router.get("/patrol")
-async def get_patrol():
+async def get_patrol(request: Request):
     """Return patrol.json (or defaults if empty/missing)."""
-    data = load_json(PATROL_FILE, DEFAULT_PATROL)
+    data = load_json(_route_file(request), DEFAULT_PATROL)
     return data or DEFAULT_PATROL
 
 
 @router.post("/patrol")
-async def save_patrol(body: dict):
+async def save_patrol(body: dict, request: Request):
     """Save patrol.json. beds_order is persisted in caller-supplied order —
     it IS the patrol route (e.g. odd-side rooms first, then even side)."""
-    save_json(PATROL_FILE, body)
+    save_json(_route_file(request, for_write=True), body)
     return {"status": "ok", "data": body}
 
 
@@ -67,25 +84,25 @@ async def list_patrol_presets():
 
 
 @router.post("/patrol/presets/{name}")
-async def save_patrol_preset(name: str):
+async def save_patrol_preset(name: str, request: Request):
     """Save current patrol.json as a named preset."""
     os.makedirs(PATROL_PRESETS_DIR, exist_ok=True)
     safe_name = "".join(c for c in name if c.isalnum() or c in "-_ ").strip()
     if not safe_name:
         raise HTTPException(status_code=400, detail="Invalid preset name")
-    current = load_json(PATROL_FILE, DEFAULT_PATROL)
+    current = load_json(_route_file(request), DEFAULT_PATROL)
     save_json(os.path.join(PATROL_PRESETS_DIR, f"{safe_name}.json"), current)
     return {"status": "ok", "name": safe_name}
 
 
 @router.post("/patrol/presets/{name}/load")
-async def load_patrol_preset(name: str):
+async def load_patrol_preset(name: str, request: Request):
     """Load a named preset into patrol.json."""
     fpath = os.path.join(PATROL_PRESETS_DIR, f"{name}.json")
     data = load_json(fpath, _PRESET_MISSING)
     if data is _PRESET_MISSING:
         raise HTTPException(status_code=404, detail="Preset not found")
-    save_json(PATROL_FILE, data)
+    save_json(_route_file(request, for_write=True), data)
     return {"status": "ok", "data": data}
 
 

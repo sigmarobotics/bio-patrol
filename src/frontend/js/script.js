@@ -1217,7 +1217,7 @@ function renderSensorTable() {
       <td>${d.bed_name || '--'}</td>
       <td>${d.location_id || '--'}</td>
       <td>${d.retry_count ?? '--'}</td>
-      <td>${d.status ?? '--'}</td>
+      <td>${bedGrid.sensorStatusText(d.status)}</td>
       <td>${d.bpm ?? '--'}</td>
       <td>${d.rpm ?? '--'}</td>
       <td class="${validClass}">${d.is_valid ? 'Valid' : 'Invalid'}</td>
