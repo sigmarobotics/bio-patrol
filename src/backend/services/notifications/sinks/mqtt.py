@@ -30,6 +30,9 @@ def _serialize_event(event: AnomalyEvent) -> dict:
     payload = dataclasses.asdict(event)
     # Demo events never reach this sink, so keep the wire format unchanged.
     payload.pop("demo", None)
+    payload.pop("demo_synthetic", None)
+    # Per-bed vitals are a Telegram-only rendering (IT-22); egress stays as is.
+    payload.pop("readings", None)
     payload["timestamp"] = event.timestamp.isoformat()
     # Severity / Source are str-Enums so they round-trip through JSON, but make the
     # wire format explicit values rather than relying on str-enum identity.

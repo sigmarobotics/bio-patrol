@@ -822,6 +822,7 @@ class TaskEngine:
         self._state_watcher_task = asyncio.create_task(self._watch_shelf_state())
         # Captured up front: a shelf drop rewrites task.metadata wholesale.
         is_demo = (task.metadata or {}).get("mode") == "demo"
+        demo_synthetic = (task.metadata or {}).get("demo_synthetic", True)
 
         try:
             step_index = 0
@@ -976,9 +977,17 @@ class TaskEngine:
 
             try:
                 # A demo run's seats are its synthetic demo_scan steps, and
-                # their outcomes live in demo_data.db (IT-21).
-                scan_action = StepAction.DEMO_SCAN if is_demo else StepAction.BIO_SCAN
-                bio_steps = [s for s in task.steps if s.action == scan_action]
+                # their outcomes live in demo_data.db (IT-21). A walk-only
+                # demo's seats are its per-bed waits (IT-22).
+                if is_demo and not demo_synthetic:
+                    scan_action = StepAction.WAIT
+                elif is_demo:
+                    scan_action = StepAction.DEMO_SCAN
+                else:
+                    scan_action = StepAction.BIO_SCAN
+                walk_demo = scan_action == StepAction.WAIT
+                bio_steps = [s for s in task.steps if s.action == scan_action
+                             and (not walk_demo or s.params.get("bed_key"))]
                 total_beds = len(bio_steps)
                 success_beds = sum(1 for s in bio_steps if s.status == StepStatus.SUCCESS)
                 if cancelled:
@@ -987,8 +996,25 @@ class TaskEngine:
                     title = "✅ 巡房完成"
                 else:
                     title = "⚠️ 巡房中斷"
-                buckets = self._run_outcome_buckets(task.task_id, demo=is_demo)
-                if buckets is not None:
+                buckets, readings = None, None
+                if not walk_demo:
+                    outcome = self._run_outcome_buckets(task.task_id, demo=is_demo)
+                    if outcome is not None:
+                        buckets, readings = outcome
+                if walk_demo:
+                    # Nothing is measured — the route and who was reached is
+                    # the whole story.
+                    route = [str(s.params["bed_key"]) for s in bio_steps]
+                    missed = [str(s.params["bed_key"]) for s in bio_steps
+                              if s.status == StepStatus.SKIPPED]
+                    not_executed = sum(1 for s in bio_steps if s.status == StepStatus.PENDING)
+                    body = f"展示路線 {total_beds} 床：{' → '.join(route)}"
+                    if missed:
+                        body += f"\n機器人無法到位 {len(missed)} 床：{'、'.join(missed)}"
+                    if not_executed:
+                        body += f"\n未執行 {not_executed} 床"
+                    body += "\n展示模式不量測"
+                elif buckets is not None:
                     # Same per-bed buckets as the history view: reaching the
                     # bed is the success bar; restless / empty-bed are reports.
                     body = f"本次巡房 {total_beds} 床\n正常量測 {len(buckets['valid'])} 床"
@@ -1026,6 +1052,8 @@ class TaskEngine:
                         "success_beds": success_beds,
                     },
                     demo=is_demo,
+                    demo_synthetic=demo_synthetic,
+                    readings=readings,
                 ))
             except Exception:
                 logger.exception("Failed to dispatch task-summary anomaly")
@@ -1181,13 +1209,15 @@ class TaskEngine:
             self.shelf_drop_event.clear()
         return self._make_result(result, step.action, {"shelf_id": shelf_id})
 
-    def _run_outcome_buckets(self, task_id: str, demo: bool = False) -> Optional[dict]:
-        """Per-bed outcome buckets for one run, from the scan DB.
+    def _run_outcome_buckets(self, task_id: str, demo: bool = False) -> Optional[tuple]:
+        """Per-bed outcome buckets and readings for one run, from the scan DB.
 
         Same classification as the frontend history view: one outcome row per
         bed (the valid row if any, else the final attempt), bucketed into
         valid / restless (status 2) / unreachable (skipped, status 'N/A') /
-        no-reading (everything else). None when the DB can't be read.
+        no-reading (everything else). Returns (buckets, readings) — readings
+        carries [bed, bpm, rpm] for the valid and restless beds (IT-22).
+        None when the DB can't be read.
         ``demo`` reads the synthetic demo_scan_data instead — a demo run never
         has rows in sensor_scan_data.
         """
@@ -1205,7 +1235,7 @@ class TaskEngine:
             conn = connect_db(client.db_path)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT bed_name, status, is_valid, retry_count "
+                "SELECT bed_name, status, is_valid, retry_count, bpm, rpm "
                 "FROM sensor_scan_data WHERE task_id = ?",
                 (task_id,),
             ).fetchall()
@@ -1216,7 +1246,7 @@ class TaskEngine:
         return self._bucket_rows(rows)
 
     @staticmethod
-    def _bucket_rows(rows) -> dict:
+    def _bucket_rows(rows) -> tuple:
         best: Dict[str, Any] = {}
         for r in rows:
             bed = r["bed_name"] or "?"
@@ -1240,7 +1270,11 @@ class TaskEngine:
                 buckets["no_reading"].append(bed)
         for v in buckets.values():
             v.sort()
-        return buckets
+        readings = {
+            k: [[bed, best[bed]["bpm"], best[bed]["rpm"]] for bed in buckets[k]]
+            for k in ("valid", "restless")
+        }
+        return buckets, readings
 
     async def _shelf_dropped_en_route(self, shelf_id: str) -> bool:
         """After a failed return_shelf: did the shelf actually fall off?

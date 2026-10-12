@@ -134,7 +134,8 @@ async def set_demo_preset(name: str):
 def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
                        final_wait_seconds: int = 5,
                        arrival_voice: bool = False,
-                       demo_dwell_seconds: float = 15) -> List[TaskStep]:
+                       demo_dwell_seconds: float = 15,
+                       demo_synthetic: bool = True) -> List[TaskStep]:
     """Build a reset_shelf_pose + (move_shelf -> action -> ...)+ + return_shelf list.
 
     `beds`: ordered list of {bed_key, location_id} for the run. Empty/invalid
@@ -149,6 +150,8 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
             demo mode the robot only waits out the synthetic scan, so each
             dwell is stretched to outlast the clip instead.
     `demo_dwell_seconds`: demo only — how long each seat shows 量測中.
+    `demo_synthetic`: demo only — False makes a walk-only demo (IT-22, 板榮):
+            a 5s wait per bed instead of demo_scan, no data and no alerts.
 
     The shelf sits at its home whenever a run starts, so the run opens by
     resetting the robot's shelf-pose estimate — a drifted estimate is what
@@ -184,7 +187,14 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
                 params={"sound_name": ARRIVAL_SOUND},
                 status=StepStatus.PENDING,
             ))
-        if mode == "demo":
+        if mode == "demo" and not demo_synthetic:
+            steps.append(TaskStep(
+                step_id=action_id,
+                action=StepAction.WAIT.value,
+                params={"bed_key": bed_key, "seconds": max(5, clip_dwell)},
+                status=StepStatus.PENDING,
+            ))
+        elif mode == "demo":
             steps.append(TaskStep(
                 step_id=action_id,
                 action=StepAction.DEMO_SCAN.value,
@@ -206,7 +216,9 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
         counter += 1
 
     if steps:
-        if mode == "demo":
+        if mode == "demo" and not demo_synthetic:
+            steps[-1].params["seconds"] = max(final_wait_seconds, clip_dwell)
+        elif mode == "demo":
             # Only the dwell changes — the last seat keeps its scan params.
             steps[-1].params["seconds"] = max(
                 demo_dwell_seconds, final_wait_seconds, clip_dwell
@@ -330,13 +342,15 @@ async def start_patrol(req: PatrolStartRequest):
     except Exception as e:
         logger.warning(f"Battery check failed, starting patrol anyway: {e}")
 
+    demo_synthetic = bool(cfg.get("demo_synthetic", False))
     steps = build_patrol_steps(
         beds, shelf_id, mode=req.mode,
         final_wait_seconds=cfg.get("demo_final_wait_seconds", 5),
         arrival_voice=cfg.get("arrival_voice_enabled", False),
         demo_dwell_seconds=cfg.get("demo_dwell_seconds", 15),
+        demo_synthetic=demo_synthetic,
     )
-    if req.mode == "demo":
+    if req.mode == "demo" and demo_synthetic:
         # /demo's history tab and bed drawer show a 30-day synthetic trend.
         try:
             demo_data.ensure_history(beds, cfg)
@@ -348,7 +362,7 @@ async def start_patrol(req: PatrolStartRequest):
         robot_id="kachaka",
         steps=steps,
         status=TaskStatus.QUEUED,
-        metadata={"mode": req.mode},
+        metadata={"mode": req.mode, **({"demo_synthetic": demo_synthetic} if req.mode == "demo" else {})},
     )
     tasks_db[task.task_id] = task
     await submit_task(task)

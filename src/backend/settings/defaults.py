@@ -65,6 +65,9 @@ DEFAULT_SETTINGS = {
     "demo_final_wait_seconds": 5,
     # IT-21: demo run 每座位「量測中」停留秒數（仍不短於到床語音長度）。
     "demo_dwell_seconds": 15,
+    # IT-22: demo run 是否跑合成量測（正常→異常→人不在，新民開）。關＝只走不量：
+    # 每床停 5 秒、最後一床停 demo_final_wait_seconds，不產任何量測資料與通報。
+    "demo_synthetic": False,
     # IT-21: 心跳呼吸閾值警示。正式巡房只在開關打開時評估（新民開、其他站點維持關）；
     # demo 一律評估。閾值為開區間外才觸發：恰好等於上下限不算異常。
     "vitals_alert_enabled": False,

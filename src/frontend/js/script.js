@@ -1286,6 +1286,7 @@ const SETTINGS_MAP = [
   { id: 'setting-vitals-hr-high', key: 'vitals_hr_high', type: 'number' },
   { id: 'setting-vitals-rr-low', key: 'vitals_rr_low', type: 'number' },
   { id: 'setting-vitals-rr-high', key: 'vitals_rr_high', type: 'number' },
+  { id: 'setting-demo-synthetic', key: 'demo_synthetic', type: 'checkbox' },
   { id: 'setting-demo-dwell-seconds', key: 'demo_dwell_seconds', type: 'number' },
   { id: 'setting-demo-telegram-bot-token', key: 'demo_telegram_bot_token' },
   { id: 'setting-demo-telegram-chat-id', key: 'demo_telegram_chat_id' },
