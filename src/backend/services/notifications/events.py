@@ -41,11 +41,20 @@ class AnomalyEvent:
     # IT-21: synthetic demo data — Telegram prefixes it, MQTT egress and LINE
     # drop it.
     demo: bool = False
+    # IT-22: False = walk-only demo (no measurements), titled plain DEMO.
+    demo_synthetic: bool = True
+    # IT-22: run summary per-bed vitals, Telegram renders them collapsed:
+    # {"valid": [[bed, bpm, rpm], ...], "restless": [[bed, bpm, rpm], ...]}
+    readings: dict[str, list] | None = None
 
 
 DEMO_TITLE_PREFIX = "🧪 DEMO・合成資料"
+WALK_DEMO_TITLE_PREFIX = "🧪 DEMO"
 
 
 def display_title(event: AnomalyEvent) -> str:
     """Title as the operator sees it in Telegram."""
-    return f"{DEMO_TITLE_PREFIX} {event.title}" if event.demo else event.title
+    if not event.demo:
+        return event.title
+    prefix = DEMO_TITLE_PREFIX if event.demo_synthetic else WALK_DEMO_TITLE_PREFIX
+    return f"{prefix} {event.title}"

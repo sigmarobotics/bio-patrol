@@ -123,15 +123,17 @@ def test_task_carries_mode_metadata(patched):
     _, submitted = patched
 
     _start(mode="demo")
-    assert submitted[0].metadata == {"mode": "demo"}
+    assert submitted[0].metadata == {"mode": "demo", "demo_synthetic": False}
 
 
-def test_demo_start_backfills_history_with_the_seat_location(patched):
+def test_demo_start_backfills_history_with_the_seat_location(patched, monkeypatch):
     """IT-21b: /demo's bed drawer filters on location_id, so the synthetic
     history must carry each seat's location_id."""
     import sqlite3
     from services import demo_data
 
+    monkeypatch.setattr(patrol, "get_runtime_settings",
+                        lambda: {**SETTINGS, "demo_synthetic": True})
     _start(mode="demo")
     conn = sqlite3.connect(demo_data.DB_PATH)
     rows = conn.execute(
