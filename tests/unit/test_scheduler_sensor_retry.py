@@ -209,7 +209,7 @@ def test_retry_losing_the_race_to_a_manual_start_is_quiet(env, monkeypatch):
     the middle of a running patrol."""
     async def _already_running(req):
         env["starts"] += 1
-        return {"status": "already_running", "task_id": "T_manual"}
+        return {"status": "already_running", "task_id": "T_manual", "mode": "patrol"}
 
     monkeypatch.setattr(patrol, "start_patrol", _already_running)
 
@@ -217,4 +217,22 @@ def test_retry_losing_the_race_to_a_manual_start_is_quiet(env, monkeypatch):
 
     assert env["starts"] == 1
     assert env["events"] == []
+    assert _jobs(env) == {}
+
+
+def test_retry_blocked_by_a_non_patrol_run_is_reported(env, monkeypatch):
+    """A cleanup (shelf return) or demo live at retry time is not the night's
+    patrol, yet it ends the retry chain — the operator who was promised a
+    retry gets told, instead of waiting on nothing."""
+    async def _cleanup_running(req):
+        env["starts"] += 1
+        return {"status": "already_running", "task_id": "T_cleanup", "mode": "cleanup"}
+
+    monkeypatch.setattr(patrol, "start_patrol", _cleanup_running)
+
+    _run(env, attempt=1)
+
+    assert env["starts"] == 1
+    assert [e.title for e in env["events"]] == ["⚠️ 排程巡房未啟動"]
+    assert "T_cleanup" in env["events"][0].body
     assert _jobs(env) == {}

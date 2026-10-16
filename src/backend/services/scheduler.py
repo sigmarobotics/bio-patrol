@@ -265,9 +265,11 @@ class TaskSchedulerService:
                 return
 
             if res.get("status") == "already_running":
-                if attempt > 0:
-                    # A manual start won the start lock after the entry guard
-                    # ran — same silent drop as above.
+                if attempt > 0 and res.get("mode") == "patrol":
+                    # A manual patrol won the start lock after the entry guard
+                    # ran — same silent drop as above. Any other live run
+                    # (cleanup, demo, resume) still ends the retry chain, so
+                    # it is reported like a first-attempt refusal.
                     logger.info(
                         f"Scheduled patrol '{schedule_id}' retry dropped: task "
                         f"{res.get('task_id')} is already running"

@@ -198,3 +198,29 @@ def test_zero_retry_rounds_still_count_messages(tmp_path, monkeypatch):
     outcome = asyncio.run(client.get_valid_scan_data(target_bed="B_1", bed_name="1"))
 
     assert outcome.messages_seen == 1
+
+
+def test_wait_for_message_nudges_a_disconnected_broker(tmp_path, monkeypatch):
+    """The gate must not sit out paho's 30 s backoff inside its own 30 s wait:
+    a disconnected client gets one reconnect() before polling, exactly like
+    the scan path."""
+    client = _make_client(tmp_path, monkeypatch)
+    client.connected = False
+    calls = []
+    client.client.reconnect = lambda: calls.append("reconnect")
+
+    async def fake_sleep(_delay):
+        client._ingest({"records": []})
+
+    monkeypatch.setattr(bio_sensor_mqtt, "asyncio", types.SimpleNamespace(sleep=fake_sleep))
+
+    assert asyncio.run(client.wait_for_message(fresh_within_s=60, timeout_s=5)) is True
+    assert calls == ["reconnect"]
+
+
+def test_ingest_snapshot_is_atomic_for_readers(tmp_path, monkeypatch):
+    client = _make_client(tmp_path, monkeypatch)
+    client._ingest({"records": [{"status": 2}]})
+    seq, payload = client._latest
+    assert seq == client._msg_seq == 1
+    assert payload is client.latest_data

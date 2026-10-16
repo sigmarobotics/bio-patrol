@@ -274,9 +274,11 @@ def test_per_bed_alert_precedes_abort(monkeypatch, settings, dispatched):
     assert dispatched[2].bed_key == "B3"
 
 
-def test_unreachable_bed_resets_streak(monkeypatch, settings, dispatched):
-    """走不到 is normal (design gate): a bed whose move_shelf failed and whose
-    bio_scan run_task skips must reset the count like any non-silent bed."""
+def test_unreachable_bed_leaves_streak_alone(monkeypatch, settings, dispatched):
+    """走不到 is normal (design gate) but says nothing about the pad: a bed whose
+    move_shelf failed and whose bio_scan run_task skips neither counts nor
+    resets — silent, silent, skip, silent still reaches the limit of 3, so a
+    dead pad plus a room that TIMEOUTs on every other bed is still caught."""
     from unittest.mock import AsyncMock
 
     task, eng = _setup(monkeypatch, [_silent("B1"), _silent("B2"), _silent("B4")], n_beds=4)
@@ -297,7 +299,7 @@ def test_unreachable_bed_resets_streak(monkeypatch, settings, dispatched):
     asyncio.run(eng.run_task(task))
 
     assert task.steps[3].status == StepStatus.SKIPPED
-    assert eng._silent_streak == 1
-    assert task.status != TaskStatus.CANCELLED
-    assert "sensor_silent_abort" not in task.metadata
-    assert _aborts(dispatched) == []
+    assert eng._silent_streak == 3
+    assert task.status == TaskStatus.CANCELLED
+    assert task.metadata["sensor_silent_beds"] == 3
+    assert len(_aborts(dispatched)) == 1

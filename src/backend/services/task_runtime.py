@@ -899,8 +899,9 @@ class TaskEngine:
                     skip_reason = skip_reasons.get(step.step_id, {})
 
                     if step.action == StepAction.BIO_SCAN:
-                        # IT-23: 走不到 is not a silent pad — reset the count.
-                        self._silent_streak = 0
+                        # IT-23: 走不到 says nothing about the pad — the streak is
+                        # neither counted nor reset (a dead pad plus a room that
+                        # TIMEOUTs on every other bed must still reach the limit).
                         self._record_skipped_scan(step, "機器人無法移動到床邊", extra_data={
                             "error_source": skip_reason.get("failed_step_id"),
                             "original_error_code": skip_reason.get("error_code"),

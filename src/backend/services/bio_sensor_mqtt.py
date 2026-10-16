@@ -64,6 +64,7 @@ class BioSensorMQTTClient:
         self.client.reconnect_delay_set(min_delay=1, max_delay=30)
         self.latest_data = None
         self._msg_seq = 0  # bumped once per arrived message (see _ingest)
+        self._latest = (0, None)  # (seq, payload) written in one assignment
         self.last_message_at = None  # time.monotonic() of the last arrival
         self.connected = False
         self._init_database()
@@ -136,10 +137,11 @@ class BioSensorMQTTClient:
         self._ingest(json.loads(msg.payload.decode()))
 
     def _ingest(self, payload: dict):
-        # Order matters: a reader that sees the new seq must also see the new
-        # payload, so latest_data is written before the seq bump.
+        # Readers snapshot (seq, payload) from one tuple so a message landing
+        # between two separate reads cannot be processed twice.
         self.latest_data = payload
         self._msg_seq += 1
+        self._latest = (self._msg_seq, payload)
         self.last_message_at = time.monotonic()
 
     async def wait_for_message(self, fresh_within_s, timeout_s) -> bool:
@@ -149,6 +151,14 @@ class BioSensorMQTTClient:
         if (self.last_message_at is not None
                 and time.monotonic() - self.last_message_at <= fresh_within_s):
             return True
+        if not self.connected:
+            # Same nudge as the scan path: don't sit out paho's 30 s backoff
+            # inside a 30 s gate.
+            logger.warning("MQTT broker not connected at sensor gate; forcing reconnect")
+            try:
+                self.client.reconnect()
+            except Exception as e:
+                logger.warning(f"reconnect() raised (paho loop will keep retrying): {e}")
         seen = self._msg_seq
         waited = 0.0
         while waited < timeout_s:
@@ -262,9 +272,7 @@ class BioSensorMQTTClient:
             # Snapshot the reference: the paho thread reassigns latest_data
             # wholesale, and concurrent scans (patrol + ad-hoc) iterate the
             # same record dicts — label a copy, never the shared original.
-            # Read seq first: _ingest writes latest_data before bumping it.
-            seq = self._msg_seq
-            latest = self.latest_data
+            seq, latest = self._latest
             if seq != seen_seq and latest and 'records' in latest:
                 has_any_data = True
                 for data in latest['records']:

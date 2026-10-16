@@ -345,8 +345,8 @@
               </div>
               <div class="form-group">
                 <label>啟動前等待感測器秒數（0＝不檢查）</label>
-                <input type="number" id="setting-sensor-precheck-wait-seconds" min="0" step="1" placeholder="30">
-                <p class="test-note">留空存檔視為 0。</p>
+                <input type="number" id="setting-sensor-precheck-wait-seconds" min="0" max="60" step="1" placeholder="30">
+                <p class="test-note">留空存檔視為 0；上限 60，啟動請求會等這麼久，太長會被反向代理切斷。</p>
               </div>
               <div class="form-group">
                 <label>排程拒啟重試次數</label>
