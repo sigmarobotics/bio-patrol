@@ -8,10 +8,17 @@ import logging
 import os
 import asyncio
 import sqlite3
+import time
 from common_types import get_now
 from utils.sqlite_wal import connect_db
 
 logger = logging.getLogger("BioSensorMQTTClient")
+
+# IT-23 sensor liveness: the pad publishes every ~2.5 s even when unoccupied,
+# so message arrival time (not broker connection state) is the liveness signal.
+SENSOR_FRESH_WITHIN_S = 60
+SENSOR_SILENT_PREFIX = "感測器無回應"
+SENSOR_OFFLINE_PREFIX = "MQTT 未連線"
 
 
 def is_valid_scan(record: dict, valid_status: int) -> bool:
@@ -56,6 +63,9 @@ class BioSensorMQTTClient:
         # leaves the singleton dead forever — see sensor.log 2026-05-04+.
         self.client.reconnect_delay_set(min_delay=1, max_delay=30)
         self.latest_data = None
+        self._msg_seq = 0  # bumped once per arrived message (see _ingest)
+        self._latest = (0, None)  # (seq, payload) written in one assignment
+        self.last_message_at = None  # time.monotonic() of the last arrival
         self.connected = False
         self._init_database()
     
@@ -124,7 +134,39 @@ class BioSensorMQTTClient:
     
     def _on_message(self, client, userdata, msg):
         # logger.info(f"Received message: {msg.topic} {msg.payload.decode()}")
-        self.latest_data = json.loads(msg.payload.decode())
+        self._ingest(json.loads(msg.payload.decode()))
+
+    def _ingest(self, payload: dict):
+        # Readers snapshot (seq, payload) from one tuple so a message landing
+        # between two separate reads cannot be processed twice.
+        self.latest_data = payload
+        self._msg_seq += 1
+        self._latest = (self._msg_seq, payload)
+        self.last_message_at = time.monotonic()
+
+    async def wait_for_message(self, fresh_within_s, timeout_s) -> bool:
+        """True if a message arrived within the last `fresh_within_s` seconds,
+        or one arrives within `timeout_s`. Polls with asyncio.sleep only and
+        counts steps instead of reading the clock."""
+        if (self.last_message_at is not None
+                and time.monotonic() - self.last_message_at <= fresh_within_s):
+            return True
+        if not self.connected:
+            # Same nudge as the scan path: don't sit out paho's 30 s backoff
+            # inside a 30 s gate.
+            logger.warning("MQTT broker not connected at sensor gate; forcing reconnect")
+            try:
+                self.client.reconnect()
+            except Exception as e:
+                logger.warning(f"reconnect() raised (paho loop will keep retrying): {e}")
+        seen = self._msg_seq
+        waited = 0.0
+        while waited < timeout_s:
+            await asyncio.sleep(0.5)
+            waited += 0.5
+            if self._msg_seq != seen:
+                return True
+        return False
     
     def stop(self):
         self.client.loop_stop()
@@ -221,14 +263,17 @@ class BioSensorMQTTClient:
         # and file it under this bed. The only race left is the paho thread
         # writing right after the clear — that is data from inside this window,
         # which is exactly what we want.
+        # Snapshot the seq BEFORE the clear so a message landing in between
+        # still counts as new for this window.
+        start_seq = seen_seq = self._msg_seq
         self.latest_data = None
         await asyncio.sleep(INT_WAIT_TIME)
         for retry_count in range(RETRY_COUNT):
             # Snapshot the reference: the paho thread reassigns latest_data
             # wholesale, and concurrent scans (patrol + ad-hoc) iterate the
             # same record dicts — label a copy, never the shared original.
-            latest = self.latest_data
-            if latest and 'records' in latest:
+            seq, latest = self._latest
+            if seq != seen_seq and latest and 'records' in latest:
                 has_any_data = True
                 for data in latest['records']:
                     logger.debug("scan_data: %s", data)
@@ -250,12 +295,16 @@ class BioSensorMQTTClient:
                         retry_count=retry_count,
                         last_record_raw=last_record_processed,
                         last_failure_reason=None,
+                        messages_seen=seq - start_seq,
                     )
+            seen_seq = seq
 
             if retry_count + 1 < RETRY_COUNT:
                 await asyncio.sleep(WAIT_TIME)
 
-        # All retries exhausted without a valid record.
+        # All retries exhausted without a valid record. messages_seen reads the
+        # live seq: with RETRY_COUNT == 0 the loop never ran, yet messages from
+        # the initial wait still prove the pad is alive.
         if not has_any_data:
             no_data = {
                 "location_id": target_bed,
@@ -274,6 +323,7 @@ class BioSensorMQTTClient:
                 retry_count=retry_count,
                 last_record_raw=None,
                 last_failure_reason="未收到感測器資料（MQTT無連線或無數據）",
+                messages_seen=self._msg_seq - start_seq,
             )
 
         # has_any_data but no valid hit — use the last processed record's details.
@@ -285,6 +335,7 @@ class BioSensorMQTTClient:
             retry_count=retry_count,
             last_record_raw=last_record_processed,
             last_failure_reason=last_record_processed.get('details') if last_record_processed else "無有效量測數値",
+            messages_seen=self._msg_seq - start_seq,
         )
 
 

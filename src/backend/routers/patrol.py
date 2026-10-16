@@ -17,7 +17,11 @@ from utils.json_io import load_json, save_json
 from common_types import (
     StepAction, StepStatus, Task, TaskStatus, TaskStep, generate_task_id,
 )
+from dependencies import get_bio_sensor_client
 from services import demo_data
+from services.bio_sensor_mqtt import (
+    SENSOR_FRESH_WITHIN_S, SENSOR_OFFLINE_PREFIX, SENSOR_SILENT_PREFIX,
+)
 from services.fleet_api import RobotNotRegistered
 from services.sounds import sound_path, wav_seconds
 from services.task_runtime import clear_shelf_dropped_tasks, submit_task, tasks_db
@@ -29,6 +33,10 @@ _PRESET_MISSING = object()
 ARRIVAL_SOUND = "arrival_zh"
 
 router = APIRouter(prefix="/api", tags=["Patrol"])
+
+# IT-23: the sensor gate can wait up to 30 s, so two starts inside that window
+# would both pass a dedup run before it. The whole start body is serialized.
+_start_lock = asyncio.Lock()
 
 
 # ── Patrol config ────────────────────────────────────────────────────────────
@@ -266,10 +274,88 @@ def _robot_offline(cfg: dict) -> bool:
         return False
 
 
+def _live_run(req: PatrolStartRequest, beds_count: int):
+    """Dedup: a patrol-family run already queued/executing means this start is a
+    duplicate — an impatient operator, a schedule firing onto a manual run, a
+    demo button pressed mid-patrol, a resume still going. There is one robot
+    and one shelf, so the mode is not what conflicts; any live run is. Return
+    that run instead of queueing a second one on the same shelf behind it.
+    Tasks without a mode are not patrols (generic /api/tasks submissions)."""
+    for existing in tasks_db.values():
+        if existing.status not in (TaskStatus.QUEUED, TaskStatus.IN_PROGRESS):
+            continue
+        running_mode = (existing.metadata or {}).get("mode")
+        if not running_mode:
+            continue
+        logger.warning(
+            f"Patrol start ignored (mode={req.mode}): task {existing.task_id} "
+            f"(mode={running_mode}) is already {existing.status.value}"
+        )
+        return {
+            "status": "already_running",
+            "task_id": existing.task_id,
+            "mode": running_mode,
+            "beds_count": beds_count,
+        }
+    return None
+
+
+async def _sensor_gate(cfg: dict) -> None:
+    """IT-23: refuse a patrol whose Wisleep pad is silent. The pad publishes
+    every ~2.5 s even with nobody on it, so message arrival — not the broker
+    connection — is the liveness signal. A wait that itself blows up fails
+    open (same philosophy as the battery gate)."""
+    wait_s = cfg.get("sensor_precheck_wait_seconds", 30) or 0
+    if not cfg.get("mqtt_enabled") or wait_s <= 0:
+        return
+    client = get_bio_sensor_client()
+    if client is None:
+        raise HTTPException(
+            status_code=503, detail=f"{SENSOR_OFFLINE_PREFIX}：請檢查網路或憑證設定",
+        )
+    # Wait even when the broker link is down right now: paho reconnects in the
+    # background within seconds (sensor.log rc=16 blips), and a pad message
+    # inside the wait proves the pad alive. Only a silent wait is refused, and
+    # the link state then decides which problem the notice names.
+    try:
+        alive = await client.wait_for_message(SENSOR_FRESH_WITHIN_S, wait_s)
+    except Exception as e:
+        logger.warning(f"Sensor liveness check failed, starting patrol anyway: {e}")
+        return
+    if not alive and not client.connected:
+        raise HTTPException(
+            status_code=503, detail=f"{SENSOR_OFFLINE_PREFIX}：請檢查網路或憑證設定",
+        )
+    if not alive:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{SENSOR_SILENT_PREFIX}：{wait_s} 秒內沒有收到感測墊訊息，"
+                   "請檢查感測棚車上的行動電源是否沒電或沒接",
+        )
+
+
+def _remove_pending_retries() -> None:
+    """A patrol is running now, so a scheduled sensor retry must not fire later
+    (e.g. after the operator cancels this run)."""
+    try:
+        from services.scheduler import scheduler_service
+        for job in scheduler_service.scheduler.get_jobs():
+            if job.id.endswith("_retry"):
+                scheduler_service.scheduler.remove_job(job.id)
+                logger.info(f"Removed pending scheduler retry: {job.id}")
+    except Exception as e:
+        logger.warning(f"Could not remove pending scheduler retries: {e}")
+
+
 @router.post("/patrol/start")
 async def start_patrol(req: PatrolStartRequest):
     """Start a patrol run. Demo mode loads the demo_preset (if any) and runs a
     synthetic demo_scan per bed instead of bio_scan (IT-21)."""
+    async with _start_lock:
+        return await _start_patrol_locked(req)
+
+
+async def _start_patrol_locked(req: PatrolStartRequest):
     cfg = get_runtime_settings()
     shelf_id = cfg.get("shelf_id", "S_04")
 
@@ -292,28 +378,9 @@ async def start_patrol(req: PatrolStartRequest):
         {"bed_key": b["bed_key"], "location_id": beds_map.get(b["bed_key"], {}).get("location_id", b["bed_key"])}
         for b in enabled
     ]
-    # Dedup: a patrol-family run already queued/executing means this start is a
-    # duplicate — an impatient operator, a schedule firing onto a manual run, a
-    # demo button pressed mid-patrol, a resume still going. There is one robot
-    # and one shelf, so the mode is not what conflicts; any live run is. Return
-    # that run instead of queueing a second one on the same shelf behind it.
-    # Tasks without a mode are not patrols (generic /api/tasks submissions).
-    for existing in tasks_db.values():
-        if existing.status not in (TaskStatus.QUEUED, TaskStatus.IN_PROGRESS):
-            continue
-        running_mode = (existing.metadata or {}).get("mode")
-        if not running_mode:
-            continue
-        logger.warning(
-            f"Patrol start ignored (mode={req.mode}): task {existing.task_id} "
-            f"(mode={running_mode}) is already {existing.status.value}"
-        )
-        return {
-            "status": "already_running",
-            "task_id": existing.task_id,
-            "mode": running_mode,
-            "beds_count": len(enabled),
-        }
+    live = _live_run(req, len(enabled))
+    if live:
+        return live
 
     # Offline gate — a run started against a confirmed-offline robot cannot
     # move a single step; all it produces is one more shelf_dropped(disconnect)
@@ -342,6 +409,16 @@ async def start_patrol(req: PatrolStartRequest):
     except Exception as e:
         logger.warning(f"Battery check failed, starting patrol anyway: {e}")
 
+    # Sensor gate — demo runs never read the pad, so only patrol is checked.
+    if req.mode == "patrol":
+        await _sensor_gate(cfg)
+
+    # The gates awaited; resume_patrol (not under the lock) may have queued a
+    # run meanwhile, so check again with no await before the task is created.
+    live = _live_run(req, len(enabled))
+    if live:
+        return live
+
     demo_synthetic = bool(cfg.get("demo_synthetic", False))
     steps = build_patrol_steps(
         beds, shelf_id, mode=req.mode,
@@ -366,6 +443,8 @@ async def start_patrol(req: PatrolStartRequest):
     )
     tasks_db[task.task_id] = task
     await submit_task(task)
+    if req.mode == "patrol":
+        _remove_pending_retries()
     logger.info(f"Patrol started (mode={req.mode}): task {task.task_id} with {len(enabled)} beds")
     return {"status": "ok", "task_id": task.task_id, "mode": req.mode, "beds_count": len(enabled)}
 

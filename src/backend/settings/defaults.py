@@ -24,6 +24,14 @@ DEFAULT_SETTINGS = {
     # 中止機制會變鈍（見 BATTERY_ABORT_CONSECUTIVE）。
     "bio_scan_initial_wait": 120,
     "bio_scan_valid_status": 4,
+    # IT-23: 感測器活性閘門。判斷依據是「感測墊訊息有沒有到達」（墊子無人也約
+    # 每 2.5 秒發一筆），不是 MQTT broker 連線狀態——墊子沒電時連線照樣是通的。
+    # 啟動前等 wait_seconds 秒內要有訊息；排程被拒啟後每 retry_minutes 分鐘重試、
+    # 最多 retry_count 次；巡房中連續 silent_abort_beds 床整窗無訊息即收工。0＝停用。
+    "sensor_precheck_wait_seconds": 30,
+    "sensor_precheck_retry_count": 3,
+    "sensor_precheck_retry_minutes": 10,
+    "sensor_silent_abort_beds": 3,
     "arrival_voice_enabled": False,
     "robot_max_retries": 3,
     "robot_retry_base_delay": 2.0,

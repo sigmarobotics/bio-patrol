@@ -98,7 +98,7 @@
                   <button class="btn-action btn-action--primary" onclick="startDemoRun()">Demo Run</button>
                 </div>
                 <div class="action-row">
-                  <button class="btn-action btn-action--accent" onclick="startPatrol()">Start Patrol</button>
+                  <button class="btn-action btn-action--accent" id="btn-start-patrol" onclick="startPatrol()">Start Patrol</button>
                 </div>
               </div>
               <div id="patrol-progress" class="patrol-progress" style="display:none;">
@@ -342,6 +342,26 @@
               <div class="form-group">
                 <label>Valid Status Code</label>
                 <input type="number" id="setting-bio-scan-valid-status" placeholder="4">
+              </div>
+              <div class="form-group">
+                <label>啟動前等待感測器秒數（0＝不檢查）</label>
+                <input type="number" id="setting-sensor-precheck-wait-seconds" min="0" max="60" step="1" placeholder="30">
+                <p class="test-note">留空存檔視為 0；上限 60，啟動請求會等這麼久，太長會被反向代理切斷。</p>
+              </div>
+              <div class="form-group">
+                <label>排程拒啟重試次數</label>
+                <input type="number" id="setting-sensor-precheck-retry-count" min="0" step="1" placeholder="3">
+                <p class="test-note">留空存檔視為 0（不重試）。</p>
+              </div>
+              <div class="form-group">
+                <label>重試間隔（分鐘）</label>
+                <input type="number" id="setting-sensor-precheck-retry-minutes" min="1" step="1" placeholder="10">
+                <p class="test-note">留空存檔視為 0，後端以 1 分鐘計。</p>
+              </div>
+              <div class="form-group">
+                <label>連續無訊號床數即收工（0＝停用）</label>
+                <input type="number" id="setting-sensor-silent-abort-beds" min="0" step="1" placeholder="3">
+                <p class="test-note">留空存檔視為 0（停用）。</p>
               </div>
               <div class="form-group" style="display:flex;align-items:center;gap:12px;">
                 <input type="checkbox" id="setting-arrival-voice-enabled" style="width:auto;">

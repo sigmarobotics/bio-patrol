@@ -25,6 +25,7 @@ class Source(str, Enum):
     ROBOT_RECOVERED = "robot_recovered"
     SCHEDULE_NOT_RUN = "schedule_not_run"
     LOW_BATTERY_ABORT = "low_battery_abort"
+    SENSOR_SILENT_ABORT = "sensor_silent_abort"
 
 
 @dataclass
