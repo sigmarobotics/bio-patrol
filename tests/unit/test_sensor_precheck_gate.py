@@ -153,15 +153,26 @@ def test_gate_waits_the_configured_seconds_with_the_freshness_window(env):
     assert env["sensor"].calls == [(bio_sensor_mqtt.SENSOR_FRESH_WITHIN_S, 12)]
 
 
-def test_disconnected_client_is_refused(env):
-    env["sensor"] = _FakeSensor(connected=False)
+def test_disconnected_client_still_waits_and_passes_on_a_message(env):
+    # A broker blip at 22:00 (sensor.log rc=16, reconnect within ~2 s) must not
+    # cost the night a 10-minute retry: a pad message during the wait is proof.
+    env["sensor"] = _FakeSensor(result=True, connected=False)
+
+    res = _start()
+
+    assert res["status"] == "ok"
+    assert len(env["sensor"].calls) == 1
+
+
+def test_disconnected_client_with_no_message_names_the_link(env):
+    env["sensor"] = _FakeSensor(result=False, connected=False)
 
     with pytest.raises(HTTPException) as exc:
         _start()
 
     assert exc.value.status_code == 503
     assert exc.value.detail.startswith(SENSOR_OFFLINE_PREFIX)
-    assert env["sensor"].calls == []
+    assert len(env["sensor"].calls) == 1
     assert env["submitted"] == []
 
 

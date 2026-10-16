@@ -309,15 +309,23 @@ async def _sensor_gate(cfg: dict) -> None:
     if not cfg.get("mqtt_enabled") or wait_s <= 0:
         return
     client = get_bio_sensor_client()
-    if client is None or not client.connected:
+    if client is None:
         raise HTTPException(
             status_code=503, detail=f"{SENSOR_OFFLINE_PREFIX}：請檢查網路或憑證設定",
         )
+    # Wait even when the broker link is down right now: paho reconnects in the
+    # background within seconds (sensor.log rc=16 blips), and a pad message
+    # inside the wait proves the pad alive. Only a silent wait is refused, and
+    # the link state then decides which problem the notice names.
     try:
         alive = await client.wait_for_message(SENSOR_FRESH_WITHIN_S, wait_s)
     except Exception as e:
         logger.warning(f"Sensor liveness check failed, starting patrol anyway: {e}")
         return
+    if not alive and not client.connected:
+        raise HTTPException(
+            status_code=503, detail=f"{SENSOR_OFFLINE_PREFIX}：請檢查網路或憑證設定",
+        )
     if not alive:
         raise HTTPException(
             status_code=503,
