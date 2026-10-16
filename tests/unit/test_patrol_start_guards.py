@@ -3,8 +3,11 @@
 Two runs on one shelf fight each other on the robot, so a second submit while
 one is queued/executing returns the live task instead of creating another. The
 battery gate refuses to start a doomed run, but stays fail-open when the robot
-cannot be queried at all. Every patrol entry point — manual, demo button,
-schedule, resume — goes through start_patrol, so all of them are covered.
+cannot be queried at all. Manual, demo-button and scheduled starts all go
+through start_patrol, so all of them are covered. Resume does NOT: it builds
+its own task (tagged mode=patrol so this dedup still sees it) and skips the
+start gates on purpose — it is the manual recovery of a SHELF_DROPPED run
+(pinned in test_sensor_precheck_gate.py).
 """
 import asyncio
 

@@ -589,12 +589,21 @@ async function startDemoRun() {
 }
 
 async function startPatrol() {
+  // 正式巡房啟動前後端會等感測墊訊息（最多 sensor_precheck_wait_seconds 秒），
+  // 期間鎖住按鈕避免重複點擊。
+  const btn = document.getElementById('btn-start-patrol');
+  const original = btn.textContent;
+  btn.textContent = IS_DEMO_VIEW ? '啟動中…' : '檢查感測器中…';
+  btn.disabled = true;
   try {
     // A visitor on /demo must never trigger a real measurement.
     const res = await dataService.startPatrol(IS_DEMO_VIEW ? 'demo' : 'patrol');
     alert(_startedMessage(res, 'Patrol started!'));
   } catch (e) {
     alert('Failed to start patrol: ' + (e.response?.data?.detail || e.message || e));
+  } finally {
+    btn.textContent = original;
+    btn.disabled = false;
   }
 }
 
@@ -1264,6 +1273,10 @@ const SETTINGS_MAP = [
   { id: 'setting-bio-scan-retry-count', key: 'bio_scan_retry_count', type: 'number' },
   { id: 'setting-bio-scan-initial-wait', key: 'bio_scan_initial_wait', type: 'number' },
   { id: 'setting-bio-scan-valid-status', key: 'bio_scan_valid_status', type: 'number' },
+  { id: 'setting-sensor-precheck-wait-seconds', key: 'sensor_precheck_wait_seconds', type: 'number' },
+  { id: 'setting-sensor-precheck-retry-count', key: 'sensor_precheck_retry_count', type: 'number' },
+  { id: 'setting-sensor-precheck-retry-minutes', key: 'sensor_precheck_retry_minutes', type: 'number' },
+  { id: 'setting-sensor-silent-abort-beds', key: 'sensor_silent_abort_beds', type: 'number' },
   { id: 'setting-arrival-voice-enabled', key: 'arrival_voice_enabled', type: 'checkbox' },
   { id: 'setting-robot-max-retries', key: 'robot_max_retries', type: 'number' },
   { id: 'setting-robot-retry-base-delay', key: 'robot_retry_base_delay', type: 'number' },

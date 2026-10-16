@@ -16,6 +16,7 @@ class ScanOutcome:
     retry_count: int
     last_record_raw: dict | None
     last_failure_reason: str | None  # None only when valid_record is not None
+    messages_seen: int = 1  # MQTT messages arrived in the window; 0 = sensor silent (IT-23)
 
 
 # Wisleep sensor status values, in operator terms (status 4 = valid reading)

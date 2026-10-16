@@ -209,6 +209,8 @@ class TaskEngine:
         # motion step is in flight — see MOTION_ACTIONS / BATTERY_ABORT_CONSECUTIVE.
         self._stationary_since: Optional[float] = None
         self._low_battery_streak = 0
+        # Consecutive beds whose whole scan window saw no sensor message (IT-23).
+        self._silent_streak = 0
         # Set when the abort fires, so a dwell already waiting out its scan
         # window stops now instead of at the next step boundary.
         self._battery_abort_event: Optional[asyncio.Event] = None
@@ -474,6 +476,54 @@ class TaskEngine:
             # The step still returns on its own timeout, just later.
             logger.warning(f"[BATTERY ABORT] cancel_command failed: {ce}")
         return True
+
+    async def _abort_sensor_silent(self, bed_key: Optional[str]) -> None:
+        """Cancel the patrol after consecutive beds heard nothing from the pad.
+
+        板橋榮家 10/12–10/15: the pad's power bank died mid-run and the patrol
+        waited out every remaining bed for nothing. No robot command is in
+        flight here (the scan already returned), so no cancel_command: run_task
+        breaks on CANCELLED at the step boundary and queues the cleanup that
+        carries the shelf home.
+        """
+        task = tasks_db.get(self.current_task_id)
+        if task is None or task.status != TaskStatus.IN_PROGRESS:
+            return
+        if (task.metadata or {}).get("mode") == "cleanup":
+            return
+        # A drop tripped while the per-bed alert went out — the drop handler
+        # owns the wrap-up and its CRITICAL must not turn into this WARN.
+        if self.shelf_drop_event is not None and self.shelf_drop_event.is_set():
+            return
+
+        streak = self._silent_streak
+        # Commit before any await, so nothing can slip in between.
+        task.metadata = {**(task.metadata or {}),
+                         "sensor_silent_abort": True, "sensor_silent_beds": streak}
+        task.status = TaskStatus.CANCELLED
+        logger.warning(
+            f"[SENSOR SILENT] {streak} consecutive beds without a sensor message "
+            f"(last {bed_key}) — cancelling task {task.task_id}"
+        )
+        bio_steps = [s for s in task.steps if s.action == StepAction.BIO_SCAN]
+        done_beds = sum(1 for s in bio_steps if s.status == StepStatus.SUCCESS)
+        try:
+            await dispatcher.dispatch(AnomalyEvent(
+                severity=Severity.WARN,
+                source=Source.SENSOR_SILENT_ABORT,
+                task_id=task.task_id,
+                title="🔌 感測器無回應，巡房自動收工",
+                body=(
+                    f"連續 {streak} 床沒有收到感測墊訊息\n"
+                    f"請檢查感測棚車上的行動電源是否沒電或沒接\n"
+                    f"已自動取消巡房，貨架歸位後回充\n"
+                    f"已量測 {done_beds}/{len(bio_steps)} 床"
+                ),
+                raw={"silent_beds": streak, "last_bed": bed_key},
+            ))
+        except Exception:
+            # Notification is best-effort; the cancel already stands.
+            logger.exception("Failed to dispatch sensor-silent abort anomaly")
 
     # ── Shelf drop helpers ────────────────────────────────────────────
 
@@ -817,6 +867,7 @@ class TaskEngine:
         # The run starts at the dock, standing still.
         self._stationary_since = time.monotonic()
         self._low_battery_streak = 0
+        self._silent_streak = 0
         self._battery_abort_event = asyncio.Event()
         self._state_watcher_stop = False
         self._state_watcher_task = asyncio.create_task(self._watch_shelf_state())
@@ -848,6 +899,8 @@ class TaskEngine:
                     skip_reason = skip_reasons.get(step.step_id, {})
 
                     if step.action == StepAction.BIO_SCAN:
+                        # IT-23: 走不到 is not a silent pad — reset the count.
+                        self._silent_streak = 0
                         self._record_skipped_scan(step, "機器人無法移動到床邊", extra_data={
                             "error_source": skip_reason.get("failed_step_id"),
                             "original_error_code": skip_reason.get("error_code"),
@@ -1411,16 +1464,27 @@ class TaskEngine:
             f"retry_count={outcome.retry_count}"
         )
 
+        cfg = get_runtime_settings()
+        # IT-23: a live pad publishes every ~2.5s even with nobody on it, so a
+        # whole window without a single message means the pad lost power. A
+        # drop / low-battery abort owns the wrap-up — leave the streak alone.
+        counts = not (dropped or aborted)
+        if counts:
+            self._silent_streak = self._silent_streak + 1 if outcome.messages_seen == 0 else 0
+
         event = _bio_scan_evaluator.evaluate(outcome)
         if event:
             await dispatcher.dispatch(event)
         # IT-21 FEAT-025: threshold alert is opt-in per site — off, the real
         # patrol emits exactly what it did before.
-        cfg = get_runtime_settings()
         if cfg.get("vitals_alert_enabled", False):
             vitals = _vitals_evaluator.evaluate(outcome, cfg)
             if vitals:
                 await dispatcher.dispatch(vitals)
+
+        limit = cfg.get("sensor_silent_abort_beds", 3) or 0  # None/"" in settings.json = disabled
+        if counts and limit > 0 and self._silent_streak >= limit:
+            await self._abort_sensor_silent(bed_key)
 
         return StepResult(
             success=success,

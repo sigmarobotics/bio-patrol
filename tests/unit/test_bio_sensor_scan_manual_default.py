@@ -42,7 +42,22 @@ def _deliver_during_window(monkeypatch, client, payload):
     real_sleep = asyncio.sleep
 
     async def fake_sleep(_delay):
-        client.latest_data = payload
+        client._ingest(payload)
+        await real_sleep(0)
+
+    monkeypatch.setattr(bio_sensor_mqtt, "asyncio", types.SimpleNamespace(sleep=fake_sleep))
+
+
+def _deliver_once_during_window(monkeypatch, client, payload):
+    """Like _deliver_during_window, but the sensor publishes only once (on
+    the first sleep) and then goes quiet — later rounds see no new message."""
+    real_sleep = asyncio.sleep
+    calls = {"n": 0}
+
+    async def fake_sleep(_delay):
+        if calls["n"] == 0:
+            client._ingest(payload)
+        calls["n"] += 1
         await real_sleep(0)
 
     monkeypatch.setattr(bio_sensor_mqtt, "asyncio", types.SimpleNamespace(sleep=fake_sleep))
