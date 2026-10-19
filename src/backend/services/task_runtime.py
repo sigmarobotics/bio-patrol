@@ -1197,9 +1197,11 @@ class TaskEngine:
 
     async def _do_play_sound(self, step: TaskStep) -> StepResult:
         """Play a bundled clip through the on-robot player (IT-24). Advisory:
-        a clip that did not play fails the step, and the bed's scan still runs.
-        ``wait`` (demo) holds the step until the clip ends, unless a shelf
-        drop or battery abort cuts it short."""
+        the bed's scan always runs. ``wait`` (demo) holds the step until the
+        clip ends, unless a shelf drop or battery abort cuts it short, and
+        fails it when nothing played. Patrol mode is fire-and-forget: the step
+        only records that the clip was scheduled; a deploy failure is logged
+        by the announcer."""
         name = step.params["sound_name"]
         if step.params.get("wait"):
             ok = await self._await_or_drop(announcer.announce(name, wait=True))

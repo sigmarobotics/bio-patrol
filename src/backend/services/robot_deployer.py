@@ -142,7 +142,8 @@ class _Jupyter:
 def launch(jp: _Jupyter, run_id: str) -> bool:
     """Start ``bio_announce.py <run_id>`` and confirm the clip is playing, in
     one exec: UP once the run's log shows BIO-PLAYING, DOWN if the player
-    exits first or CONFIRM_S runs out.
+    exits first or CONFIRM_S runs out. A run reported DOWN is SIGTERMed so
+    it cannot play later behind the Pi's back (its handler restores volume).
 
     setsid: terminado kills the terminal's process group on close (nohup does
     not survive that). pgrep is anchored to this run's argv and first waits
@@ -165,6 +166,6 @@ def launch(jp: _Jupyter, run_id: str) -> bool:
         f"for i in $(seq 1 {CONFIRM_S * 2}); do grep -qsF {PLAYING} {log} && break; "
         f'pgrep -f "{pattern}" >/dev/null || break; sleep 0.5; done; '
         f'if grep -qsF {PLAYING} {log}; then echo BIO-"UP"; '
-        f'else echo BIO-"DOWN"; fi',
+        f'else pkill -TERM -f "{pattern}"; echo BIO-"DOWN"; fi',
         settle_s=CONFIRM_S + 5, stop_on=("BIO-UP", "BIO-DOWN"))
     return "BIO-UP" in out

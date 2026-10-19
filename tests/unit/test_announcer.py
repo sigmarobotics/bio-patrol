@@ -197,6 +197,9 @@ async def test_launch_confirms_on_playback_not_on_spawn(robot, sleeps):
     log = f"/tmp/bio_announce-{rid}.log"
     assert f"grep -qsF BIO-PLAYING {log} && break; pgrep" in cmd
     assert f'if grep -qsF BIO-PLAYING {log}; then echo BIO-"UP"' in cmd
+    # A DOWN run is stopped, so it cannot play after the Pi gave up on it.
+    pattern = f'bio_announce[.]py {rid.replace(".", "[.]")}( |$)'
+    assert f'else pkill -TERM -f "{pattern}"; echo BIO-"DOWN"' in cmd
     assert jp.settle_s >= 45
 
 
