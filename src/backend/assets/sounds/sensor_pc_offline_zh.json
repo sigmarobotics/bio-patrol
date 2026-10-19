@@ -1,0 +1,9 @@
+{
+  "label": "sensor_pc_offline_zh",
+  "text": "連不上感測器電腦，請檢查感測器電腦有沒有開機，或是檢查機器人的對外網路是否暢通。",
+  "langs": [
+    "zh"
+  ],
+  "seconds": 20.42,
+  "repeats": 2
+}

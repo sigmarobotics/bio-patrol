@@ -161,31 +161,42 @@ def test_arrival_voice_off_is_byte_for_byte_the_default_build():
     assert [s.model_dump() for s in explicit] == [s.model_dump() for s in default]
 
 
-def test_demo_arrival_voice_stretches_each_dwell_past_the_clip(monkeypatch):
-    """Demo has no bio_scan to cover the clip — the robot would drive off
-    mid-sentence unless the dwell outlasts it."""
-    monkeypatch.setattr("routers.patrol.wav_seconds", lambda path: 5.36)
+def test_demo_arrival_voice_waits_the_clip_out_instead_of_stretching_the_dwell():
+    """IT-24: the demo voice step itself holds until the clip ends, so the
+    robot never drives off mid-sentence and the dwell keeps its plain value."""
     steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
                                arrival_voice=True, demo_dwell_seconds=3)
+    voice_steps = [s for s in steps if s.action == StepAction.PLAY_SOUND.value]
+    assert [s.params for s in voice_steps] == [
+        {"sound_name": "arrival_zh", "wait": True},
+    ] * 2
     scans = [s for s in steps if s.action == StepAction.DEMO_SCAN.value]
-    assert [s.params["seconds"] for s in scans] == [5.86, 5.86]
+    # The last seat still takes the default 5s final wait.
+    assert [s.params["seconds"] for s in scans] == [3, 5]
 
 
-def test_demo_arrival_voice_shorter_than_dwell_keeps_the_dwell(monkeypatch):
-    monkeypatch.setattr("routers.patrol.wav_seconds", lambda path: 5.36)
+def test_demo_arrival_voice_keeps_the_default_dwell():
     steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
                                arrival_voice=True)
     scans = [s for s in steps if s.action == StepAction.DEMO_SCAN.value]
     assert [s.params["seconds"] for s in scans] == [15, 15]
 
 
-def test_demo_arrival_voice_keeps_a_longer_final_wait(monkeypatch):
-    monkeypatch.setattr("routers.patrol.wav_seconds", lambda path: 5.36)
+def test_demo_arrival_voice_keeps_a_longer_final_wait():
     steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
                                final_wait_seconds=30, arrival_voice=True,
                                demo_dwell_seconds=3)
     scans = [s for s in steps if s.action == StepAction.DEMO_SCAN.value]
-    assert [s.params["seconds"] for s in scans] == [5.86, 30]
+    assert [s.params["seconds"] for s in scans] == [3, 30]
+
+
+def test_walk_only_demo_arrival_voice_waits_and_keeps_plain_dwell():
+    steps = build_patrol_steps(_beds(), shelf_id="S_04", mode="demo",
+                               arrival_voice=True, demo_synthetic=False)
+    voice_steps = [s for s in steps if s.action == StepAction.PLAY_SOUND.value]
+    assert all(s.params == {"sound_name": "arrival_zh", "wait": True} for s in voice_steps)
+    waits = [s for s in steps if s.action == StepAction.WAIT.value]
+    assert [s.params["seconds"] for s in waits] == [5, 5]
 
 
 # ── IT-21: the real patrol build is locked byte-for-byte ─────────────────────

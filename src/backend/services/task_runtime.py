@@ -10,7 +10,7 @@ from services.notifications import AnomalyEvent, Severity, Source, dispatcher
 from services.notifications.evaluator import (
     BioScanFailureEvaluator, ScanOutcome, VitalsOutOfBandEvaluator,
 )
-from services import demo_data
+from services import announcer, demo_data
 from common_types import (
     Task, TaskStep, TaskStatus, StepStatus, StepResult, StepAction,
     NON_CRITICAL_ACTIONS, get_now,
@@ -160,12 +160,14 @@ async def submit_task(task: Task):
     logger.info(f"Task {task.task_id} submitted to robot {robot_id}")
 
 
-async def submit_cleanup_task(robot_id: str) -> Optional[str]:
+async def submit_cleanup_task(robot_id: str,
+                              metadata_extra: Optional[dict] = None) -> Optional[str]:
     """取消載棚車任務後的收工:身上還有棚車就先歸位,再回充。
 
     操作者按「停止」的語意是「收工」,不是「原地棄置」。持棚車與否問機器人
     本人(get_moving_shelf)——引擎的 _current_shelf_id 只在 move_shelf 完整
     跑完後才設,第一段移動途中取消會漏抓(2026-08-18 板橋現場)。
+    `metadata_extra` 帶原任務的旗標(IT-24 announce_after_home),mode 一律是 cleanup。
     """
     from dependencies import get_fleet
     from common_types import generate_task_id
@@ -184,7 +186,8 @@ async def submit_cleanup_task(robot_id: str) -> Optional[str]:
         step_id="cleanup_return_home", action=StepAction.RETURN_HOME.value,
         params={}, status=StepStatus.PENDING))
     task = Task(task_id=generate_task_id(), robot_id=robot_id, steps=steps,
-                status=TaskStatus.QUEUED, metadata={"mode": "cleanup"})
+                status=TaskStatus.QUEUED,
+                metadata={**(metadata_extra or {}), "mode": "cleanup"})
     await submit_task(task)
     logger.info(f"Cleanup task {task.task_id} queued (shelf={shelf_id or 'none'})")
     return task.task_id
@@ -498,8 +501,10 @@ class TaskEngine:
 
         streak = self._silent_streak
         # Commit before any await, so nothing can slip in between.
+        # announce_after_home: the cleanup says why once the robot is docked (IT-24).
         task.metadata = {**(task.metadata or {}),
-                         "sensor_silent_abort": True, "sensor_silent_beds": streak}
+                         "sensor_silent_abort": True, "sensor_silent_beds": streak,
+                         "announce_after_home": True}
         task.status = TaskStatus.CANCELLED
         logger.warning(
             f"[SENSOR SILENT] {streak} consecutive beds without a sensor message "
@@ -1023,11 +1028,32 @@ class TaskEngine:
             # robot itself instead of _current_shelf_id (which misses a cancel
             # during the first move_shelf). Guard keeps a cancelled cleanup
             # from spawning another cleanup.
-            if cancelled and (task.metadata or {}).get("mode") != "cleanup":
+            meta = task.metadata or {}
+            if cancelled and meta.get("mode") != "cleanup":
                 try:
-                    await submit_cleanup_task(self.robot_id)
+                    await submit_cleanup_task(
+                        self.robot_id,
+                        metadata_extra={"announce_after_home": True}
+                        if meta.get("announce_after_home") else None,
+                    )
                 except Exception as e:
                     logger.error(f"[{tag}] Failed to queue cancel cleanup: {e}")
+
+            # IT-24: a sensor-silent abort tells the ward why only once the
+            # robot is back on the charger — not mid-corridor, not on a failed
+            # or cancelled cleanup.
+            if (task.status == TaskStatus.DONE and meta.get("mode") == "cleanup"
+                    and meta.get("announce_after_home")
+                    and any(s.step_id == "cleanup_return_home"
+                            and s.status == StepStatus.SUCCESS for s in task.steps)):
+                try:
+                    client = get_bio_sensor_client()
+                    sound = (announcer.SOUND_SENSOR_SILENT
+                             if client is not None and client.connected
+                             else announcer.SOUND_SENSOR_OFFLINE)
+                    await announcer.announce(sound, pre_delay_s=1.0)
+                except Exception as e:
+                    logger.warning(f"[{tag}] After-home announcement failed: {e}")
 
             try:
                 # A demo run's seats are its synthetic demo_scan steps, and
@@ -1170,18 +1196,22 @@ class TaskEngine:
         return self._make_result(result, step.action, {"speak_text": text})
 
     async def _do_play_sound(self, step: TaskStep) -> StepResult:
-        """Play a bundled clip. Advisory: an old firmware without the Sound
-        API raises UNIMPLEMENTED, and the bed's scan must still run."""
+        """Play a bundled clip through the on-robot player (IT-24). Advisory:
+        a clip that did not play fails the step, and the bed's scan still runs.
+        ``wait`` (demo) holds the step until the clip ends, unless a shelf
+        drop or battery abort cuts it short."""
         name = step.params["sound_name"]
-        try:
-            result = await self.fleet.play_sound_by_name(self.robot_id, name)
-        except Exception as e:
-            logger.warning(f"play_sound '{name}' failed on robot {self.robot_id}: {e}")
-            return StepResult(
-                success=False, error_code=-1, error_message=str(e),
-                data={"sound_name": name}, timestamp=get_now().isoformat(),
-            )
-        return self._make_result(result, step.action, {"sound_name": name})
+        if step.params.get("wait"):
+            ok = await self._await_or_drop(announcer.announce(name, wait=True))
+        else:
+            ok = await announcer.announce(name)
+        if not ok:
+            logger.warning(f"play_sound '{name}' did not play on robot {self.robot_id}")
+        return StepResult(
+            success=bool(ok), error_code=0 if ok else -1,
+            error_message="" if ok else "announcement not played",
+            data={"sound_name": name}, timestamp=get_now().isoformat(),
+        )
 
     async def _do_move_to_pose(self, step: TaskStep) -> StepResult:
         x, y, yaw = float(step.params["x"]), float(step.params["y"]), float(step.params["yaw"])
