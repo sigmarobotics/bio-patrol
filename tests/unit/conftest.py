@@ -29,3 +29,27 @@ def _isolated_demo_db(monkeypatch, tmp_path):
     the synthetic history) must hit a temp file, never data/demo_data.db."""
     from services import demo_data
     monkeypatch.setattr(demo_data, "DB_PATH", str(tmp_path / "demo_data.db"))
+
+
+@pytest.fixture(autouse=True)
+def _no_robot_announce(monkeypatch):
+    """IT-24: a refusal now schedules a robot announcement. Unit tests must
+    never reach a real robot's JupyterLab, so the sync deploy layer fails fast."""
+    from services import announcer
+    monkeypatch.setattr(announcer, "_deploy", lambda *a, **k: False, raising=False)
+
+
+@pytest.fixture
+def announced(monkeypatch):
+    """IT-24: record announcer.announce calls as (name, pre_delay_s, wait)
+    instead of deploying anything. Hooks call ``announcer.announce`` through
+    the module attribute, so patching it here catches every call site."""
+    from services import announcer
+    calls = []
+
+    async def fake(name, *, pre_delay_s=0.0, wait=False):
+        calls.append((name, pre_delay_s, wait))
+        return True
+
+    monkeypatch.setattr(announcer, "announce", fake)
+    return calls
