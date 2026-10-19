@@ -25,6 +25,8 @@ dependencies = [
     # toolkit's mcp stack, which 0.7 no longer installs
     "python-multipart>=0.0.9",
     "aiomqtt>=2.3.0",
+    # IT-24: JupyterLab terminal websocket that launches the on-robot announcer
+    "websockets>=14,<15",
 ]
 
 [dependency-groups]

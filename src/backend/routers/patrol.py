@@ -18,12 +18,11 @@ from common_types import (
     StepAction, StepStatus, Task, TaskStatus, TaskStep, generate_task_id,
 )
 from dependencies import get_bio_sensor_client
-from services import demo_data
+from services import announcer, demo_data
 from services.bio_sensor_mqtt import (
     SENSOR_FRESH_WITHIN_S, SENSOR_OFFLINE_PREFIX, SENSOR_SILENT_PREFIX,
 )
 from services.fleet_api import RobotNotRegistered
-from services.sounds import sound_path, wav_seconds
 from services.task_runtime import clear_shelf_dropped_tasks, submit_task, tasks_db
 
 logger = logging.getLogger(__name__)
@@ -153,10 +152,10 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
     `final_wait_seconds`: demo only — extends the dwell at the LAST bed (site
             demos park the robot at the endpoint for the audience before
             auto-returning); it never shortens it below the regular dwell.
-    `arrival_voice`: insert a play_sound step on arrival at each bed. play_sound
-            is fire-and-forget, so the bio_scan starts while the clip plays; in
-            demo mode the robot only waits out the synthetic scan, so each
-            dwell is stretched to outlast the clip instead.
+    `arrival_voice`: insert a play_sound step on arrival at each bed. In patrol
+            mode play_sound is fire-and-forget, so the bio_scan starts while
+            the clip plays; a demo step waits the clip out (IT-24), so the
+            robot never drives off mid-sentence.
     `demo_dwell_seconds`: demo only — how long each seat shows 量測中.
     `demo_synthetic`: demo only — False makes a walk-only demo (IT-22, 板榮):
             a 5s wait per bed instead of demo_scan, no data and no alerts.
@@ -167,11 +166,6 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
     """
     steps: List[TaskStep] = []
     counter = 0
-    # A demo dwell is a timed wait, so it has to outlast the clip.
-    clip_dwell = (
-        wav_seconds(sound_path(ARRIVAL_SOUND)) + 0.5
-        if arrival_voice and mode == "demo" else 0.0
-    )
     for bed in beds:
         bed_key = bed.get("bed_key", "")
         location_id = bed.get("location_id", "")
@@ -192,14 +186,15 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
             steps.append(TaskStep(
                 step_id=voice_id,
                 action=StepAction.PLAY_SOUND.value,
-                params={"sound_name": ARRIVAL_SOUND},
+                params={"sound_name": ARRIVAL_SOUND,
+                        **({"wait": True} if mode == "demo" else {})},
                 status=StepStatus.PENDING,
             ))
         if mode == "demo" and not demo_synthetic:
             steps.append(TaskStep(
                 step_id=action_id,
                 action=StepAction.WAIT.value,
-                params={"bed_key": bed_key, "seconds": max(5, clip_dwell)},
+                params={"bed_key": bed_key, "seconds": 5},
                 status=StepStatus.PENDING,
             ))
         elif mode == "demo":
@@ -210,7 +205,7 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
                     "bed_key": bed_key,
                     "location_id": location_id,
                     "scenario": demo_data.scenario_for(counter),
-                    "seconds": max(demo_dwell_seconds, clip_dwell),
+                    "seconds": demo_dwell_seconds,
                 },
                 status=StepStatus.PENDING,
             ))
@@ -225,12 +220,10 @@ def build_patrol_steps(beds: List[dict], shelf_id: str, *, mode: PatrolMode,
 
     if steps:
         if mode == "demo" and not demo_synthetic:
-            steps[-1].params["seconds"] = max(final_wait_seconds, clip_dwell)
+            steps[-1].params["seconds"] = final_wait_seconds
         elif mode == "demo":
             # Only the dwell changes — the last seat keeps its scan params.
-            steps[-1].params["seconds"] = max(
-                demo_dwell_seconds, final_wait_seconds, clip_dwell
-            )
+            steps[-1].params["seconds"] = max(demo_dwell_seconds, final_wait_seconds)
         steps.insert(0, TaskStep(
             step_id="reset_shelf",
             action=StepAction.RESET_SHELF_POSE.value,
@@ -300,6 +293,18 @@ def _live_run(req: PatrolStartRequest, beds_count: int):
     return None
 
 
+async def _refuse(status: int, detail: str, sound: str) -> None:
+    """IT-24: say the refusal out loud on the robot, then refuse. The ward
+    staff who pressed the button never see the web page or Telegram. ``detail``
+    must stay word-for-word — scheduler._refusal_reason parses its prefix. A
+    broken announcement must never turn a refusal into a start."""
+    try:
+        await announcer.announce(sound)
+    except Exception as e:
+        logger.warning(f"Refusal announcement '{sound}' failed: {e}")
+    raise HTTPException(status_code=status, detail=detail)
+
+
 async def _sensor_gate(cfg: dict) -> None:
     """IT-23: refuse a patrol whose Wisleep pad is silent. The pad publishes
     every ~2.5 s even with nobody on it, so message arrival — not the broker
@@ -310,8 +315,9 @@ async def _sensor_gate(cfg: dict) -> None:
         return
     client = get_bio_sensor_client()
     if client is None:
-        raise HTTPException(
-            status_code=503, detail=f"{SENSOR_OFFLINE_PREFIX}：請檢查網路或憑證設定",
+        await _refuse(
+            503, f"{SENSOR_OFFLINE_PREFIX}：請檢查網路或憑證設定",
+            announcer.SOUND_SENSOR_OFFLINE,
         )
     # Wait even when the broker link is down right now: paho reconnects in the
     # background within seconds (sensor.log rc=16 blips), and a pad message
@@ -323,14 +329,16 @@ async def _sensor_gate(cfg: dict) -> None:
         logger.warning(f"Sensor liveness check failed, starting patrol anyway: {e}")
         return
     if not alive and not client.connected:
-        raise HTTPException(
-            status_code=503, detail=f"{SENSOR_OFFLINE_PREFIX}：請檢查網路或憑證設定",
+        await _refuse(
+            503, f"{SENSOR_OFFLINE_PREFIX}：請檢查網路或憑證設定",
+            announcer.SOUND_SENSOR_OFFLINE,
         )
     if not alive:
-        raise HTTPException(
-            status_code=503,
-            detail=f"{SENSOR_SILENT_PREFIX}：{wait_s} 秒內沒有收到感測墊訊息，"
-                   "請檢查感測棚車上的行動電源是否沒電或沒接",
+        await _refuse(
+            503,
+            f"{SENSOR_SILENT_PREFIX}：{wait_s} 秒內沒有收到感測墊訊息，"
+            "請檢查感測棚車上的行動電源是否沒電或沒接",
+            announcer.SOUND_SENSOR_SILENT,
         )
 
 
@@ -393,21 +401,23 @@ async def _start_patrol_locked(req: PatrolStartRequest):
         )
 
     # Battery gate — fail-open: a robot we cannot query is a robot whose patrol
-    # will fail on its own; blocking start adds nothing.
+    # will fail on its own; blocking start adds nothing. Only the read is
+    # fail-open: the refusal sits outside the try, so nothing on the announce
+    # path can let a low-battery patrol start.
     min_battery = cfg.get("patrol_min_battery_pct", 30)
+    low = False
     try:
         from dependencies import get_fleet
         battery = await get_fleet().get_battery_info("kachaka")
         pct = battery.get("percentage")
-        if pct is not None and pct < min_battery:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Battery too low to start patrol: {pct:.0f}% < {min_battery}%",
-            )
-    except HTTPException:
-        raise
+        low = pct is not None and pct < min_battery
     except Exception as e:
         logger.warning(f"Battery check failed, starting patrol anyway: {e}")
+    if low:
+        await _refuse(
+            400, f"Battery too low to start patrol: {pct:.0f}% < {min_battery}%",
+            announcer.SOUND_BATTERY_LOW,
+        )
 
     # Sensor gate — demo runs never read the pad, so only patrol is checked.
     if req.mode == "patrol":

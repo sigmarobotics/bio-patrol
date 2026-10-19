@@ -9,7 +9,8 @@ the power bank. These tests pin when that fires and when it must not.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+import types
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -127,6 +128,7 @@ def test_three_silent_beds_cancel_and_notify(monkeypatch, settings, dispatched):
     assert task.status == TaskStatus.CANCELLED
     assert task.metadata["sensor_silent_abort"] is True
     assert task.metadata["sensor_silent_beds"] == 3
+    assert task.metadata["announce_after_home"] is True
     # No command in flight — run_task breaks at the step boundary instead.
     eng.fleet.cancel_command.assert_not_called()
 
@@ -303,3 +305,159 @@ def test_unreachable_bed_leaves_streak_alone(monkeypatch, settings, dispatched):
     assert task.status == TaskStatus.CANCELLED
     assert task.metadata["sensor_silent_beds"] == 3
     assert len(_aborts(dispatched)) == 1
+
+
+# ── IT-24: say why once the robot is back on the charger ─────────────────────
+
+def _run_fleet():
+    fleet = MagicMock()
+    fleet.get_shelves = AsyncMock(return_value={"ok": True, "shelves": []})
+    fleet.get_locations = AsyncMock(return_value={"ok": True, "locations": []})
+    fleet.get_metrics = AsyncMock(return_value={
+        "poll_count": 0, "poll_rtt_list": [], "poll_success_count": 0,
+    })
+    fleet.reset_metrics = AsyncMock(return_value=None)
+    fleet.return_home = AsyncMock(return_value={"ok": True})
+    return fleet
+
+
+def _cleanup(monkeypatch, *, flag=True, home_ok=True, connected=True, status=TaskStatus.QUEUED):
+    meta = {"mode": "cleanup", **({"announce_after_home": True} if flag else {})}
+    task = Task(task_id="c-1", robot_id="kachaka", status=status, metadata=meta,
+                steps=[TaskStep(step_id="cleanup_return_home",
+                                action=StepAction.RETURN_HOME.value, params={},
+                                status=StepStatus.PENDING)])
+    tasks_db[task.task_id] = task
+    sensor = None if connected is None else types.SimpleNamespace(connected=connected)
+    monkeypatch.setattr(task_runtime, "get_bio_sensor_client", lambda: sensor)
+    fleet = _run_fleet()
+    if not home_ok:
+        fleet.return_home = AsyncMock(
+            return_value={"ok": False, "error_code": 10001, "error": "blocked"})
+    return task, task_runtime.TaskEngine(fleet, "kachaka")
+
+
+@pytest.mark.parametrize("connected,sound", [
+    (True, "sensor_silent_zh"),
+    (False, "sensor_pc_offline_zh"),
+    (None, "sensor_pc_offline_zh"),
+])
+def test_cleanup_home_announces_by_sensor_link(monkeypatch, dispatched, announced,
+                                               connected, sound):
+    """Pad silent on a live broker link → the power-bank line; link down (or no
+    client at all) → the sensor-PC line. 1s pause after docking."""
+    task, eng = _cleanup(monkeypatch, connected=connected)
+
+    asyncio.run(eng.run_task(task))
+
+    assert task.status == TaskStatus.DONE
+    assert announced == [(sound, 1.0, False)]
+
+
+def test_cleanup_home_failure_announces_nothing(monkeypatch, dispatched, announced):
+    task, eng = _cleanup(monkeypatch, home_ok=False)
+
+    asyncio.run(eng.run_task(task))
+
+    assert task.status == TaskStatus.FAILED
+    assert announced == []
+
+
+def test_cancelled_cleanup_announces_nothing(monkeypatch, dispatched, announced):
+    task, eng = _cleanup(monkeypatch)
+
+    async def _cancelled_on_the_way(robot_id):
+        task.status = TaskStatus.CANCELLED
+        return {"ok": False, "error": "cancelled"}
+
+    eng.fleet.return_home = AsyncMock(side_effect=_cancelled_on_the_way)
+    asyncio.run(eng.run_task(task))
+
+    assert task.status == TaskStatus.CANCELLED
+    assert announced == []
+
+
+def test_ordinary_cleanup_announces_nothing(monkeypatch, dispatched, announced):
+    """An operator's 停止 queues a cleanup without the flag — nothing to say."""
+    task, eng = _cleanup(monkeypatch, flag=False)
+
+    asyncio.run(eng.run_task(task))
+
+    assert task.status == TaskStatus.DONE
+    assert announced == []
+
+
+def test_announce_failure_keeps_the_summary(monkeypatch, dispatched):
+    async def _boom(name, *, pre_delay_s=0.0, wait=False):
+        raise RuntimeError("deploy blew up")
+
+    monkeypatch.setattr(task_runtime.announcer, "announce", _boom)
+    task, eng = _cleanup(monkeypatch)
+
+    asyncio.run(eng.run_task(task))
+
+    assert task.status == TaskStatus.DONE
+    assert [e.source for e in dispatched] == [Source.TASK_SUMMARY]
+
+
+def _capture_cleanup(monkeypatch):
+    queued = []
+
+    async def _submit(robot_id, metadata_extra=None):
+        queued.append(metadata_extra)
+
+    monkeypatch.setattr(task_runtime, "submit_cleanup_task", _submit)
+    return queued
+
+
+def test_silent_abort_hands_the_flag_to_its_cleanup(monkeypatch, settings, dispatched):
+    queued = _capture_cleanup(monkeypatch)
+    task, eng = _setup(monkeypatch, [_silent("B1"), _silent("B2"), _silent("B3")],
+                       n_beds=4)
+    task.status = TaskStatus.QUEUED
+    task.metadata = {"mode": "patrol"}
+    eng.fleet = _run_fleet()
+
+    asyncio.run(eng.run_task(task))
+
+    assert task.status == TaskStatus.CANCELLED
+    assert queued == [{"announce_after_home": True}]
+
+
+def test_operator_cancel_queues_a_plain_cleanup(monkeypatch, dispatched):
+    queued = _capture_cleanup(monkeypatch)
+    task = Task(task_id="t-2", robot_id="kachaka", status=TaskStatus.QUEUED,
+                metadata={"mode": "patrol"},
+                steps=[TaskStep(step_id="w", action=StepAction.WAIT.value,
+                                params={"seconds": "0"}, status=StepStatus.PENDING)])
+    tasks_db[task.task_id] = task
+    eng = task_runtime.TaskEngine(_run_fleet(), "kachaka")
+
+    async def _cancel_then_wait(step):
+        task.status = TaskStatus.CANCELLED
+        return task_runtime.StepResult(success=True, timestamp="t")
+
+    eng._action_handlers[StepAction.WAIT.value] = _cancel_then_wait
+    asyncio.run(eng.run_task(task))
+
+    assert queued == [None]
+
+
+def test_cleanup_mode_cannot_be_overridden(monkeypatch):
+    submitted = []
+
+    class _Fleet:
+        async def get_moving_shelf(self, robot_id):
+            return {"shelf_id": None}
+
+    async def _submit(task):
+        submitted.append(task)
+
+    import dependencies
+    monkeypatch.setattr(dependencies, "get_fleet", lambda: _Fleet())
+    monkeypatch.setattr(task_runtime, "submit_task", _submit)
+
+    asyncio.run(task_runtime.submit_cleanup_task(
+        "kachaka", metadata_extra={"mode": "patrol", "announce_after_home": True}))
+
+    assert submitted[0].metadata == {"mode": "cleanup", "announce_after_home": True}

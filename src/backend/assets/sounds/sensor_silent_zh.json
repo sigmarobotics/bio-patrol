@@ -1,0 +1,9 @@
+{
+  "label": "sensor_silent_zh",
+  "text": "連不上感測器，請檢查感測器是否有裝行動電源，以及它是否有開機。",
+  "langs": [
+    "zh"
+  ],
+  "seconds": 16.86,
+  "repeats": 2
+}

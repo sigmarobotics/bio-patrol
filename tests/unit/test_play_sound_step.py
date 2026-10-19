@@ -1,8 +1,9 @@
 """IT-19 — arrival voice.
 
 FleetAPI.play_sound_by_name uploads a bundled clip once per content hash and
-then plays it by id; the patrol step that calls it is advisory, so a robot
-whose firmware has no Sound API still gets scanned.
+then plays it by id. Since IT-24 the play_sound step goes through the
+on-robot announcer instead; the step is advisory, so a clip that does not play
+still leaves the bed scanned.
 """
 from __future__ import annotations
 
@@ -135,20 +136,15 @@ def _fleet() -> MagicMock:
     return fleet
 
 
-def test_play_sound_failure_does_not_stop_the_patrol():
-    """Firmware below 3.17 has no Sound API. The greeting is a nicety; the
-    scan behind it is the reason the robot drove there."""
-    fleet = _fleet()
-    fleet.play_sound_by_name = AsyncMock(side_effect=RuntimeError("UNIMPLEMENTED"))
-    engine = task_runtime.TaskEngine(fleet, "kachaka")
-    task = Task(
+def _voice_task(params):
+    return Task(
         task_id="t-voice",
         robot_id="kachaka",
         steps=[
             TaskStep(
                 step_id="voice_0",
                 action=StepAction.PLAY_SOUND.value,
-                params={"sound_name": "arrival_zh"},
+                params=params,
                 status=StepStatus.PENDING,
             ),
             TaskStep(
@@ -161,10 +157,66 @@ def test_play_sound_failure_does_not_stop_the_patrol():
         status=TaskStatus.QUEUED,
     )
 
+
+def _run(task):
+    engine = task_runtime.TaskEngine(_fleet(), "kachaka")
     with patch.object(task_runtime.dispatcher, "dispatch", new=AsyncMock(return_value=None)):
-        result = asyncio.run(engine.run_task(task))
+        return asyncio.run(engine.run_task(task))
+
+
+def test_play_sound_failure_does_not_stop_the_patrol(monkeypatch):
+    """A clip that did not play (deploy failed, robot JupyterLab down) fails
+    the step. The greeting is a nicety; the scan behind it is the reason the
+    robot drove there."""
+    async def _not_played(name, *, pre_delay_s=0.0, wait=False):
+        return False
+
+    monkeypatch.setattr(task_runtime.announcer, "announce", _not_played)
+    task = _voice_task({"sound_name": "arrival_zh"})
+
+    result = _run(task)
 
     assert result.status != TaskStatus.FAILED
     assert task.steps[0].status == StepStatus.FAIL
-    assert task.steps[0].result.error_message == "UNIMPLEMENTED"
     assert task.steps[1].status == StepStatus.SUCCESS
+
+
+def test_patrol_voice_step_goes_through_the_announcer_without_waiting(announced):
+    """IT-24: playback runs on the robot (volume 10, then restore)."""
+    task = _voice_task({"sound_name": "arrival_zh"})
+
+    _run(task)
+
+    assert announced == [("arrival_zh", 0.0, False)]
+    assert task.steps[0].status == StepStatus.SUCCESS
+
+
+def test_demo_voice_step_waits_for_the_clip(announced):
+    task = _voice_task({"sound_name": "arrival_zh", "wait": True})
+
+    _run(task)
+
+    assert announced == [("arrival_zh", 0.0, True)]
+    assert task.steps[0].status == StepStatus.SUCCESS
+
+
+def test_shelf_drop_cuts_a_waiting_voice_step_short(monkeypatch):
+    """A drop must not sit behind the clip: the wait races the drop event."""
+    engine = task_runtime.TaskEngine(_fleet(), "kachaka")
+
+    async def _slow(name, *, pre_delay_s=0.0, wait=False):
+        engine.shelf_drop_event.set()
+        await asyncio.sleep(30)
+        return True
+
+    monkeypatch.setattr(task_runtime.announcer, "announce", _slow)
+    step = _voice_task({"sound_name": "arrival_zh", "wait": True}).steps[0]
+
+    async def _go():
+        engine.shelf_drop_event = asyncio.Event()
+        engine._battery_abort_event = asyncio.Event()
+        return await asyncio.wait_for(engine._do_play_sound(step), 5)
+
+    result = asyncio.run(_go())
+
+    assert result.success is False

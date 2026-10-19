@@ -1,0 +1,9 @@
+{
+  "label": "battery_low_zh",
+  "text": "電量不足，無法開始巡房，請先讓機器人充電。",
+  "langs": [
+    "zh"
+  ],
+  "seconds": 13.1,
+  "repeats": 2
+}
