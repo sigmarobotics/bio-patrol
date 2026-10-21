@@ -217,6 +217,10 @@ class TaskEngine:
         # True once the robot stopped answering: the run still pauses, but the
         # shelf state is reported as unknown instead of dropped.
         self._disconnect_suspected = False
+        # Set beside shelf_drop_event by the watcher's raise: whether it had
+        # seen a shelf on the robot. None for a signal from the controller's
+        # own monitor (which fires only after confirming the dock).
+        self._signal_shelf_confirmed: Optional[bool] = None
         # monotonic timestamp of the current stationary window, or None while a
         # motion step is in flight — see MOTION_ACTIONS / BATTERY_ABORT_CONSECUTIVE.
         self._stationary_since: Optional[float] = None
@@ -412,6 +416,7 @@ class TaskEngine:
         # hit a blip — the handler's own reads decide reachability; only the
         # failed-polls source carries the disconnect suspicion.
         self._disconnect_suspected = from_disconnect and verdict == "unreachable"
+        self._signal_shelf_confirmed = shelf_confirmed and not self._shelf_release_expected
         self.shelf_drop_event.set()
         return True
 
@@ -836,6 +841,8 @@ class TaskEngine:
         # robot is being asked survives this handler.
         if self.shelf_drop_event is not None:
             self.shelf_drop_event.clear()
+        shelf_confirmed = self._signal_shelf_confirmed
+        self._signal_shelf_confirmed = None
         verdict: Optional[str] = None
         if trigger_step is None or trigger_step.action != StepAction.RETURN_SHELF:
             # Asked again here even though the watcher verified before
@@ -861,6 +868,17 @@ class TaskEngine:
                     f"release signal was false, resuming task {task.task_id}"
                 )
                 return False
+            if verdict == "released" and shelf_confirmed is False:
+                # The watcher raised this during an outage while it had seen
+                # no shelf on the robot (before the first dock, or after
+                # return_shelf placed it): the robot is back carrying none,
+                # which is what was expected — nothing to report.
+                logger.info(
+                    f"[SHELF DROP] Robot {self.robot_id} answers and carries no "
+                    f"shelf, and none was being carried when the signal was "
+                    f"raised — nothing to report, resuming task {task.task_id}"
+                )
+                return False
         kind, battery = await self._classify_release(verdict)
         if verdict == "unreachable" and kind != "disconnected":
             # The robot came back between the verify and the classify reads
@@ -874,6 +892,7 @@ class TaskEngine:
                 )
                 self._disconnect_suspected = False
                 return False
+            self._disconnect_suspected = verdict == "unreachable"
             if verdict == "unreachable":
                 kind = "disconnected"
         low_battery = kind == "low_battery_return"
@@ -1156,7 +1175,9 @@ class TaskEngine:
         self.shelf_drop_event.clear()
         self._shelf_release_expected = False
         self._disconnect_suspected = False
-        # The run starts at the dock, standing still.
+        self._signal_shelf_confirmed = None
+        # The run starts at the dock, standing still; no bed targeted yet.
+        self.target_bed = None
         self._stationary_since = time.monotonic()
         self._low_battery_streak = 0
         self._silent_streak = 0
@@ -1730,23 +1751,30 @@ class TaskEngine:
             # and the robot would sit in the corridor carrying the shelf
             # (板橋 2026-10-19); CANCELLED makes run_task's wrap-up park it.
             task = tasks_db.get(self.current_task_id)
-            if (task is not None and task.status == TaskStatus.IN_PROGRESS
-                    and (task.metadata or {}).get("mode") != "cleanup"):
-                logger.warning(
-                    f"[RETURN HOME] Robot {self.robot_id} refused to charge with the "
-                    f"shelf docked — ending run {task.task_id} for the cleanup to park it"
-                )
-                task.status = TaskStatus.CANCELLED
+            if task is not None and task.status == TaskStatus.IN_PROGRESS:
+                is_cleanup = (task.metadata or {}).get("mode") == "cleanup"
+                if is_cleanup:
+                    # The cleanup itself failed to park it: nobody queues
+                    # another — a person has to come.
+                    logger.error(
+                        f"[RETURN HOME] Robot {self.robot_id} refused to charge with the "
+                        f"shelf docked on cleanup {task.task_id} — needs a person"
+                    )
+                    body = "機器人無法在載著貨架時回充，自動歸位也失敗\n請協助將貨架歸位"
+                else:
+                    logger.warning(
+                        f"[RETURN HOME] Robot {self.robot_id} refused to charge with the "
+                        f"shelf docked — ending run {task.task_id} for the cleanup to park it"
+                    )
+                    task.status = TaskStatus.CANCELLED
+                    body = "機器人無法在載著貨架時回充\n本次巡房結束，將再試一次貨架歸位後回充"
                 try:
                     await dispatcher.dispatch(AnomalyEvent(
-                        severity=Severity.WARN,
+                        severity=Severity.CRITICAL if is_cleanup else Severity.WARN,
                         source=Source.SHELF_DROP,
                         task_id=task.task_id,
                         title="⚠️ 貨架歸位失敗，仍在機器人身上",
-                        body=(
-                            f"機器人無法在載著貨架時回充\n"
-                            f"本次巡房結束，將再試一次貨架歸位後回充"
-                        ),
+                        body=body,
                         raw={"error_code": result.get("error_code")},
                     ))
                 except Exception:

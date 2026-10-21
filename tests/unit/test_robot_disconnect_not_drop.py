@@ -1211,3 +1211,69 @@ async def test_a_blip_overlapping_the_placement_is_not_a_drop(no_sleep):
     await eng._watch_shelf_state()
 
     assert not eng.shelf_drop_event.is_set()
+
+
+def test_a_disconnect_raised_with_no_shelf_seen_is_nothing_to_report(monkeypatch):
+    """Blip during the final return_home outlasting the watcher's verify:
+    the raise carried 'no shelf seen'; at the step boundary the robot is
+    back carrying none — the placed shelf, not a drop."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    eng.shelf_drop_event = asyncio.Event()
+    eng.shelf_drop_event.set()
+    eng._signal_shelf_confirmed = False
+    events = []
+
+    async def _capture(event):
+        events.append(event)
+
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
+
+    assert asyncio.run(eng._handle_shelf_drop(_task(), 1)) is False
+    assert events == []
+    assert eng._signal_shelf_confirmed is None
+
+
+def test_a_controller_signal_carries_no_context_and_reports(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    eng._signal_shelf_confirmed = None
+
+    task, event = _run_drop(monkeypatch, eng)
+
+    assert event.severity == Severity.CRITICAL
+
+
+@pytest.mark.asyncio
+async def test_the_watcher_raise_records_what_it_had_seen(no_sleep):
+    eng = _watcher_engine([None, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE],
+                          final=UNAVAILABLE)
+    await eng._watch_shelf_state()
+    assert eng.shelf_drop_event.is_set()
+    assert eng._signal_shelf_confirmed is False
+
+    eng = _watcher_engine(["S_04", "S_04", None], verify_reads=[NO_SHELF, NO_SHELF])
+    await eng._watch_shelf_state()
+    assert eng.shelf_drop_event.is_set()
+    assert eng._signal_shelf_confirmed is True
+
+
+def test_a_cleanup_refused_to_charge_pages_a_person(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng.fleet.return_home = AsyncMock(return_value={
+        "ok": False, "error_code": 11501, "error": "error_code=11501: Charging canceled",
+    })
+    task = Task(task_id="c-9", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
+                metadata={"mode": "cleanup"},
+                steps=[TaskStep(step_id="cleanup_return_home", action=StepAction.RETURN_HOME, params={})])
+    eng.current_task_id = "c-9"
+    monkeypatch.setitem(task_runtime.tasks_db, "c-9", task)
+    events = []
+
+    async def _capture(event):
+        events.append(event)
+
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
+    asyncio.run(eng._do_return_home(task.steps[0]))
+
+    assert task.status == TaskStatus.IN_PROGRESS       # run_task fails it
+    assert [e.severity for e in events] == [Severity.CRITICAL]
+    assert "請協助" in events[0].body
