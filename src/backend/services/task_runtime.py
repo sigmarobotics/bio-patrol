@@ -383,13 +383,7 @@ class TaskEngine:
         that ends with the robot answering is nothing to report either — a
         "released" verdict only says the robot carries none now.
         """
-        try:
-            verdict = await self._verify_shelf_still_docked()
-        except Exception:
-            # The verify catches its own read errors; anything else must not
-            # take the watcher down — raise the signal unverified, as before.
-            logger.exception("[STATE WATCHER] verify failed — raising unverified")
-            verdict = "unreachable" if from_disconnect else "released"
+        verdict = await self._verify_shelf_still_docked()
         if verdict == "docked":
             logger.warning(
                 f"[STATE WATCHER] {source} on robot {self.robot_id}, but the "
@@ -700,7 +694,7 @@ class TaskEngine:
 
     # ── Shelf drop handler ────────────────────────────────────────────
 
-    async def _classify_release(self) -> tuple[str, dict]:
+    async def _classify_release(self, verdict: Optional[str] = None) -> tuple[str, dict]:
         """Classify the release, reading the robot BEFORE anything is cancelled.
 
         cancel_command wipes the return-home evidence, so this has to run
@@ -725,9 +719,16 @@ class TaskEngine:
         except Exception as e:
             state_err = e
             logger.warning(f"[SHELF DROP] Command state read failed: {e}")
-        disconnected = self._disconnect_suspected or (
-            is_connection_error(battery_err) and is_connection_error(state_err)
-        )
+        both_failed = is_connection_error(battery_err) and is_connection_error(state_err)
+        if verdict is not None:
+            # The handler's own verify, passed as a value rather than read
+            # back from the shared flag the watcher also writes: unreachable
+            # there plus any failed read here is a dead link; two reads that
+            # both get through mean the robot is back.
+            any_failed = is_connection_error(battery_err) or is_connection_error(state_err)
+            disconnected = both_failed or (verdict == "unreachable" and any_failed)
+        else:
+            disconnected = self._disconnect_suspected or both_failed
         kind = classify_shelf_release(
             battery or {}, command_state or {}, disconnected=disconnected
         )
@@ -767,7 +768,8 @@ class TaskEngine:
         all night). The robot's own answer, once it answers, decides.
         """
         empty_reads = 0
-        for attempt in range(SHELF_VERIFY_POLLS):
+        attempt = 0
+        while True:
             try:
                 client = self.fleet.get_raw_client(self.robot_id)
                 mid = await asyncio.to_thread(client.get_moving_shelf_id)
@@ -781,18 +783,19 @@ class TaskEngine:
                     return "released"
             except Exception as e:
                 empty_reads = 0
-                logger.debug(
-                    f"[SHELF VERIFY] read {attempt + 1}/{SHELF_VERIFY_POLLS} failed: {e}"
-                )
-            if attempt + 1 < SHELF_VERIFY_POLLS:
-                await asyncio.sleep(SHELF_VERIFY_INTERVAL)
-        return "unreachable"
+                logger.debug(f"[SHELF VERIFY] read {attempt + 1} failed: {e}")
+            attempt += 1
+            # A single empty read on the last poll earns one more read, so
+            # a robot that answered is not reported unreachable.
+            if attempt >= SHELF_VERIFY_POLLS + (1 if empty_reads else 0):
+                return "unreachable"
+            await asyncio.sleep(SHELF_VERIFY_INTERVAL)
 
     @staticmethod
     def _shelf_not_carried(task: Task, step_index: int,
                            trigger_step: Optional[TaskStep]) -> bool:
         """Whether the run's own steps say no shelf should be on the robot:
-        no move_shelf has succeeded yet (and the trigger is not one), or the
+        no move_shelf has started yet (and the trigger is not one), or the
         last completed shelf step before ``step_index`` is a return_shelf.
         A "carries none now" answer then reports nothing (a blip on the
         final return_home, or during the approach to the first dock, would
@@ -801,11 +804,11 @@ class TaskEngine:
             return False
         carried = False
         for st in task.steps[:step_index]:
-            if st.status != StepStatus.SUCCESS:
-                continue
-            if st.action == StepAction.MOVE_SHELF:
+            if st.action == StepAction.MOVE_SHELF and st.status != StepStatus.PENDING:
+                # A move that docked and then failed on the way (19004) is
+                # still carrying: any started move counts.
                 carried = True
-            elif st.action == StepAction.RETURN_SHELF:
+            elif st.action == StepAction.RETURN_SHELF and st.status == StepStatus.SUCCESS:
                 carried = False
         return not carried
 
@@ -835,6 +838,7 @@ class TaskEngine:
         # robot is being asked survives this handler.
         if self.shelf_drop_event is not None:
             self.shelf_drop_event.clear()
+        verdict: Optional[str] = None
         if trigger_step is None or trigger_step.action != StepAction.RETURN_SHELF:
             # Asked again here even though the watcher verified before
             # raising: a robot that was unreachable then may be back by the
@@ -850,12 +854,7 @@ class TaskEngine:
                     f"cleanup owns the wrap-up"
                 )
                 return True
-            # The verify is the freshest word before classification: a robot
-            # that answered is not suspected; one that did not answer either
-            # read is, whichever source raised the signal — a link that flaps
-            # back for one of _classify_release's two reads must still be a
-            # 失聯 pause, not a CRITICAL drop.
-            self._disconnect_suspected = verdict == "unreachable"
+            self._disconnect_suspected = False
             if verdict == "docked":
                 logger.warning(
                     f"[SHELF DROP] Robot {self.robot_id} still carries the shelf — "
@@ -869,7 +868,7 @@ class TaskEngine:
                     f"report, resuming task {task.task_id}"
                 )
                 return False
-        kind, battery = await self._classify_release()
+        kind, battery = await self._classify_release(verdict)
         low_battery = kind == "low_battery_return"
         disconnected = kind == "disconnected"
         battery_pct = battery.get("percentage")
@@ -945,6 +944,14 @@ class TaskEngine:
             clear_shelf_dropped_tasks(
                 only_disconnect=True, reason="superseded by newer disconnect"
             )
+        if task.status == TaskStatus.CANCELLED:
+            # A stop (operator or battery abort) landed during the reads
+            # above; the CANCELLED ending stands and the wrap-up parks the shelf.
+            logger.info(
+                f"[SHELF DROP] Task {task.task_id} cancelled while classifying — "
+                f"cleanup owns the wrap-up"
+            )
+            return True
         task.status = TaskStatus.SHELF_DROPPED
 
         if disconnected:
@@ -999,8 +1006,7 @@ class TaskEngine:
 
         # Record all skipped bio_scan steps to DB — before return_home (up to
         # 240 s): a restart in that window must not lose tonight's N/A rows.
-        # A retracted drop puts these steps back to PENDING and the later
-        # real reading outranks the N/A row in the run summary.
+        # A retracted drop ends the run anyway, so the rows stand.
         steps_to_skip = []
         if trigger_step and trigger_step.skip_on_failure:
             for skip_id in trigger_step.skip_on_failure:
@@ -1202,6 +1208,7 @@ class TaskEngine:
                                 continue
                             if step.action == StepAction.BIO_SCAN:
                                 self._record_skipped_scan(step, "量測兩度被誤判的掉落訊號中斷")
+                                step.status = StepStatus.SKIPPED
 
                     if step_result.success:
                         logger.info(f"[✓] Robot {self.robot_id}, Step {step.step_id} completed successfully")

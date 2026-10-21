@@ -319,11 +319,10 @@ def test_unreachable_robot_reports_disconnect_not_drop(monkeypatch):
     assert task.metadata["shelf_drop"] is True
 
 
-def test_watcher_disconnect_flag_reaches_the_notification(monkeypatch):
-    """Still unreachable at the handler's verify: the watcher's suspicion
-    carries into classification even if a flapping link lets one of the
-    two classify reads through — 失聯 pause, not a CRITICAL drop."""
-    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="unreachable")
+def test_unreachable_verify_plus_a_flapping_read_is_offline(monkeypatch):
+    """Unreachable at the handler's verify and one of the two classify reads
+    still fails: a dead link — 失聯 pause, not a CRITICAL drop."""
+    eng = _engine(UNREACHABLE_READ, IDLE_CMD, verify="unreachable")
     eng._disconnect_suspected = True
 
     task, event = _run_drop(monkeypatch, eng)
@@ -331,6 +330,18 @@ def test_watcher_disconnect_flag_reaches_the_notification(monkeypatch):
     assert event.severity == Severity.WARN
     assert task.metadata["disconnect"] is True
     eng.fleet.return_home.assert_not_awaited()
+
+
+def test_unreachable_verify_but_both_classify_reads_answer_is_a_drop(monkeypatch):
+    """The robot is back by the classify reads: classified from them, not
+    from a suspicion flag the watcher may have set or cleared meanwhile."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="unreachable")
+    eng._disconnect_suspected = True
+
+    task, event = _run_drop(monkeypatch, eng)
+
+    assert event.severity == Severity.CRITICAL
+    assert task.metadata["disconnect"] is False
 
 
 def test_a_robot_that_answers_the_verify_drops_the_suspicion(monkeypatch):
@@ -569,8 +580,17 @@ async def test_verify_empty_then_silent_is_not_a_release(no_sleep):
 
 @pytest.mark.asyncio
 async def test_verify_empty_reads_must_be_consecutive(no_sleep):
-    eng = _verify_engine([NO_SHELF, UNAVAILABLE, NO_SHELF])
+    eng = _verify_engine([NO_SHELF, UNAVAILABLE, NO_SHELF, UNAVAILABLE])
     assert await eng._verify_shelf_still_docked() == "unreachable"
+
+
+@pytest.mark.asyncio
+async def test_verify_a_robot_that_answers_on_the_last_read_gets_one_more(no_sleep):
+    """[fail, empty] is not 'neither read answered': one more read decides."""
+    eng = _verify_engine([UNAVAILABLE, NO_SHELF, NO_SHELF])
+    assert await eng._verify_shelf_still_docked() == "released"
+    eng = _verify_engine([UNAVAILABLE, NO_SHELF, DOCKED])
+    assert await eng._verify_shelf_still_docked() == "docked"
 
 
 @pytest.mark.asyncio
@@ -904,9 +924,26 @@ def test_shelf_already_placed_means_nothing_to_report(monkeypatch):
     assert task.status == TaskStatus.IN_PROGRESS
 
 
-def test_release_before_the_first_dock_is_nothing_to_report(monkeypatch):
-    """Outage during the approach to the first dock: the robot comes back
-    carrying none — the shelf is still at home, not dropped."""
+def test_release_before_any_move_started_is_nothing_to_report(monkeypatch):
+    """Outage before the first move_shelf even started: the robot comes
+    back carrying none — the shelf is still at home, not dropped."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    task = Task(
+        task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
+        steps=[TaskStep(step_id="reset", action=StepAction.RESET_SHELF_POSE,
+                        params={"shelf_id": "S_04"}, status=StepStatus.SUCCESS),
+               TaskStep(step_id="m0", action=StepAction.MOVE_SHELF,
+                        params={"shelf_id": "S_04", "location_id": "B_101-1"})],
+    )
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task, step_index=1)
+
+    assert handled is False
+    assert events == []
+
+
+def test_a_move_that_docked_then_failed_still_counts_as_carrying(monkeypatch):
+    """19004 after the dock (新民 2026-10-19): the shelf is on the robot
+    although the step is FAIL — a release is a drop."""
     eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
     task = Task(
         task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
@@ -918,8 +955,8 @@ def test_release_before_the_first_dock_is_nothing_to_report(monkeypatch):
     )
     events, skipped, handled = _run_drop_all(monkeypatch, eng, task, step_index=1)
 
-    assert handled is False
-    assert events == []
+    assert handled is True
+    assert [e.severity for e in events] == [Severity.CRITICAL]
 
 
 def test_a_move_shelf_trigger_always_counts_as_carrying(monkeypatch):
@@ -1058,3 +1095,19 @@ def test_a_return_shelf_trigger_still_clears_the_event(monkeypatch):
     asyncio.run(eng._handle_shelf_drop(_task(), 1, trigger_step=trigger))
 
     assert not eng.shelf_drop_event.is_set()
+
+
+def test_a_stop_during_the_classify_reads_stands(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    task = _task()
+
+    async def _battery(*_):
+        task.status = TaskStatus.CANCELLED   # 停止 pressed while reading
+        return HEALTHY_BATTERY
+
+    eng.fleet.get_battery_info = AsyncMock(side_effect=_battery)
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task)
+
+    assert handled is True
+    assert task.status == TaskStatus.CANCELLED
+    assert events == []
