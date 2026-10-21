@@ -55,6 +55,9 @@ SHELF_VERIFY_INTERVAL = 2.0
 # return_home refused because furniture is docked: 11501 / 11019 「車上有家具
 # 不能充電」 — the firmware's own word that the shelf is still on the robot.
 CHARGE_REFUSED_WITH_SHELF = (11501, 11019)
+# False release signals a run tolerates before the next one is handled as a
+# drop regardless (a flapping moving-shelf read must not spin the run).
+FALSE_SIGNAL_CAP = 5
 
 # PFR: this pack's BMU has no proper regulation, so motor start/stop swings the
 # rail voltage and the reported percentage with it — their own app shows only
@@ -170,7 +173,8 @@ async def submit_task(task: Task):
 
 
 async def submit_cleanup_task(robot_id: str,
-                              metadata_extra: Optional[dict] = None) -> Optional[str]:
+                              metadata_extra: Optional[dict] = None,
+                              force_shelf_id: Optional[str] = None) -> Optional[str]:
     """取消載棚車任務後的收工:身上還有棚車就先歸位,再回充。
 
     操作者按「停止」的語意是「收工」,不是「原地棄置」。持棚車與否問機器人
@@ -186,6 +190,10 @@ async def submit_cleanup_task(robot_id: str,
         shelf_id = res.get("shelf_id")
     except Exception as e:
         logger.warning(f"Cleanup: moving-shelf query failed, assuming none held: {e}")
+    if not shelf_id and force_shelf_id:
+        # The firmware refused to charge 「車上有家具」 while this read said
+        # none: trust the refusal and park the named shelf.
+        shelf_id = force_shelf_id
     steps = []
     if shelf_id:
         steps.append(TaskStep(
@@ -221,6 +229,10 @@ class TaskEngine:
         # seen a shelf on the robot. None for a signal from the controller's
         # own monitor (which fires only after confirming the dock).
         self._signal_shelf_confirmed: Optional[bool] = None
+        # False release signals this run; past the cap the next one is
+        # handled as a drop so a flapping shelf read cannot spin the run at
+        # one step boundary forever.
+        self._false_signals = 0
         # monotonic timestamp of the current stationary window, or None while a
         # motion step is in flight — see MOTION_ACTIONS / BATTERY_ABORT_CONSECUTIVE.
         self._stationary_since: Optional[float] = None
@@ -844,7 +856,12 @@ class TaskEngine:
         shelf_confirmed = self._signal_shelf_confirmed
         self._signal_shelf_confirmed = None
         verdict: Optional[str] = None
-        if trigger_step is None or trigger_step.action != StepAction.RETURN_SHELF:
+        if self._false_signals >= FALSE_SIGNAL_CAP:
+            logger.error(
+                f"[SHELF DROP] {self._false_signals} false release signals this run — "
+                f"handling this one as a drop so the run does not spin"
+            )
+        elif trigger_step is None or trigger_step.action != StepAction.RETURN_SHELF:
             # Asked again here even though the watcher verified before
             # raising: a robot that was unreachable then may be back by the
             # time the step ends (one instant read when it is), and a signal
@@ -867,6 +884,7 @@ class TaskEngine:
                     f"[SHELF DROP] Robot {self.robot_id} still carries the shelf — "
                     f"release signal was false, resuming task {task.task_id}"
                 )
+                self._false_signals += 1
                 return False
             if verdict == "released" and shelf_confirmed is False:
                 # The watcher raised this during an outage while it had seen
@@ -878,6 +896,7 @@ class TaskEngine:
                     f"shelf, and none was being carried when the signal was "
                     f"raised — nothing to report, resuming task {task.task_id}"
                 )
+                self._false_signals += 1
                 return False
         kind, battery = await self._classify_release(verdict)
         if verdict == "unreachable" and kind != "disconnected":
@@ -885,16 +904,26 @@ class TaskEngine:
             # and has not yet been asked the actual question — one more
             # verify before paging the ward with a CRITICAL it may retract.
             verdict = await self._verify_shelf_still_docked()
+            self._disconnect_suspected = verdict == "unreachable"
             if verdict == "docked":
                 logger.warning(
                     f"[SHELF DROP] Robot {self.robot_id} is back and still carries "
                     f"the shelf — release signal was false, resuming task {task.task_id}"
                 )
-                self._disconnect_suspected = False
+                self._false_signals += 1
                 return False
-            self._disconnect_suspected = verdict == "unreachable"
-            if verdict == "unreachable":
-                kind = "disconnected"
+            if verdict == "released" and shelf_confirmed is False:
+                logger.info(
+                    f"[SHELF DROP] Robot {self.robot_id} is back carrying no shelf, "
+                    f"and none was being carried when the signal was raised — "
+                    f"nothing to report, resuming task {task.task_id}"
+                )
+                self._false_signals += 1
+                return False
+            # "unreachable" here, with both classify reads through, is an
+            # ambiguous shelf read on a reachable robot: handled as the drop
+            # the classify reads say it is; the post-return_home verify
+            # still retracts a docked shelf.
         low_battery = kind == "low_battery_return"
         disconnected = kind == "disconnected"
         battery_pct = battery.get("percentage")
@@ -924,7 +953,7 @@ class TaskEngine:
         # bed the robot is parked at is the engine's current target.
         location_id = (
             (trigger_step.params.get("location_id") if trigger_step is not None else None)
-            or getattr(self, "target_bed", None) or "unknown"
+            or getattr(self, "target_bed", "") or "unknown"
         )
         shelf_id = trigger_step.params.get("shelf_id", "unknown") if trigger_step else "unknown"
         if shelf_id == "unknown":
@@ -937,19 +966,20 @@ class TaskEngine:
             )
 
         shelf_pose = await self._query_shelf_pose(shelf_id)
+        # No shelf pose means the map has nothing to point the operator at —
+        # the frontend must say "position unknown" instead of "look at the
+        # marker", so hand it the robot's last known position to draw instead.
+        last_known_robot_pose = None if shelf_pose else await self._last_known_robot_pose()
         if task.status == TaskStatus.CANCELLED:
             # A stop (operator or battery abort) landed during the reads
-            # above; the CANCELLED ending stands, the wrap-up parks the
-            # shelf, and no drop marker is written for 續巡 to pick up.
+            # above (the last await before the status is written); the
+            # CANCELLED ending stands, the wrap-up parks the shelf, and no
+            # drop marker is written for 續巡 to pick up.
             logger.info(
                 f"[SHELF DROP] Task {task.task_id} cancelled while classifying — "
                 f"cleanup owns the wrap-up"
             )
             return True
-        # No shelf pose means the map has nothing to point the operator at —
-        # the frontend must say "position unknown" instead of "look at the
-        # marker", so hand it the robot's last known position to draw instead.
-        last_known_robot_pose = None if shelf_pose else await self._last_known_robot_pose()
         remaining_beds = self._collect_remaining_beds(task, step_index, trigger_step, location_id)
 
         # Store shelf-drop context in task metadata — merged, so mode
@@ -1085,11 +1115,12 @@ class TaskEngine:
         # 11501/11019 refusal 「車上有家具不能充電」 is the same answer in
         # refusal form, whatever the reads said (2026-10-02: reboot, reads
         # empty, shelf still latched).
+        if low_battery or (task.metadata or {}).get("mode") == "cleanup":
+            return True
         verdict = await self._verify_shelf_still_docked()
         refused_with_shelf = rh.get("error_code") in CHARGE_REFUSED_WITH_SHELF
         still_docked = verdict == "docked" or (refused_with_shelf and verdict != "unreachable")
-        if (still_docked and not low_battery
-                and (task.metadata or {}).get("mode") != "cleanup"):
+        if still_docked:
             await self._retract_false_drop(task, shelf_id, location_id, skip_detail)
         return True
 
@@ -1120,6 +1151,10 @@ class TaskEngine:
             f"to park the shelf"
         )
         task.status = TaskStatus.CANCELLED
+        if task.metadata is not None:
+            # The cleanup decides its return_shelf step from the same
+            # moving-shelf read that may just have lied; name the shelf.
+            task.metadata["cleanup_shelf_id"] = shelf_id
         # The N/A rows written for the beds this run will not reach now say
         # 貨架掉落; the record should say what actually happened.
         self._relabel_skipped_scans(skip_detail, "掉落訊號誤判，巡房提前結束")
@@ -1150,9 +1185,11 @@ class TaskEngine:
             conn = connect_db(client.db_path)
             try:
                 conn.execute(
-                    "UPDATE sensor_scan_data SET details = ? "
+                    "UPDATE sensor_scan_data SET details = ?, "
+                    "data_json = CASE WHEN json_valid(data_json) "
+                    "THEN json_set(data_json, '$.details', ?) ELSE data_json END "
                     "WHERE task_id = ? AND details = ? AND is_valid = 0",
-                    (new_detail, self.current_task_id, old_detail),
+                    (new_detail, new_detail, self.current_task_id, old_detail),
                 )
                 conn.commit()
             finally:
@@ -1176,8 +1213,9 @@ class TaskEngine:
         self._shelf_release_expected = False
         self._disconnect_suspected = False
         self._signal_shelf_confirmed = None
+        self._false_signals = 0
         # The run starts at the dock, standing still; no bed targeted yet.
-        self.target_bed = None
+        self.target_bed = ""
         self._stationary_since = time.monotonic()
         self._low_battery_streak = 0
         self._silent_streak = 0
@@ -1353,10 +1391,14 @@ class TaskEngine:
             meta = task.metadata or {}
             if cancelled and meta.get("mode") != "cleanup":
                 try:
+                    cleanup_kwargs = {}
+                    if meta.get("cleanup_shelf_id"):
+                        cleanup_kwargs["force_shelf_id"] = meta["cleanup_shelf_id"]
                     await submit_cleanup_task(
                         self.robot_id,
                         metadata_extra={"announce_after_home": True}
                         if meta.get("announce_after_home") else None,
+                        **cleanup_kwargs,
                     )
                 except Exception as e:
                     logger.error(f"[{tag}] Failed to queue cancel cleanup: {e}")
@@ -1767,6 +1809,11 @@ class TaskEngine:
                         f"shelf docked — ending run {task.task_id} for the cleanup to park it"
                     )
                     task.status = TaskStatus.CANCELLED
+                    held = next((st.params.get("shelf_id") for st in task.steps
+                                 if st.action == StepAction.RETURN_SHELF
+                                 and st.params.get("shelf_id")), None)
+                    if held and task.metadata is not None:
+                        task.metadata["cleanup_shelf_id"] = held
                     body = "機器人無法在載著貨架時回充\n本次巡房結束，將再試一次貨架歸位後回充"
                 try:
                     await dispatcher.dispatch(AnomalyEvent(

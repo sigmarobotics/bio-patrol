@@ -360,14 +360,17 @@ def test_robot_back_and_still_docked_resumes(monkeypatch):
     assert eng._disconnect_suspected is False
 
 
-def test_robot_gone_again_after_the_classify_reads_is_offline(monkeypatch):
+def test_shelf_read_still_failing_on_a_robot_that_answers_is_a_drop(monkeypatch):
+    """Both classify reads got through, so the robot is reachable; a shelf
+    read that still fails is ambiguous and handled as the drop the reads
+    say it is (the post-return_home verify retracts a docked shelf)."""
     eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
-    eng._verify_shelf_still_docked = AsyncMock(side_effect=["unreachable", "unreachable"])
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["unreachable", "unreachable", "released"])
 
     task, event = _run_drop(monkeypatch, eng)
 
-    assert event.severity == Severity.WARN
-    assert task.metadata["disconnect"] is True
+    assert event.severity == Severity.CRITICAL
+    assert task.metadata["disconnect"] is False
 
 
 def test_a_robot_that_answers_the_verify_drops_the_suspicion(monkeypatch):
@@ -1277,3 +1280,82 @@ def test_a_cleanup_refused_to_charge_pages_a_person(monkeypatch):
     assert task.status == TaskStatus.IN_PROGRESS       # run_task fails it
     assert [e.severity for e in events] == [Severity.CRITICAL]
     assert "請協助" in events[0].body
+
+
+def test_a_no_shelf_raise_is_nothing_to_report_after_the_second_verify_too(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["unreachable", "released"])
+    eng._signal_shelf_confirmed = False
+    events = []
+
+    async def _capture(event):
+        events.append(event)
+
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
+
+    assert asyncio.run(eng._handle_shelf_drop(_task(), 1)) is False
+    assert events == []
+
+
+def test_past_the_false_signal_cap_the_signal_is_a_drop(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    # no entry verify any more: only the post-return_home read
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released"])
+    eng._false_signals = task_runtime.FALSE_SIGNAL_CAP
+
+    task, event = _run_drop(monkeypatch, eng)
+
+    assert event.severity == Severity.CRITICAL
+    assert eng._verify_shelf_still_docked.await_count == 1
+
+
+def test_a_stop_during_the_pose_reads_stands(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released", shelf_pose=None)
+    task = _task()
+
+    async def _pose(*_):
+        task.status = TaskStatus.CANCELLED
+        return None
+
+    eng.fleet.get_controller_state = AsyncMock(side_effect=_pose)
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task)
+
+    assert handled is True
+    assert task.status == TaskStatus.CANCELLED
+    assert events == []
+    assert not (task.metadata or {}).get("shelf_drop")
+
+
+def test_a_retraction_names_the_shelf_for_the_cleanup(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng.fleet.return_home = AsyncMock(return_value={
+        "ok": False, "error_code": 11501, "error": "error_code=11501: Charging canceled",
+    })
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released", "released"])
+    task = _two_bed_task()
+
+    _run_drop_all(monkeypatch, eng, task)
+
+    assert task.status == TaskStatus.CANCELLED
+    assert task.metadata["cleanup_shelf_id"] == "S_04"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_parks_the_named_shelf_when_the_read_says_none(monkeypatch):
+    fleet = MagicMock()
+    fleet.get_moving_shelf = AsyncMock(return_value={"ok": True, "shelf_id": None})
+    monkeypatch.setattr(task_runtime, "get_fleet", lambda: fleet, raising=False)
+    import dependencies
+    monkeypatch.setattr(dependencies, "get_fleet", lambda: fleet)
+    submitted = []
+
+    async def _submit(task):
+        submitted.append(task)
+
+    monkeypatch.setattr(task_runtime, "submit_task", _submit)
+
+    await task_runtime.submit_cleanup_task("kachaka", force_shelf_id="S_04")
+
+    assert [st.action for st in submitted[0].steps] == [
+        StepAction.RETURN_SHELF.value, StepAction.RETURN_HOME.value]
+    assert submitted[0].steps[0].params["shelf_id"] == "S_04"
