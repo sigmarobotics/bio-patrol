@@ -32,8 +32,9 @@ UNAVAILABLE = RuntimeError(
 HEALTHY_BATTERY = {"ok": True, "percentage": 74.0, "power_status": "2"}
 IDLE_CMD = {"ok": True, "state": "1", "command": None, "is_running": False}
 UNREACHABLE_READ = {"ok": False, "error": str(UNAVAILABLE), "retryable": True}
-DOCKED = {"ok": True, "shelf_id": "S_04"}
-NO_SHELF = {"ok": True, "shelf_id": None}
+# raw get_moving_shelf_id answers used by the verify reads
+DOCKED = "S_04"
+NO_SHELF = ""
 
 
 # ── connection-error recogniser ──────────────────────────────────────────────
@@ -108,12 +109,13 @@ def _watcher_engine(responses, *, final="S_04", verify_reads=None):
     slot.conn = MagicMock(client=fake_client)
     fleet = MagicMock()
     fleet._robots = {"kachaka": slot}
-    # The watcher asks the robot before raising; by default it cannot get
-    # through (the signal stands as "unreachable").
-    if verify_reads is None:
-        fleet.get_moving_shelf = AsyncMock(side_effect=UNAVAILABLE)
-    else:
-        fleet.get_moving_shelf = AsyncMock(side_effect=list(verify_reads) * 8)
+    # The watcher asks the robot (raw client) before raising; by default it
+    # cannot get through (the signal stands as "unreachable").
+    verify_client = MagicMock()
+    verify_client.get_moving_shelf_id = MagicMock(
+        side_effect=UNAVAILABLE if verify_reads is None else list(verify_reads) * 8
+    )
+    fleet.get_raw_client = MagicMock(return_value=verify_client)
     eng = task_runtime.TaskEngine(fleet, "kachaka")
     eng.shelf_drop_event = asyncio.Event()
     eng._state_watcher_stop = False
@@ -219,7 +221,6 @@ async def test_watcher_ignores_an_empty_read_the_robot_denies(no_sleep):
     await eng._watch_shelf_state()
 
     assert not eng.shelf_drop_event.is_set()
-    assert eng._shelf_seen_on_robot is True
 
 
 @pytest.mark.asyncio
@@ -232,7 +233,6 @@ async def test_watcher_keeps_watching_after_a_denied_empty_read(no_sleep):
     await eng._watch_shelf_state()
 
     assert eng.shelf_drop_event.is_set()
-    assert eng._shelf_seen_on_robot is False
 
 
 @pytest.mark.asyncio
@@ -520,9 +520,11 @@ def test_resume_returns_503_when_robot_never_registered(monkeypatch):
 # the corridor all night. The handler now asks the robot first.
 
 def _verify_engine(reads):
-    """Engine whose fleet answers get_moving_shelf from ``reads``."""
+    """Engine whose raw client answers get_moving_shelf_id from ``reads``."""
+    client = MagicMock()
+    client.get_moving_shelf_id = MagicMock(side_effect=list(reads))
     fleet = MagicMock()
-    fleet.get_moving_shelf = AsyncMock(side_effect=list(reads))
+    fleet.get_raw_client = MagicMock(return_value=client)
     return task_runtime.TaskEngine(fleet, "kachaka")
 
 
@@ -713,7 +715,7 @@ def _two_bed_task():
     )
 
 
-def _run_drop_all(monkeypatch, eng, task):
+def _run_drop_all(monkeypatch, eng, task, step_index=0):
     events, skipped = [], []
 
     async def _capture(event):
@@ -722,7 +724,7 @@ def _run_drop_all(monkeypatch, eng, task):
     monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
     monkeypatch.setattr(task_runtime.TaskEngine, "_record_skipped_scan",
                         lambda self, step, details, **kw: skipped.append(details))
-    handled = asyncio.run(eng._handle_shelf_drop(task, 0))
+    handled = asyncio.run(eng._handle_shelf_drop(task, step_index))
     return events, skipped, handled
 
 
@@ -747,9 +749,10 @@ def test_firmware_refusing_return_home_retracts_the_drop(monkeypatch):
     assert task.status == TaskStatus.IN_PROGRESS
     assert task.metadata["shelf_drop"] is False
     assert task.metadata["remaining_beds"] == []
-    # the beds after the false drop are not written off as 貨架掉落
-    assert skipped == []
-    assert task.steps[1].status != StepStatus.SKIPPED
+    # the N/A rows were written before return_home (durable), but the steps
+    # go back to PENDING so the resumed run takes the real readings
+    assert skipped == ["貨架掉落，巡房中斷"] * 2
+    assert [st.status for st in task.steps] == [StepStatus.PENDING, StepStatus.PENDING]
 
 
 def test_shelf_still_docked_after_return_home_retracts_the_drop(monkeypatch):
@@ -764,7 +767,10 @@ def test_shelf_still_docked_after_return_home_retracts_the_drop(monkeypatch):
     assert handled is False
     assert [e.severity for e in events] == [Severity.CRITICAL, Severity.WARN]
     assert task.status == TaskStatus.IN_PROGRESS
-    assert skipped == []
+    # return_home succeeded carrying the shelf: the robot is at the charger,
+    # so the current bed stays skipped (recorded as such) and the rest resume
+    assert skipped[-1] == "掉落誤報，機器人已回充電站，本床跳過"
+    assert [st.status for st in task.steps] == [StepStatus.SKIPPED, StepStatus.PENDING]
 
 
 def test_retraction_yields_to_an_operator_stop(monkeypatch):
@@ -803,18 +809,49 @@ def test_cancel_during_the_verify_window_stands(monkeypatch):
     assert task.status == TaskStatus.CANCELLED
 
 
-def test_no_shelf_carried_means_nothing_to_report(monkeypatch):
-    """Blip on the final return_home, shelf already placed: the robot comes
-    back carrying none — that is not a drop."""
+def test_shelf_already_placed_means_nothing_to_report(monkeypatch):
+    """Blip on the final return_home, shelf already placed by the run's own
+    return_shelf: the robot comes back carrying none — that is not a drop."""
     eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
-    eng._shelf_seen_on_robot = False
-    task = _two_bed_task()
+    task = Task(
+        task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
+        steps=[TaskStep(step_id="m1", action=StepAction.MOVE_SHELF,
+                        params={"shelf_id": "S_04", "location_id": "B_101-1"},
+                        status=StepStatus.SUCCESS),
+               TaskStep(step_id="r1", action=StepAction.RETURN_SHELF,
+                        params={"shelf_id": "S_04"}, status=StepStatus.SUCCESS),
+               TaskStep(step_id="h1", action=StepAction.RETURN_HOME, params={})],
+    )
+    events = []
 
-    events, skipped, handled = _run_drop_all(monkeypatch, eng, task)
+    async def _capture(event):
+        events.append(event)
+
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
+
+    handled = asyncio.run(eng._handle_shelf_drop(task, 2))
 
     assert handled is False
     assert events == []
     assert task.status == TaskStatus.IN_PROGRESS
+
+
+def test_shelf_picked_up_again_after_placing_still_reports(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    task = Task(
+        task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
+        steps=[TaskStep(step_id="r1", action=StepAction.RETURN_SHELF,
+                        params={"shelf_id": "S_04"}, status=StepStatus.SUCCESS),
+               TaskStep(step_id="m1", action=StepAction.MOVE_SHELF,
+                        params={"shelf_id": "S_04", "location_id": "B_101-1"},
+                        status=StepStatus.SUCCESS),
+               TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
+                        params={"bed_key": "B_101-1"})],
+    )
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task, step_index=2)
+
+    assert handled is True
+    assert [e.severity for e in events] == [Severity.CRITICAL]
 
 
 def test_other_return_home_failures_leave_the_drop_standing(monkeypatch):

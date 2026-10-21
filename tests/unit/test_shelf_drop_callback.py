@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from common_types import Task, TaskStep, TaskStatus, StepAction
+from common_types import Task, TaskStep, TaskStatus, StepAction, StepStatus
 
 
 @pytest.mark.asyncio
@@ -71,7 +71,7 @@ async def test_state_watcher_fires_on_shelf_id_transition(monkeypatch):
 
     fleet = MagicMock(); fleet._robots = {"kachaka": slot}
     # The watcher asks the robot before raising: two empty reads confirm it.
-    fleet.get_moving_shelf = AsyncMock(return_value={"ok": True, "shelf_id": None})
+    fleet.get_raw_client = MagicMock(return_value=MagicMock(get_moving_shelf_id=MagicMock(return_value="")))
     from services import task_runtime
     monkeypatch.setattr(task_runtime, "SHELF_VERIFY_INTERVAL", 0.0)
 
@@ -177,4 +177,38 @@ async def test_second_false_release_on_the_same_bed_records_the_skip(monkeypatch
 
     assert calls == ["a0", "a0"]
     assert len(skipped) == 1
+    assert task.status == TaskStatus.DONE
+
+
+@pytest.mark.asyncio
+async def test_a_step_left_skipped_by_a_retracted_drop_is_passed_over(monkeypatch):
+    """return_home succeeded carrying the shelf: the handler keeps the
+    current scan SKIPPED (it would be taken at the charger) and the loop
+    moves on instead of running it."""
+    from services.task_runtime import TaskEngine, StepResult
+
+    fleet = MagicMock()
+    fleet._robots = {}
+    fleet.get_shelves = AsyncMock(return_value={"ok": True, "shelves": []})
+    fleet.get_locations = AsyncMock(return_value={"ok": True, "locations": []})
+    fleet.get_metrics = AsyncMock(return_value={"poll_count": 0, "poll_rtt_list": [], "poll_success_count": 0})
+    fleet.reset_metrics = AsyncMock()
+    eng = TaskEngine(fleet, "kachaka")
+    executed: list[str] = []
+
+    async def fake_execute(step):
+        executed.append(step.step_id)
+        return StepResult(success=True, error_code=0, error_message="", data={}, timestamp="t")
+
+    monkeypatch.setattr(eng, "_execute_step", fake_execute)
+
+    task = Task(
+        task_id="t4", robot_id="kachaka", status=TaskStatus.QUEUED,
+        steps=[TaskStep(step_id="a0", action=StepAction.BIO_SCAN, params={"bed_key": "101-1"},
+                        status=StepStatus.SKIPPED),
+               TaskStep(step_id="m1", action=StepAction.WAIT, params={"seconds": "0"})],
+    )
+    await eng.run_task(task)
+
+    assert executed == ["m1"]
     assert task.status == TaskStatus.DONE

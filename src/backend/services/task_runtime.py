@@ -47,12 +47,9 @@ _CHARGING_POWER_STATUSES = {
 # gRPC hiccup is normal and stays silent.
 DISCONNECT_POLL_THRESHOLD = 3
 # A release signal is verified against the robot before it is believed: up to
-# this many get_moving_shelf reads, this far apart, so a WiFi blip that raised
-# the signal has time to end (板橋 blips last 4–12 s). A failed read is not
-# cheap — kachaka_core's with_retry makes 3 attempts with 1 s + 2 s backoff
-# and a 5 s deadline each, so a dropped-packet blip can cost ~18 s per read
-# and a verify on a dead robot ~40 s; that is the price of not paging the
-# ward for a shelf that never left the robot.
+# this many single get_moving_shelf_id reads (the watcher's own read, 5 s
+# deadline, no retry layer), this far apart, so a WiFi blip that raised the
+# signal has time to end (板橋 blips last 4–12 s); ~12 s on a dead robot.
 SHELF_VERIFY_POLLS = 2
 SHELF_VERIFY_INTERVAL = 2.0
 
@@ -217,12 +214,6 @@ class TaskEngine:
         # True once the robot stopped answering: the run still pauses, but the
         # shelf state is reported as unknown instead of dropped.
         self._disconnect_suspected = False
-        # True once the watcher has seen a shelf on the robot in this run and
-        # not yet seen it released: a "carries none now" answer only reports a
-        # drop while this is True (a blip during the final return_home, shelf
-        # already placed, is nothing). Unknown before a run starts → assume
-        # carried, the side that still reports.
-        self._shelf_seen_on_robot = True
         # monotonic timestamp of the current stationary window, or None while a
         # motion step is in flight — see MOTION_ACTIONS / BATTERY_ABORT_CONSECUTIVE.
         self._stationary_since: Optional[float] = None
@@ -321,7 +312,6 @@ class TaskEngine:
                 if mid:
                     last_seen_id = mid
                     confirmed_docked = True
-                    self._shelf_seen_on_robot = True
                 elif confirmed_docked and last_seen_id:
                     released = True
                     if self._shelf_release_expected:
@@ -339,7 +329,6 @@ class TaskEngine:
                     if released:
                         confirmed_docked = False
                         last_seen_id = None
-                        self._shelf_seen_on_robot = False
                     # else: a transient the robot denied — still docked, keep
                     # watching for the real thing.
             except Exception as e:
@@ -649,14 +638,20 @@ class TaskEngine:
                         break
                 remaining.append({"bed_key": future.params.get("bed_key", ""), "location_id": future_loc})
 
-        # If no trigger step (polling detection), include current executing bio_scan
-        if not trigger_step:
-            current = task.steps[step_index] if step_index < len(task.steps) else None
-            if current and current.action == StepAction.BIO_SCAN and current.status in (StepStatus.PENDING, StepStatus.EXECUTING):
-                remaining.insert(0, {
-                    "bed_key": current.params.get("bed_key", ""),
-                    "location_id": getattr(self, "target_bed", ""),
-                })
+        # The current bed: a scan the signal cut short (trigger), or the
+        # pending/executing scan at step_index (loop-top detection).
+        current = None
+        if trigger_step is not None and trigger_step.action == StepAction.BIO_SCAN:
+            current = trigger_step
+        elif trigger_step is None:
+            candidate = task.steps[step_index] if step_index < len(task.steps) else None
+            if candidate and candidate.action == StepAction.BIO_SCAN and candidate.status in (StepStatus.PENDING, StepStatus.EXECUTING):
+                current = candidate
+        if current is not None and current.step_id not in collected:
+            remaining.insert(0, {
+                "bed_key": current.params.get("bed_key", ""),
+                "location_id": getattr(self, "target_bed", ""),
+            })
 
         return remaining
 
@@ -759,19 +754,16 @@ class TaskEngine:
         empty_reads = 0
         for attempt in range(SHELF_VERIFY_POLLS):
             try:
-                res = await self.fleet.get_moving_shelf(self.robot_id)
-                if res.get("ok", True) and not res.get("error"):
-                    if res.get("shelf_id"):
-                        return "docked"
-                    # One empty read is the transient the docstring names;
-                    # two in a row, an interval apart, is a release. One
-                    # empty read and then silence is not enough to call it.
-                    empty_reads += 1
-                    if empty_reads >= 2:
-                        return "released"
-                else:
-                    empty_reads = 0
-                    logger.debug(f"[SHELF VERIFY] read {attempt + 1} error: {res.get('error')}")
+                client = self.fleet.get_raw_client(self.robot_id)
+                mid = await asyncio.to_thread(client.get_moving_shelf_id)
+                if mid:
+                    return "docked"
+                # One empty read is the transient the docstring names; two
+                # in a row, an interval apart, is a release. One empty read
+                # and then silence is not enough to call it.
+                empty_reads += 1
+                if empty_reads >= 2:
+                    return "released"
             except Exception as e:
                 empty_reads = 0
                 logger.debug(
@@ -780,6 +772,23 @@ class TaskEngine:
             if attempt + 1 < SHELF_VERIFY_POLLS:
                 await asyncio.sleep(SHELF_VERIFY_INTERVAL)
         return "unreachable"
+
+    @staticmethod
+    def _shelf_placed(task: Task, step_index: int) -> bool:
+        """Whether the run's own steps say the shelf is already set down —
+        the last completed shelf step before ``step_index`` is a return_shelf.
+        A "carries none now" answer then reports nothing (a blip on the
+        final return_home at 板橋 would otherwise page the ward with a drop
+        of a shelf sitting at home)."""
+        placed = False
+        for st in task.steps[:step_index]:
+            if st.status != StepStatus.SUCCESS:
+                continue
+            if st.action == StepAction.MOVE_SHELF:
+                placed = False
+            elif st.action == StepAction.RETURN_SHELF:
+                placed = True
+        return placed
 
     async def _handle_shelf_drop(self, task: Task, step_index: int,
                                    trigger_step: Optional[TaskStep] = None,
@@ -831,15 +840,13 @@ class TaskEngine:
                     f"release signal was false, resuming task {task.task_id}"
                 )
                 return False
-            if verdict == "released" and not self._shelf_seen_on_robot:
+            if verdict == "released" and self._shelf_placed(task, step_index):
                 logger.info(
                     f"[SHELF DROP] Robot {self.robot_id} answers and carries no "
-                    f"shelf, but none was being carried — nothing to report, "
-                    f"resuming task {task.task_id}"
+                    f"shelf, and the run had already placed it — nothing to "
+                    f"report, resuming task {task.task_id}"
                 )
                 return False
-            if self.shelf_drop_event is not None:
-                self.shelf_drop_event.set()
         kind, battery = await self._classify_release()
         low_battery = kind == "low_battery_return"
         disconnected = kind == "disconnected"
@@ -963,44 +970,19 @@ class TaskEngine:
             # Operator-critical path — must keep going even if dispatcher breaks.
             logger.exception("Failed to dispatch shelf-drop anomaly")
 
-        # Robot return home — controller failures come back as {"ok": False},
-        # not exceptions, so check the result explicitly. An unreachable robot
-        # takes no commands, so sending it home would only burn the
-        # controller's 240s timeout inside the drop handler.
-        retracted = False
-        if disconnected:
-            logger.info(
-                f"[SHELF DROP] Robot {self.robot_id} unreachable — skipping return_home"
-            )
-        else:
-            rh: dict = {}
-            try:
-                rh = (await self.fleet.return_home(self.robot_id)) or {}
-                if rh.get("ok"):
-                    logger.info(f"[SHELF DROP] Robot {self.robot_id} sent home")
-                else:
-                    logger.error(f"[SHELF DROP] return_home failed: {rh.get('error')}")
-            except Exception as rh_err:
-                logger.error(f"[SHELF DROP] Failed to send robot home: {rh_err}")
-            # Last word from the robot: is the shelf on it after all? Covers
-            # the verify reads having been fooled, and the 「握持家具時充電」
-            # setting being ON (return_home then succeeds with the shelf
-            # docked). A 11501/11019 refusal 「車上有家具不能充電」 is the same
-            # answer in refusal form, trusted when the reads cannot get through.
-            verdict = await self._verify_shelf_still_docked()
-            refused_with_shelf = rh.get("error_code") in (11501, 11019)
-            if verdict == "docked" or refused_with_shelf:
-                retracted = await self._retract_false_drop(task, shelf_id, location_id)
-        if retracted:
-            return False
-        # The drop stands: write the beds it took off tonight's run.
-        # Record all skipped bio_scan steps to DB
+        # Record all skipped bio_scan steps to DB — before return_home (up to
+        # 240 s): a restart in that window must not lose tonight's N/A rows.
+        # A retracted drop puts these steps back to PENDING and the later
+        # real reading outranks the N/A row in the run summary.
         steps_to_skip = []
         if trigger_step and trigger_step.skip_on_failure:
             for skip_id in trigger_step.skip_on_failure:
                 s = next((s for s in task.steps if s.step_id == skip_id), None)
                 if s and s.action == StepAction.BIO_SCAN:
                     steps_to_skip.append(s)
+        if trigger_step and trigger_step.action == StepAction.BIO_SCAN:
+            # The scan the signal cut short is unprocessed too.
+            steps_to_skip.append(trigger_step)
         # With no trigger step the current step has not run yet (loop
         # top): it is unprocessed too.
         first = step_index + 1 if trigger_step else step_index
@@ -1017,20 +999,54 @@ class TaskEngine:
         for s in steps_to_skip:
             self._record_skipped_scan(s, skip_detail, location_id=s.params.get("location_id", ""))
             s.status = StepStatus.SKIPPED
+
+        # Robot return home — controller failures come back as {"ok": False},
+        # not exceptions, so check the result explicitly. An unreachable robot
+        # takes no commands, so sending it home would only burn the
+        # controller's 240s timeout inside the drop handler.
+        if disconnected:
+            logger.info(
+                f"[SHELF DROP] Robot {self.robot_id} unreachable — skipping return_home"
+            )
+            return True
+        rh: dict = {}
+        try:
+            rh = (await self.fleet.return_home(self.robot_id)) or {}
+            if rh.get("ok"):
+                logger.info(f"[SHELF DROP] Robot {self.robot_id} sent home")
+            else:
+                logger.error(f"[SHELF DROP] return_home failed: {rh.get('error')}")
+        except Exception as rh_err:
+            logger.error(f"[SHELF DROP] Failed to send robot home: {rh_err}")
+        # Last word from the robot: is the shelf on it after all? Covers the
+        # verify reads having been fooled, and the 「握持家具時充電」 setting
+        # being ON (return_home then succeeds with the shelf docked). A
+        # 11501/11019 refusal 「車上有家具不能充電」 is the same answer in
+        # refusal form, whatever the reads said (2026-10-02: reboot, reads
+        # empty, shelf still latched).
+        verdict = await self._verify_shelf_still_docked()
+        if verdict == "docked" or rh.get("error_code") in (11501, 11019):
+            if await self._retract_false_drop(task, step_index, shelf_id, location_id,
+                                              steps_to_skip, at_dock=bool(rh.get("ok"))):
+                return False
         return True
 
-    async def _retract_false_drop(self, task: Task, shelf_id: str,
-                                  location_id: str) -> bool:
+    async def _retract_false_drop(self, task: Task, step_index: int, shelf_id: str,
+                                  location_id: str, skipped: List[TaskStep],
+                                  *, at_dock: bool) -> bool:
         """The robot reports the shelf still docked after the drop was
         reported (a 11501/11019 「車上有家具不能充電」 refusal, or a plain read):
         the alert just sent was false. The run resumes — the shelf is on the
-        robot and the beds are still there — the drop marker comes off the
-        task so 續巡 does not offer to resume onto a docked shelf, and the ward
-        is told. Leaving the robot in the corridor carrying the shelf until
-        someone walked over was the 板橋 2026-10-19 outcome. Returns whether
-        the run resumes (an operator stop that landed meanwhile stands).
+        robot and the beds are still there — the skipped steps go back to
+        PENDING, the drop marker comes off the task so 續巡 does not offer to
+        resume onto a docked shelf, and the ward is told. Leaving the robot
+        in the corridor carrying the shelf until someone walked over was the
+        板橋 2026-10-19 outcome. Returns whether the run resumes: a stop or a
+        續巡 that landed meanwhile (status no longer SHELF_DROPPED) stands.
+        With ``at_dock`` (return_home succeeded carrying the shelf) the scan
+        at ``step_index`` stays skipped — it would be taken at the charger.
         """
-        if task.status == TaskStatus.CANCELLED:
+        if task.status != TaskStatus.SHELF_DROPPED:
             return False
         logger.warning(
             f"[SHELF DROP] Robot {self.robot_id} reports the shelf still docked — "
@@ -1041,8 +1057,15 @@ class TaskEngine:
             task.metadata["shelf_drop"] = False
             task.metadata["remaining_beds"] = []
             task.metadata["false_drop"] = True
-        if self.shelf_drop_event is not None:
-            self.shelf_drop_event.clear()
+        current = task.steps[step_index] if step_index < len(task.steps) else None
+        for st in skipped:
+            if at_dock and st is current:
+                self._record_skipped_scan(
+                    st, "掉落誤報，機器人已回充電站，本床跳過",
+                    location_id=st.params.get("location_id", ""),
+                )
+                continue
+            st.status = StepStatus.PENDING
         try:
             await dispatcher.dispatch(AnomalyEvent(
                 severity=Severity.WARN,
@@ -1076,7 +1099,6 @@ class TaskEngine:
         self.shelf_drop_event.clear()
         self._shelf_release_expected = False
         self._disconnect_suspected = False
-        self._shelf_seen_on_robot = False
         # The run starts at the dock, standing still.
         self._stationary_since = time.monotonic()
         self._low_battery_streak = 0
@@ -1106,6 +1128,12 @@ class TaskEngine:
                     if await self._handle_shelf_drop(task, step_index):
                         break
                     continue  # false signal: same step, event cleared
+
+                if step.status == StepStatus.SKIPPED:
+                    # Left skipped by a retracted drop (the robot went home
+                    # carrying the shelf; a scan here would be at the charger).
+                    step_index += 1
+                    continue
 
                 # Check if this step should be skipped
                 if step.step_id in skipped_steps:
@@ -1153,7 +1181,8 @@ class TaskEngine:
                         # False signal. A scan it cut short is re-run once so
                         # the bed is not silently lost; a second cut is
                         # recorded as skipped. Any other step keeps its result.
-                        if "interrupted by shelf release" in (step_result.error_message or ""):
+                        if ("interrupted by shelf release" in (step_result.error_message or "")
+                                and step.status != StepStatus.SKIPPED):
                             if step.step_id not in rerun_steps:
                                 rerun_steps.add(step.step_id)
                                 logger.info(f"[SHELF] Re-running {step.step_id} after a false release signal")
