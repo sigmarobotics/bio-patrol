@@ -650,7 +650,8 @@ class TaskEngine:
         # The current bed: a scan the signal cut short (trigger), or the
         # pending/executing scan at step_index (loop-top detection).
         current = None
-        if trigger_step is not None and trigger_step.action == StepAction.BIO_SCAN:
+        if (trigger_step is not None and trigger_step.action == StepAction.BIO_SCAN
+                and not (trigger_step.result and trigger_step.result.success)):
             current = trigger_step
         elif trigger_step is None:
             candidate = task.steps[step_index] if step_index < len(task.steps) else None
@@ -791,27 +792,6 @@ class TaskEngine:
                 return "unreachable"
             await asyncio.sleep(SHELF_VERIFY_INTERVAL)
 
-    @staticmethod
-    def _shelf_not_carried(task: Task, step_index: int,
-                           trigger_step: Optional[TaskStep]) -> bool:
-        """Whether the run's own steps say no shelf should be on the robot:
-        no move_shelf has started yet (and the trigger is not one), or the
-        last completed shelf step before ``step_index`` is a return_shelf.
-        A "carries none now" answer then reports nothing (a blip on the
-        final return_home, or during the approach to the first dock, would
-        otherwise page the ward with a drop of a shelf sitting at home)."""
-        if trigger_step is not None and trigger_step.action == StepAction.MOVE_SHELF:
-            return False
-        carried = False
-        for st in task.steps[:step_index]:
-            if st.action == StepAction.MOVE_SHELF and st.status != StepStatus.PENDING:
-                # A move that docked and then failed on the way (19004) is
-                # still carrying: any started move counts.
-                carried = True
-            elif st.action == StepAction.RETURN_SHELF and st.status == StepStatus.SUCCESS:
-                carried = False
-        return not carried
-
     async def _handle_shelf_drop(self, task: Task, step_index: int,
                                    trigger_step: Optional[TaskStep] = None,
                                    error_code: int = 0) -> bool:
@@ -861,14 +841,20 @@ class TaskEngine:
                     f"release signal was false, resuming task {task.task_id}"
                 )
                 return False
-            if verdict == "released" and self._shelf_not_carried(task, step_index, trigger_step):
-                logger.info(
-                    f"[SHELF DROP] Robot {self.robot_id} answers and carries no "
-                    f"shelf, and the run was not carrying one — nothing to "
-                    f"report, resuming task {task.task_id}"
+        kind, battery = await self._classify_release(verdict)
+        if verdict == "unreachable" and kind != "disconnected":
+            # The robot came back between the verify and the classify reads
+            # and has not yet been asked the actual question — one more
+            # verify before paging the ward with a CRITICAL it may retract.
+            verdict = await self._verify_shelf_still_docked()
+            if verdict == "docked":
+                logger.warning(
+                    f"[SHELF DROP] Robot {self.robot_id} is back and still carries "
+                    f"the shelf — release signal was false, resuming task {task.task_id}"
                 )
                 return False
-        kind, battery = await self._classify_release(verdict)
+            if verdict == "unreachable":
+                kind = "disconnected"
         low_battery = kind == "low_battery_return"
         disconnected = kind == "disconnected"
         battery_pct = battery.get("percentage")
@@ -1013,8 +999,10 @@ class TaskEngine:
                 s = next((s for s in task.steps if s.step_id == skip_id), None)
                 if s and s.action == StepAction.BIO_SCAN:
                     steps_to_skip.append(s)
-        if trigger_step and trigger_step.action == StepAction.BIO_SCAN:
-            # The scan the signal cut short is unprocessed too.
+        if (trigger_step and trigger_step.action == StepAction.BIO_SCAN
+                and not (trigger_step.result and trigger_step.result.success)):
+            # The scan the signal cut short is unprocessed too (a scan that
+            # had already completed keeps its reading).
             steps_to_skip.append(trigger_step)
         # With no trigger step the current step has not run yet (loop
         # top): it is unprocessed too.
@@ -1208,7 +1196,7 @@ class TaskEngine:
                                 continue
                             if step.action == StepAction.BIO_SCAN:
                                 self._record_skipped_scan(step, "量測兩度被誤判的掉落訊號中斷")
-                                step.status = StepStatus.SKIPPED
+                            step.status = StepStatus.SKIPPED
 
                     if step_result.success:
                         logger.info(f"[✓] Robot {self.robot_id}, Step {step.step_id} completed successfully")
@@ -1692,6 +1680,19 @@ class TaskEngine:
         # which is exactly what return_home wants — not a failure.
         if isinstance(result, dict) and result.get("error_code") == 10267:
             result = {**result, "ok": True, "success": True}
+        if isinstance(result, dict) and result.get("error_code") in (11501, 11019):
+            # 「車上有家具不能充電」: a return_shelf before this step failed
+            # with the shelf still latched. A FAILED run queues no cleanup
+            # and the robot would sit in the corridor carrying the shelf
+            # (板橋 2026-10-19); CANCELLED makes run_task's wrap-up park it.
+            task = tasks_db.get(self.current_task_id)
+            if (task is not None and task.status == TaskStatus.IN_PROGRESS
+                    and (task.metadata or {}).get("mode") != "cleanup"):
+                logger.warning(
+                    f"[RETURN HOME] Robot {self.robot_id} refused to charge with the "
+                    f"shelf docked — ending run {task.task_id} for the cleanup to park it"
+                )
+                task.status = TaskStatus.CANCELLED
         return self._make_result(result, step.action, {})
 
     async def _await_or_drop(self, coro):

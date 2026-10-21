@@ -332,16 +332,41 @@ def test_unreachable_verify_plus_a_flapping_read_is_offline(monkeypatch):
     eng.fleet.return_home.assert_not_awaited()
 
 
-def test_unreachable_verify_but_both_classify_reads_answer_is_a_drop(monkeypatch):
-    """The robot is back by the classify reads: classified from them, not
-    from a suspicion flag the watcher may have set or cleared meanwhile."""
-    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="unreachable")
+def test_robot_back_by_the_classify_reads_is_asked_once_more(monkeypatch):
+    """The robot is back by the classify reads but was never asked the
+    actual question: one more verify decides before any CRITICAL."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["unreachable", "released", "released"])
     eng._disconnect_suspected = True
 
     task, event = _run_drop(monkeypatch, eng)
 
     assert event.severity == Severity.CRITICAL
     assert task.metadata["disconnect"] is False
+
+
+def test_robot_back_and_still_docked_resumes(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["unreachable", "docked"])
+    events = []
+
+    async def _capture(event):
+        events.append(event)
+
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
+
+    assert asyncio.run(eng._handle_shelf_drop(_task(), 1)) is False
+    assert events == []
+
+
+def test_robot_gone_again_after_the_classify_reads_is_offline(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["unreachable", "unreachable"])
+
+    task, event = _run_drop(monkeypatch, eng)
+
+    assert event.severity == Severity.WARN
+    assert task.metadata["disconnect"] is True
 
 
 def test_a_robot_that_answers_the_verify_drops_the_suspicion(monkeypatch):
@@ -897,50 +922,6 @@ def test_cancel_during_the_verify_window_stands(monkeypatch):
     assert task.status == TaskStatus.CANCELLED
 
 
-def test_shelf_already_placed_means_nothing_to_report(monkeypatch):
-    """Blip on the final return_home, shelf already placed by the run's own
-    return_shelf: the robot comes back carrying none — that is not a drop."""
-    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
-    task = Task(
-        task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
-        steps=[TaskStep(step_id="m1", action=StepAction.MOVE_SHELF,
-                        params={"shelf_id": "S_04", "location_id": "B_101-1"},
-                        status=StepStatus.SUCCESS),
-               TaskStep(step_id="r1", action=StepAction.RETURN_SHELF,
-                        params={"shelf_id": "S_04"}, status=StepStatus.SUCCESS),
-               TaskStep(step_id="h1", action=StepAction.RETURN_HOME, params={})],
-    )
-    events = []
-
-    async def _capture(event):
-        events.append(event)
-
-    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
-
-    handled = asyncio.run(eng._handle_shelf_drop(task, 2))
-
-    assert handled is False
-    assert events == []
-    assert task.status == TaskStatus.IN_PROGRESS
-
-
-def test_release_before_any_move_started_is_nothing_to_report(monkeypatch):
-    """Outage before the first move_shelf even started: the robot comes
-    back carrying none — the shelf is still at home, not dropped."""
-    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
-    task = Task(
-        task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
-        steps=[TaskStep(step_id="reset", action=StepAction.RESET_SHELF_POSE,
-                        params={"shelf_id": "S_04"}, status=StepStatus.SUCCESS),
-               TaskStep(step_id="m0", action=StepAction.MOVE_SHELF,
-                        params={"shelf_id": "S_04", "location_id": "B_101-1"})],
-    )
-    events, skipped, handled = _run_drop_all(monkeypatch, eng, task, step_index=1)
-
-    assert handled is False
-    assert events == []
-
-
 def test_a_move_that_docked_then_failed_still_counts_as_carrying(monkeypatch):
     """19004 after the dock (新民 2026-10-19): the shelf is on the robot
     although the step is FAIL — a release is a drop."""
@@ -973,24 +954,6 @@ def test_a_move_shelf_trigger_always_counts_as_carrying(monkeypatch):
     )
     events, skipped, handled = _run_drop_all(monkeypatch, eng, task, step_index=0,
                                              trigger_step=task.steps[0])
-
-    assert handled is True
-    assert [e.severity for e in events] == [Severity.CRITICAL]
-
-
-def test_shelf_picked_up_again_after_placing_still_reports(monkeypatch):
-    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
-    task = Task(
-        task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
-        steps=[TaskStep(step_id="r1", action=StepAction.RETURN_SHELF,
-                        params={"shelf_id": "S_04"}, status=StepStatus.SUCCESS),
-               TaskStep(step_id="m1", action=StepAction.MOVE_SHELF,
-                        params={"shelf_id": "S_04", "location_id": "B_101-1"},
-                        status=StepStatus.SUCCESS),
-               TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
-                        params={"bed_key": "B_101-1"})],
-    )
-    events, skipped, handled = _run_drop_all(monkeypatch, eng, task, step_index=2)
 
     assert handled is True
     assert [e.severity for e in events] == [Severity.CRITICAL]
@@ -1111,3 +1074,41 @@ def test_a_stop_during_the_classify_reads_stands(monkeypatch):
     assert handled is True
     assert task.status == TaskStatus.CANCELLED
     assert events == []
+
+
+def test_a_completed_scan_as_trigger_keeps_its_reading(monkeypatch):
+    """The signal landed in the same iteration the scan finished: the bed
+    was measured, so it is neither re-listed for 續巡 nor written N/A."""
+    from common_types import StepResult
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    task = _two_bed_task()
+    trigger = task.steps[1]
+    trigger.status = StepStatus.SUCCESS
+    trigger.result = StepResult(success=True, error_code=0, error_message="", data={}, timestamp="t")
+
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task, trigger_step=trigger)
+
+    assert handled is True
+    assert trigger.status == StepStatus.SUCCESS
+    assert skipped == ["貨架掉落，巡房中斷"]          # only the second bed
+    assert [b["bed_key"] for b in task.metadata["remaining_beds"]] == ["B_101-2"]
+
+
+def test_return_home_refused_with_the_shelf_docked_ends_the_run_for_cleanup(monkeypatch):
+    """A return_shelf that failed with the shelf still latched is followed
+    by the ordinary return_home step; its 11501 refusal must end the run
+    CANCELLED (cleanup parks the shelf), not FAILED (nobody does)."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng.fleet.return_home = AsyncMock(return_value={
+        "ok": False, "error_code": 11501, "error": "error_code=11501: Charging canceled",
+    })
+    task = Task(task_id="t-9", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
+                metadata={"mode": "patrol"},
+                steps=[TaskStep(step_id="h1", action=StepAction.RETURN_HOME, params={})])
+    eng.current_task_id = "t-9"
+    monkeypatch.setitem(task_runtime.tasks_db, "t-9", task)
+
+    result = asyncio.run(eng._do_return_home(task.steps[0]))
+
+    assert result.success is False
+    assert task.status == TaskStatus.CANCELLED
