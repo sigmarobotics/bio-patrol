@@ -66,6 +66,7 @@ def _engine(battery, command_state):
     fleet.get_raw_client = MagicMock(side_effect=RuntimeError("no robot"))
     eng = task_runtime.TaskEngine(fleet, "kachaka")
     eng.current_task_id = "t-1"
+    eng._verify_shelf_still_docked = AsyncMock(return_value="released")
     return eng
 
 
@@ -146,6 +147,7 @@ def test_classification_reads_robot_before_cancelling(monkeypatch):
                         lambda self, *a, **kw: None)
     eng = task_runtime.TaskEngine(fleet, "kachaka")
     eng.current_task_id = "t-1"
+    eng._verify_shelf_still_docked = AsyncMock(return_value="released")
     asyncio.run(eng._handle_shelf_drop(_task(), 0))
 
     assert calls.index("battery") < calls.index("cancel")
