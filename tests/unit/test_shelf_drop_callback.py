@@ -115,7 +115,7 @@ async def test_false_release_reruns_the_interrupted_scan_once(monkeypatch):
             eng.shelf_drop_event.set()
             return StepResult(success=False, error_code=-1,
                               error_message="Bio scan interrupted by shelf release",
-                              data={}, timestamp="t")
+                              data={"interrupted_by": "shelf_release"}, timestamp="t")
         return StepResult(success=True, error_code=0, error_message="",
                           data={}, timestamp="t")
 
@@ -158,7 +158,7 @@ async def test_second_false_release_on_the_same_bed_records_the_skip(monkeypatch
         eng.shelf_drop_event.set()
         return StepResult(success=False, error_code=-1,
                           error_message="Bio scan interrupted by shelf release",
-                          data={}, timestamp="t")
+                          data={"interrupted_by": "shelf_release"}, timestamp="t")
 
     async def fake_handle(task, idx, trigger_step=None, error_code=0):
         eng.shelf_drop_event.clear()
@@ -181,10 +181,9 @@ async def test_second_false_release_on_the_same_bed_records_the_skip(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_a_step_left_skipped_by_a_retracted_drop_is_passed_over(monkeypatch):
-    """return_home succeeded carrying the shelf: the handler keeps the
-    current scan SKIPPED (it would be taken at the charger) and the loop
-    moves on instead of running it."""
+async def test_a_retracted_drop_redrives_from_the_beds_move(monkeypatch):
+    """return_home may have moved the robot before the drop was retracted:
+    the run jumps back to the bed's move_shelf and takes the scan there."""
     from services.task_runtime import TaskEngine, StepResult
 
     fleet = MagicMock()
@@ -198,17 +197,31 @@ async def test_a_step_left_skipped_by_a_retracted_drop_is_passed_over(monkeypatc
 
     async def fake_execute(step):
         executed.append(step.step_id)
+        if step.step_id == "a0" and executed.count("a0") == 1:
+            eng.shelf_drop_event.set()
+            return StepResult(success=False, error_code=-1,
+                              error_message="Bio scan interrupted by shelf release",
+                              data={"interrupted_by": "shelf_release"}, timestamp="t")
         return StepResult(success=True, error_code=0, error_message="", data={}, timestamp="t")
 
+    async def fake_handle(task, idx, trigger_step=None, error_code=0):
+        eng.shelf_drop_event.clear()
+        task.steps[0].status = StepStatus.PENDING
+        eng._resume_step_index = 0
+        return False
+
     monkeypatch.setattr(eng, "_execute_step", fake_execute)
+    monkeypatch.setattr(eng, "_handle_shelf_drop", fake_handle)
 
     task = Task(
         task_id="t4", robot_id="kachaka", status=TaskStatus.QUEUED,
-        steps=[TaskStep(step_id="a0", action=StepAction.BIO_SCAN, params={"bed_key": "101-1"},
-                        status=StepStatus.SKIPPED),
-               TaskStep(step_id="m1", action=StepAction.WAIT, params={"seconds": "0"})],
+        steps=[TaskStep(step_id="m0", action=StepAction.MOVE_SHELF,
+                        params={"shelf_id": "S_04", "location_id": "B_101-1"},
+                        skip_on_failure=["a0"]),
+               TaskStep(step_id="a0", action=StepAction.BIO_SCAN, params={"bed_key": "101-1"})],
     )
     await eng.run_task(task)
 
-    assert executed == ["m1"]
+    assert executed == ["m0", "a0", "m0", "a0"]
     assert task.status == TaskStatus.DONE
+    assert task.steps[1].status == StepStatus.SUCCESS

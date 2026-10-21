@@ -767,10 +767,83 @@ def test_shelf_still_docked_after_return_home_retracts_the_drop(monkeypatch):
     assert handled is False
     assert [e.severity for e in events] == [Severity.CRITICAL, Severity.WARN]
     assert task.status == TaskStatus.IN_PROGRESS
-    # return_home succeeded carrying the shelf: the robot is at the charger,
-    # so the current bed stays skipped (recorded as such) and the rest resume
-    assert skipped[-1] == "掉落誤報，機器人已回充電站，本床跳過"
-    assert [st.status for st in task.steps] == [StepStatus.SKIPPED, StepStatus.PENDING]
+    assert [st.status for st in task.steps] == [StepStatus.PENDING, StepStatus.PENDING]
+
+
+def test_a_retracted_drop_redrives_from_the_beds_move(monkeypatch):
+    """return_home may have moved the robot (to the charger, or toward it
+    before a 11501 refusal): the run re-drives from the bed's move_shelf."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released", "docked"])
+    task = Task(
+        task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
+        steps=[TaskStep(step_id="m1", action=StepAction.MOVE_SHELF,
+                        params={"shelf_id": "S_04", "location_id": "B_101-1"},
+                        status=StepStatus.SUCCESS, skip_on_failure=["s1"]),
+               TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
+                        params={"bed_key": "B_101-1"})],
+    )
+
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task, step_index=1)
+
+    assert handled is False
+    assert eng._resume_step_index == 0
+    assert task.steps[0].status == StepStatus.PENDING
+    assert task.steps[1].status == StepStatus.PENDING
+    assert "重新前往該床" in events[1].body
+
+
+def test_failed_placement_with_the_shelf_still_latched_ends_for_cleanup(monkeypatch):
+    """A return_shelf trigger: resuming would end the run 完成 with the shelf
+    on the robot, so the run ends CANCELLED and the wrap-up's cleanup parks
+    the shelf."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng.fleet.return_home = AsyncMock(return_value={
+        "ok": False, "error_code": 11501, "error": "error_code=11501: Charging canceled",
+    })
+    # only the post-return_home read: a return_shelf trigger is not re-verified
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released"])
+    events = []
+
+    async def _capture(event):
+        events.append(event)
+
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
+    monkeypatch.setattr(task_runtime.TaskEngine, "_record_skipped_scan",
+                        lambda self, *a, **kw: None)
+    task = _task()
+    trigger = TaskStep(step_id="r1", action=StepAction.RETURN_SHELF,
+                       params={"shelf_id": "S_04"})
+
+    handled = asyncio.run(eng._handle_shelf_drop(task, 0, trigger_step=trigger))
+
+    assert handled is True
+    assert task.status == TaskStatus.CANCELLED
+    assert task.metadata["shelf_drop"] is False
+    assert [e.severity for e in events] == [Severity.CRITICAL, Severity.WARN]
+    assert "收工流程" in events[1].body
+
+
+def test_a_placement_that_finished_on_the_robot_counts_as_placed():
+    """A return_shelf that timed out app-side but finished on the robot is
+    recorded shelf_placed by _do_return_shelf; _shelf_placed honours it."""
+    from common_types import StepResult
+    steps = [
+        TaskStep(step_id="m1", action=StepAction.MOVE_SHELF,
+                 params={"shelf_id": "S_04", "location_id": "B_101-1"},
+                 status=StepStatus.SUCCESS),
+        TaskStep(step_id="r1", action=StepAction.RETURN_SHELF, params={"shelf_id": "S_04"},
+                 status=StepStatus.FAIL,
+                 result=StepResult(success=False, error_code=0, error_message="TIMEOUT",
+                                   data={"shelf_id": "S_04", "shelf_placed": True},
+                                   timestamp="t")),
+        TaskStep(step_id="h1", action=StepAction.RETURN_HOME, params={}),
+    ]
+    task = Task(task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS, steps=steps)
+
+    assert task_runtime.TaskEngine._shelf_placed(task, 2) is True
+    steps[1].result.data["shelf_placed"] = False
+    assert task_runtime.TaskEngine._shelf_placed(task, 2) is False
 
 
 def test_retraction_yields_to_an_operator_stop(monkeypatch):
