@@ -214,12 +214,6 @@ class TaskEngine:
         # True once the robot stopped answering: the run still pauses, but the
         # shelf state is reported as unknown instead of dropped.
         self._disconnect_suspected = False
-        # Set by a retracted drop: the run re-drives from this step (the
-        # bed's move_shelf) because return_home may have moved the robot.
-        self._resume_step_index: Optional[int] = None
-        # Retracted drops this run: a third lying pair ends the run as a
-        # drop rather than paging the ward CRITICAL/WARN forever.
-        self._false_drops = 0
         # monotonic timestamp of the current stationary window, or None while a
         # motion step is in flight — see MOTION_ACTIONS / BATTERY_ABORT_CONSECUTIVE.
         self._stationary_since: Optional[float] = None
@@ -357,10 +351,15 @@ class TaskEngine:
                     # failed poll must not re-raise the pause on its own.
                     fail_streak = 0
                     if self.shelf_drop_event is not None:
-                        await self._raise_release(
+                        raised = await self._raise_release(
                             f"{DISCONNECT_POLL_THRESHOLD} failed polls",
                             shelf_confirmed=confirmed_docked, from_disconnect=True,
                         )
+                        if raised:
+                            # One signal per release: the empty-read source
+                            # must not raise the same one again.
+                            confirmed_docked = False
+                            last_seen_id = None
                     else:
                         self._disconnect_suspected = True
             try:
@@ -832,11 +831,11 @@ class TaskEngine:
                 f"{task.task_id} — cleanup owns the wrap-up"
             )
             return True
+        # Cleared BEFORE verifying, so a signal the watcher raises while the
+        # robot is being asked survives this handler.
+        if self.shelf_drop_event is not None:
+            self.shelf_drop_event.clear()
         if trigger_step is None or trigger_step.action != StepAction.RETURN_SHELF:
-            # Cleared BEFORE verifying, so a signal the watcher raises while
-            # the robot is being asked survives this handler.
-            if self.shelf_drop_event is not None:
-                self.shelf_drop_event.clear()
             # Asked again here even though the watcher verified before
             # raising: a robot that was unreachable then may be back by the
             # time the step ends (one instant read when it is), and a signal
@@ -851,12 +850,12 @@ class TaskEngine:
                     f"cleanup owns the wrap-up"
                 )
                 return True
-            # A robot that answered is not suspected any more; one that did
-            # not keeps the watcher's suspicion into _classify_release — a
-            # link that flaps back for one of its two reads must still be a
+            # The verify is the freshest word before classification: a robot
+            # that answered is not suspected; one that did not answer either
+            # read is, whichever source raised the signal — a link that flaps
+            # back for one of _classify_release's two reads must still be a
             # 失聯 pause, not a CRITICAL drop.
-            if verdict != "unreachable":
-                self._disconnect_suspected = False
+            self._disconnect_suspected = verdict == "unreachable"
             if verdict == "docked":
                 logger.warning(
                     f"[SHELF DROP] Robot {self.robot_id} still carries the shelf — "
@@ -1054,111 +1053,39 @@ class TaskEngine:
         # empty, shelf still latched).
         verdict = await self._verify_shelf_still_docked()
         refused_with_shelf = rh.get("error_code") in (11501, 11019)
-        if verdict == "docked" or (refused_with_shelf and verdict != "unreachable"):
-            # A failed placement, or a run already paused for a flat pack,
-            # is not resumed: the wrap-up's cleanup parks the shelf.
-            resume = (
-                (trigger_step is None or trigger_step.action != StepAction.RETURN_SHELF)
-                and not low_battery
-            )
-            if await self._retract_false_drop(task, step_index, shelf_id, location_id,
-                                              steps_to_skip, skip_detail, resume=resume):
-                return False
+        still_docked = verdict == "docked" or (refused_with_shelf and verdict != "unreachable")
+        if (still_docked and not low_battery
+                and (task.metadata or {}).get("mode") != "cleanup"):
+            await self._retract_false_drop(task, shelf_id, location_id)
         return True
 
-    async def _retract_false_drop(self, task: Task, step_index: int, shelf_id: str,
-                                  location_id: str, skipped: List[TaskStep],
-                                  skip_detail: str, *, resume: bool) -> bool:
+    async def _retract_false_drop(self, task: Task, shelf_id: str,
+                                  location_id: str) -> None:
         """The robot reports the shelf still docked after the drop was
         reported (a 11501/11019 「車上有家具不能充電」 refusal, or a plain read):
-        the alert just sent was false. With ``resume`` the run goes on — the
-        shelf is on the robot and the beds are still there: the skipped steps
-        go back to PENDING and the run re-drives from the bed's move_shelf,
-        since return_home may have moved the robot (板橋 2026-10-19: left in
-        the corridor carrying the shelf until someone walked over). Without
-        it (the trigger was a return_shelf that failed with the shelf still
-        latched) the run ends CANCELLED so run_task's wrap-up queues the
-        cleanup that parks the shelf and recharges — resuming would end the
-        run "完成" with the shelf on the robot. Either way the drop marker
-        comes off the task so 續巡 does not offer to resume onto a docked
-        shelf, and the ward is told. Returns whether the run resumes; a stop
-        or a 續巡 that landed meanwhile (status no longer SHELF_DROPPED)
-        stands.
+        the alert just sent was false. The run ends CANCELLED so run_task's
+        wrap-up queues the cleanup that parks the shelf and recharges — the
+        robot was left in the corridor carrying the shelf until someone
+        walked over at 板橋 2026-10-19 — the drop marker comes off the task so
+        續巡 does not offer to resume onto a docked shelf, and the ward is
+        told. A stop or 續巡 that landed meanwhile (status no longer
+        SHELF_DROPPED) stands, marker off all the same. Not called for a
+        cleanup run (nobody queues a cleanup for a cleanup — its CRITICAL
+        stands for a person) nor for a low-battery pause (the robot stays
+        on the charger).
         """
-        if task.status != TaskStatus.SHELF_DROPPED:
-            # A stop or 續巡 landed meanwhile and stands — but the drop
-            # marker still comes off: the shelf is on the robot, and
-            # resume-latest must not offer this run.
-            if task.metadata:
-                task.metadata["shelf_drop"] = False
-                task.metadata["remaining_beds"] = []
-            return False
-        self._false_drops += 1
-        if self._false_drops > 2:
-            logger.error(
-                f"[SHELF DROP] Robot {self.robot_id} reports the shelf docked again "
-                f"after {self._false_drops - 1} retracted drops this run — leaving "
-                f"the drop standing for a person to check"
-            )
-            return False
         if task.metadata:
             task.metadata["shelf_drop"] = False
             task.metadata["remaining_beds"] = []
             task.metadata["false_drop"] = True
-        if resume:
-            logger.warning(
-                f"[SHELF DROP] Robot {self.robot_id} reports the shelf still docked — "
-                f"drop was a false alarm, resuming run {task.task_id}"
-            )
-            task.status = TaskStatus.IN_PROGRESS
-            for st in skipped:
-                st.status = StepStatus.PENDING
-            self._unrecord_skipped_scans(
-                [st.params.get("bed_key") for st in skipped], skip_detail
-            )
-            # Re-drive only when a bed's scan was put back: from the move
-            # that brings the robot to the first of them. Beds already
-            # measured stay measured.
-            restored = [i for i, st in enumerate(task.steps) if st in skipped]
-            redrive = None
-            if restored:
-                redrive = next(
-                    (i for i in range(restored[0] - 1, -1, -1)
-                     if task.steps[i].action == StepAction.MOVE_SHELF),
-                    None,
-                )
-            if redrive is not None:
-                task.steps[redrive].status = StepStatus.PENDING
-                self._resume_step_index = redrive
-                outcome = "巡房繼續，重新前往該床"
-            else:
-                outcome = "巡房繼續"
-        elif (task.metadata or {}).get("mode") == "cleanup":
-            # The cleanup IS the wrap-up — nobody queues another one for it.
-            # Retry its own placement (bounded by _false_drops).
-            logger.warning(
-                f"[SHELF DROP] Robot {self.robot_id} reports the shelf still docked — "
-                f"drop was a false alarm; cleanup {task.task_id} retries the placement"
-            )
-            task.status = TaskStatus.IN_PROGRESS
-            retry = next(
-                (i for i in range(min(step_index, len(task.steps) - 1), -1, -1)
-                 if task.steps[i].action == StepAction.RETURN_SHELF),
-                None,
-            )
-            if retry is not None:
-                task.steps[retry].status = StepStatus.PENDING
-                self._resume_step_index = retry
-            resume = True
-            outcome = "重試貨架歸位後回充"
-        else:
-            logger.warning(
-                f"[SHELF DROP] Robot {self.robot_id} reports the shelf still docked — "
-                f"drop was a false alarm; ending run {task.task_id} for the "
-                f"cleanup to park the shelf"
-            )
-            task.status = TaskStatus.CANCELLED
-            outcome = "改由收工流程歸位後回充"
+        if task.status != TaskStatus.SHELF_DROPPED:
+            return
+        logger.warning(
+            f"[SHELF DROP] Robot {self.robot_id} reports the shelf still docked — "
+            f"drop was a false alarm; ending run {task.task_id} for the cleanup "
+            f"to park the shelf"
+        )
+        task.status = TaskStatus.CANCELLED
         try:
             await dispatcher.dispatch(AnomalyEvent(
                 severity=Severity.WARN,
@@ -1169,47 +1096,12 @@ class TaskEngine:
                 body=(
                     f"機器人回報貨架仍在車上\n"
                     f"位置：{location_id}\n"
-                    f"{outcome}"
+                    f"本次巡房結束，機器人將把貨架歸位後回充"
                 ),
                 raw={"shelf_id": shelf_id, "false_drop": True},
             ))
         except Exception:
             logger.exception("Failed to dispatch false-drop retraction")
-        return resume
-
-    def _unrecord_skipped_scans(self, bed_names: List[Optional[str]], details: str) -> None:
-        """Delete the N/A rows a drop wrote for beds the retracted drop gives
-        back to the run — the run summary keeps the first row on a tie, so a
-        leftover N/A row could still outrank the real attempt."""
-        if not bed_names:
-            return
-        try:
-            client = get_bio_sensor_client()
-            if client is None:
-                return
-            conn = connect_db(client.db_path)
-            conn.executemany(
-                "DELETE FROM sensor_scan_data WHERE task_id = ? AND bed_name = ? "
-                "AND details = ? AND is_valid = 0",
-                [(self.current_task_id, b, details) for b in bed_names if b],
-            )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.warning(f"[SHELF DROP] Could not remove retracted N/A rows: {e}")
-
-    def _resume_from(self, task: Task, default: Optional[int],
-                     skipped_steps: set) -> Optional[int]:
-        """Consume the re-drive index a retracted drop left (``default``
-        when none), un-skipping the steps from there so the bed's scans run
-        again after the move."""
-        idx = self._resume_step_index
-        self._resume_step_index = None
-        if idx is None:
-            return default
-        for st in task.steps[idx:]:
-            skipped_steps.discard(st.step_id)
-        return idx
 
     # ── Task execution ────────────────────────────────────────────────
 
@@ -1226,8 +1118,6 @@ class TaskEngine:
         self.shelf_drop_event.clear()
         self._shelf_release_expected = False
         self._disconnect_suspected = False
-        self._resume_step_index = None
-        self._false_drops = 0
         # The run starts at the dock, standing still.
         self._stationary_since = time.monotonic()
         self._low_battery_streak = 0
@@ -1256,10 +1146,7 @@ class TaskEngine:
                 if self.shelf_drop_event.is_set():
                     if await self._handle_shelf_drop(task, step_index):
                         break
-                    # False signal: same step, or re-drive from the bed's
-                    # move_shelf after a retracted drop.
-                    step_index = self._resume_from(task, step_index, skipped_steps)
-                    continue
+                    continue  # false signal: same step, event cleared
 
                 # Check if this step should be skipped
                 if step.step_id in skipped_steps:
@@ -1304,10 +1191,6 @@ class TaskEngine:
                     if self.shelf_drop_event.is_set():
                         if await self._handle_shelf_drop(task, step_index, trigger_step=step):
                             break
-                        resume_at = self._resume_from(task, None, skipped_steps)
-                        if resume_at is not None:
-                            step_index = resume_at
-                            continue
                         # False signal. A scan it cut short is re-run once so
                         # the bed is not silently lost; a second cut is
                         # recorded as skipped. Any other step keeps its result.
