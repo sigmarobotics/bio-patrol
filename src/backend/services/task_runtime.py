@@ -52,6 +52,9 @@ DISCONNECT_POLL_THRESHOLD = 3
 # signal has time to end (板橋 blips last 4–12 s); ~12 s on a dead robot.
 SHELF_VERIFY_POLLS = 2
 SHELF_VERIFY_INTERVAL = 2.0
+# return_home refused because furniture is docked: 11501 / 11019 「車上有家具
+# 不能充電」 — the firmware's own word that the shelf is still on the robot.
+CHARGE_REFUSED_WITH_SHELF = (11501, 11019)
 
 # PFR: this pack's BMU has no proper regulation, so motor start/stop swings the
 # rail voltage and the reported percentage with it — their own app shows only
@@ -335,7 +338,10 @@ class TaskEngine:
                 # A failed read says nothing about the shelf — only a
                 # successful read reporting no shelf can be a drop. Repeated
                 # failures mean the robot itself is gone (2026-08-10 新營).
-                fail_streak += 1
+                # Failures while the outage is already raised do not count:
+                # once the handler withdraws the suspicion, three fresh
+                # failures are needed to raise the next one.
+                fail_streak = 0 if self._disconnect_suspected else fail_streak + 1
                 logger.debug(
                     f"[STATE WATCHER] Read failed ({fail_streak}x): {e}", exc_info=True
                 )
@@ -380,6 +386,8 @@ class TaskEngine:
         that ends with the robot answering is nothing to report either — a
         "released" verdict only says the robot carries none now.
         """
+        if self.shelf_drop_event is None:
+            return False
         verdict = await self._verify_shelf_still_docked()
         if verdict == "docked":
             logger.warning(
@@ -656,7 +664,7 @@ class TaskEngine:
             current = trigger_step
         elif trigger_step is None:
             candidate = task.steps[step_index] if step_index < len(task.steps) else None
-            if candidate and candidate.action == StepAction.BIO_SCAN and candidate.status in (StepStatus.PENDING, StepStatus.EXECUTING):
+            if candidate and candidate.action == StepAction.BIO_SCAN and candidate.status == StepStatus.PENDING:
                 current = candidate
         if current is not None and current.step_id not in collected:
             remaining.insert(0, {
@@ -864,6 +872,7 @@ class TaskEngine:
                     f"[SHELF DROP] Robot {self.robot_id} is back and still carries "
                     f"the shelf — release signal was false, resuming task {task.task_id}"
                 )
+                self._disconnect_suspected = False
                 return False
             if verdict == "unreachable":
                 kind = "disconnected"
@@ -909,6 +918,15 @@ class TaskEngine:
             )
 
         shelf_pose = await self._query_shelf_pose(shelf_id)
+        if task.status == TaskStatus.CANCELLED:
+            # A stop (operator or battery abort) landed during the reads
+            # above; the CANCELLED ending stands, the wrap-up parks the
+            # shelf, and no drop marker is written for 續巡 to pick up.
+            logger.info(
+                f"[SHELF DROP] Task {task.task_id} cancelled while classifying — "
+                f"cleanup owns the wrap-up"
+            )
+            return True
         # No shelf pose means the map has nothing to point the operator at —
         # the frontend must say "position unknown" instead of "look at the
         # marker", so hand it the robot's last known position to draw instead.
@@ -942,14 +960,6 @@ class TaskEngine:
             clear_shelf_dropped_tasks(
                 only_disconnect=True, reason="superseded by newer disconnect"
             )
-        if task.status == TaskStatus.CANCELLED:
-            # A stop (operator or battery abort) landed during the reads
-            # above; the CANCELLED ending stands and the wrap-up parks the shelf.
-            logger.info(
-                f"[SHELF DROP] Task {task.task_id} cancelled while classifying — "
-                f"cleanup owns the wrap-up"
-            )
-            return True
         task.status = TaskStatus.SHELF_DROPPED
 
         if disconnected:
@@ -1057,7 +1067,7 @@ class TaskEngine:
         # refusal form, whatever the reads said (2026-10-02: reboot, reads
         # empty, shelf still latched).
         verdict = await self._verify_shelf_still_docked()
-        refused_with_shelf = rh.get("error_code") in (11501, 11019)
+        refused_with_shelf = rh.get("error_code") in CHARGE_REFUSED_WITH_SHELF
         still_docked = verdict == "docked" or (refused_with_shelf and verdict != "unreachable")
         if (still_docked and not low_battery
                 and (task.metadata or {}).get("mode") != "cleanup"):
@@ -1119,13 +1129,15 @@ class TaskEngine:
             if client is None:
                 return
             conn = connect_db(client.db_path)
-            conn.execute(
-                "UPDATE sensor_scan_data SET details = ? "
-                "WHERE task_id = ? AND details = ? AND is_valid = 0",
-                (new_detail, self.current_task_id, old_detail),
-            )
-            conn.commit()
-            conn.close()
+            try:
+                conn.execute(
+                    "UPDATE sensor_scan_data SET details = ? "
+                    "WHERE task_id = ? AND details = ? AND is_valid = 0",
+                    (new_detail, self.current_task_id, old_detail),
+                )
+                conn.commit()
+            finally:
+                conn.close()
         except Exception as e:
             logger.warning(f"[SHELF DROP] Could not relabel retracted N/A rows: {e}")
 
@@ -1712,7 +1724,7 @@ class TaskEngine:
         # which is exactly what return_home wants — not a failure.
         if isinstance(result, dict) and result.get("error_code") == 10267:
             result = {**result, "ok": True, "success": True}
-        if isinstance(result, dict) and result.get("error_code") in (11501, 11019):
+        if isinstance(result, dict) and result.get("error_code") in CHARGE_REFUSED_WITH_SHELF:
             # 「車上有家具不能充電」: a return_shelf before this step failed
             # with the shelf still latched. A FAILED run queues no cleanup
             # and the robot would sit in the corridor carrying the shelf
@@ -1725,6 +1737,20 @@ class TaskEngine:
                     f"shelf docked — ending run {task.task_id} for the cleanup to park it"
                 )
                 task.status = TaskStatus.CANCELLED
+                try:
+                    await dispatcher.dispatch(AnomalyEvent(
+                        severity=Severity.WARN,
+                        source=Source.SHELF_DROP,
+                        task_id=task.task_id,
+                        title="⚠️ 貨架歸位失敗，仍在機器人身上",
+                        body=(
+                            f"機器人無法在載著貨架時回充\n"
+                            f"本次巡房結束，將再試一次貨架歸位後回充"
+                        ),
+                        raw={"error_code": result.get("error_code")},
+                    ))
+                except Exception:
+                    logger.exception("Failed to dispatch return_home refusal")
         return self._make_result(result, step.action, {})
 
     async def _await_or_drop(self, coro):

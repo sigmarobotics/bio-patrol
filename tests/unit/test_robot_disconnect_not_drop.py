@@ -357,6 +357,7 @@ def test_robot_back_and_still_docked_resumes(monkeypatch):
 
     assert asyncio.run(eng._handle_shelf_drop(_task(), 1)) is False
     assert events == []
+    assert eng._disconnect_suspected is False
 
 
 def test_robot_gone_again_after_the_classify_reads_is_offline(monkeypatch):
@@ -622,6 +623,31 @@ async def test_verify_a_robot_that_answers_on_the_last_read_gets_one_more(no_sle
 async def test_verify_gives_up_on_a_robot_that_never_answers(no_sleep):
     eng = _verify_engine([UNAVAILABLE] * task_runtime.SHELF_VERIFY_POLLS)
     assert await eng._verify_shelf_still_docked() == "unreachable"
+
+
+@pytest.mark.asyncio
+async def test_failures_during_a_raised_outage_do_not_count(no_sleep):
+    """Polls keep failing while the handler verifies; once it withdraws the
+    suspicion, three fresh failures are needed to raise the next one."""
+    eng = _watcher_engine(["S_04", UNAVAILABLE, UNAVAILABLE, UNAVAILABLE,
+                           UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE])
+    raw_next = eng.fleet._robots["kachaka"].conn.client.get_moving_shelf_id.side_effect
+    served = {"n": 0}
+
+    def _next():
+        served["n"] += 1
+        if served["n"] == 7:
+            # the handler verified "docked" after four more failed polls
+            eng.shelf_drop_event.clear()
+            eng._disconnect_suspected = False
+        return raw_next()
+
+    eng.fleet._robots["kachaka"].conn.client.get_moving_shelf_id.side_effect = _next
+
+    await eng._watch_shelf_state()
+
+    # polls 7 and 8 fail after the withdrawal: two, not three — no re-raise
+    assert not eng.shelf_drop_event.is_set()
 
 
 @pytest.mark.asyncio
@@ -1078,6 +1104,8 @@ def test_a_stop_during_the_classify_reads_stands(monkeypatch):
     assert handled is True
     assert task.status == TaskStatus.CANCELLED
     assert events == []
+    # no drop marker for 續巡 to pick up: the cleanup is parking the shelf
+    assert not (task.metadata or {}).get("shelf_drop")
 
 
 def test_a_completed_scan_as_trigger_keeps_its_reading(monkeypatch):
@@ -1157,10 +1185,18 @@ def test_return_home_refused_with_the_shelf_docked_ends_the_run_for_cleanup(monk
     eng.current_task_id = "t-9"
     monkeypatch.setitem(task_runtime.tasks_db, "t-9", task)
 
+    events = []
+
+    async def _capture(event):
+        events.append(event)
+
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
     result = asyncio.run(eng._do_return_home(task.steps[0]))
 
     assert result.success is False
     assert task.status == TaskStatus.CANCELLED
+    assert [e.severity for e in events] == [Severity.WARN]
+    assert "歸位失敗" in events[0].title
 
 
 @pytest.mark.asyncio
