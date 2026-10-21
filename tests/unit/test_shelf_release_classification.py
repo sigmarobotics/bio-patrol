@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from common_types import Task, TaskStatus, TaskStep, StepAction
+from common_types import StepStatus, Task, TaskStatus, TaskStep, StepAction
 from services import task_runtime
 from services.notifications import Severity
 from services.task_runtime import classify_shelf_release
@@ -73,7 +73,10 @@ def _engine(battery, command_state):
 def _task():
     return Task(
         task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
-        steps=[TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
+        steps=[TaskStep(step_id="m0", action=StepAction.MOVE_SHELF,
+                        params={"shelf_id": "S_04", "location_id": "B_101-1"},
+                        status=StepStatus.SUCCESS, skip_on_failure=["s1"]),
+               TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
                         params={"bed_key": "B_101-1"})],
     )
 
@@ -89,7 +92,7 @@ def _run_drop(monkeypatch, battery, command_state):
                         lambda self, *a, **kw: None)
     eng = _engine(battery, command_state)
     task = _task()
-    asyncio.run(eng._handle_shelf_drop(task, 0))
+    asyncio.run(eng._handle_shelf_drop(task, 1))
     assert len(events) == 1
     return task, events[0]
 
@@ -148,7 +151,7 @@ def test_classification_reads_robot_before_cancelling(monkeypatch):
     eng = task_runtime.TaskEngine(fleet, "kachaka")
     eng.current_task_id = "t-1"
     eng._verify_shelf_still_docked = AsyncMock(return_value="released")
-    asyncio.run(eng._handle_shelf_drop(_task(), 0))
+    asyncio.run(eng._handle_shelf_drop(_task(), 1))
 
     assert calls.index("battery") < calls.index("cancel")
     assert calls.index("command_state") < calls.index("cancel")

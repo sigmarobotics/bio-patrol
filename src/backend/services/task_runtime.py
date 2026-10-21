@@ -790,21 +790,25 @@ class TaskEngine:
         return "unreachable"
 
     @staticmethod
-    def _shelf_placed(task: Task, step_index: int) -> bool:
-        """Whether the run's own steps say the shelf is already set down —
-        the last completed shelf step before ``step_index`` is a return_shelf.
+    def _shelf_not_carried(task: Task, step_index: int,
+                           trigger_step: Optional[TaskStep]) -> bool:
+        """Whether the run's own steps say no shelf should be on the robot:
+        no move_shelf has succeeded yet (and the trigger is not one), or the
+        last completed shelf step before ``step_index`` is a return_shelf.
         A "carries none now" answer then reports nothing (a blip on the
-        final return_home at 板橋 would otherwise page the ward with a drop
-        of a shelf sitting at home)."""
-        placed = False
+        final return_home, or during the approach to the first dock, would
+        otherwise page the ward with a drop of a shelf sitting at home)."""
+        if trigger_step is not None and trigger_step.action == StepAction.MOVE_SHELF:
+            return False
+        carried = False
         for st in task.steps[:step_index]:
             if st.status != StepStatus.SUCCESS:
                 continue
             if st.action == StepAction.MOVE_SHELF:
-                placed = False
+                carried = True
             elif st.action == StepAction.RETURN_SHELF:
-                placed = True
-        return placed
+                carried = False
+        return not carried
 
     async def _handle_shelf_drop(self, task: Task, step_index: int,
                                    trigger_step: Optional[TaskStep] = None,
@@ -859,10 +863,10 @@ class TaskEngine:
                     f"release signal was false, resuming task {task.task_id}"
                 )
                 return False
-            if verdict == "released" and self._shelf_placed(task, step_index):
+            if verdict == "released" and self._shelf_not_carried(task, step_index, trigger_step):
                 logger.info(
                     f"[SHELF DROP] Robot {self.robot_id} answers and carries no "
-                    f"shelf, and the run had already placed it — nothing to "
+                    f"shelf, and the run was not carrying one — nothing to "
                     f"report, resuming task {task.task_id}"
                 )
                 return False
@@ -1049,8 +1053,14 @@ class TaskEngine:
         # refusal form, whatever the reads said (2026-10-02: reboot, reads
         # empty, shelf still latched).
         verdict = await self._verify_shelf_still_docked()
-        if verdict == "docked" or rh.get("error_code") in (11501, 11019):
-            resume = trigger_step is None or trigger_step.action != StepAction.RETURN_SHELF
+        refused_with_shelf = rh.get("error_code") in (11501, 11019)
+        if verdict == "docked" or (refused_with_shelf and verdict != "unreachable"):
+            # A failed placement, or a run already paused for a flat pack,
+            # is not resumed: the wrap-up's cleanup parks the shelf.
+            resume = (
+                (trigger_step is None or trigger_step.action != StepAction.RETURN_SHELF)
+                and not low_battery
+            )
             if await self._retract_false_drop(task, step_index, shelf_id, location_id,
                                               steps_to_skip, skip_detail, resume=resume):
                 return False
@@ -1076,6 +1086,12 @@ class TaskEngine:
         stands.
         """
         if task.status != TaskStatus.SHELF_DROPPED:
+            # A stop or 續巡 landed meanwhile and stands — but the drop
+            # marker still comes off: the shelf is on the robot, and
+            # resume-latest must not offer this run.
+            if task.metadata:
+                task.metadata["shelf_drop"] = False
+                task.metadata["remaining_beds"] = []
             return False
         self._false_drops += 1
         if self._false_drops > 2:
@@ -1117,14 +1133,32 @@ class TaskEngine:
                 outcome = "巡房繼續，重新前往該床"
             else:
                 outcome = "巡房繼續"
+        elif (task.metadata or {}).get("mode") == "cleanup":
+            # The cleanup IS the wrap-up — nobody queues another one for it.
+            # Retry its own placement (bounded by _false_drops).
+            logger.warning(
+                f"[SHELF DROP] Robot {self.robot_id} reports the shelf still docked — "
+                f"drop was a false alarm; cleanup {task.task_id} retries the placement"
+            )
+            task.status = TaskStatus.IN_PROGRESS
+            retry = next(
+                (i for i in range(min(step_index, len(task.steps) - 1), -1, -1)
+                 if task.steps[i].action == StepAction.RETURN_SHELF),
+                None,
+            )
+            if retry is not None:
+                task.steps[retry].status = StepStatus.PENDING
+                self._resume_step_index = retry
+            resume = True
+            outcome = "重試貨架歸位後回充"
         else:
             logger.warning(
                 f"[SHELF DROP] Robot {self.robot_id} reports the shelf still docked — "
-                f"drop was a false alarm; the placement failed, ending run "
-                f"{task.task_id} for the cleanup to park the shelf"
+                f"drop was a false alarm; ending run {task.task_id} for the "
+                f"cleanup to park the shelf"
             )
             task.status = TaskStatus.CANCELLED
-            outcome = "貨架歸位失敗，改由收工流程歸位後回充"
+            outcome = "改由收工流程歸位後回充"
         try:
             await dispatcher.dispatch(AnomalyEvent(
                 severity=Severity.WARN,

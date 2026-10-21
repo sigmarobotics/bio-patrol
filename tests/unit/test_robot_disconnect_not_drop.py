@@ -272,10 +272,18 @@ def _engine(battery, command_state, *, shelf_pose=None, controller_state=None,
     return eng
 
 
+def _moved():
+    """A completed move_shelf: the run is carrying the shelf."""
+    return TaskStep(step_id="m0", action=StepAction.MOVE_SHELF,
+                    params={"shelf_id": "S_04", "location_id": "B_101-1"},
+                    status=StepStatus.SUCCESS, skip_on_failure=["s1"])
+
+
 def _task():
     return Task(
         task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
-        steps=[TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
+        steps=[_moved(),
+               TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
                         params={"bed_key": "B_101-1"})],
     )
 
@@ -290,7 +298,7 @@ def _run_drop(monkeypatch, eng):
     monkeypatch.setattr(task_runtime.TaskEngine, "_record_skipped_scan",
                         lambda self, *a, **kw: None)
     task = _task()
-    asyncio.run(eng._handle_shelf_drop(task, 0))
+    asyncio.run(eng._handle_shelf_drop(task, 1))
     assert len(events) == 1
     return task, events[0]
 
@@ -681,7 +689,7 @@ def test_drop_metadata_keeps_the_run_mode(monkeypatch):
     task = _task()
     task.metadata = {"mode": "cleanup"}
 
-    asyncio.run(eng._handle_shelf_drop(task, 0))
+    asyncio.run(eng._handle_shelf_drop(task, 1))
 
     assert task.metadata["mode"] == "cleanup"
     assert task.metadata["shelf_drop"] is True
@@ -716,14 +724,15 @@ def test_return_shelf_trigger_is_not_reverified(monkeypatch):
 def _two_bed_task():
     return Task(
         task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
-        steps=[TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
+        steps=[_moved(),
+               TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
                         params={"bed_key": "B_101-1"}),
                TaskStep(step_id="s2", action=StepAction.BIO_SCAN,
                         params={"bed_key": "B_101-2"})],
     )
 
 
-def _run_drop_all(monkeypatch, eng, task, step_index=0, trigger_step=None):
+def _run_drop_all(monkeypatch, eng, task, step_index=1, trigger_step=None):
     events, skipped = [], []
 
     async def _capture(event):
@@ -763,7 +772,9 @@ def test_firmware_refusing_return_home_retracts_the_drop(monkeypatch):
     # and the steps put back to PENDING so the resumed run takes real readings
     assert skipped == ["貨架掉落，巡房中斷"] * 2 + [
         ("unrecord", ("B_101-1", "B_101-2"), "貨架掉落，巡房中斷")]
-    assert [st.status for st in task.steps] == [StepStatus.PENDING, StepStatus.PENDING]
+    # the scans back to PENDING, and the run re-drives from their move
+    assert [st.status for st in task.steps] == [StepStatus.PENDING] * 3
+    assert eng._resume_step_index == 0
 
 
 def test_shelf_still_docked_after_return_home_retracts_the_drop(monkeypatch):
@@ -778,7 +789,7 @@ def test_shelf_still_docked_after_return_home_retracts_the_drop(monkeypatch):
     assert handled is False
     assert [e.severity for e in events] == [Severity.CRITICAL, Severity.WARN]
     assert task.status == TaskStatus.IN_PROGRESS
-    assert [st.status for st in task.steps] == [StepStatus.PENDING, StepStatus.PENDING]
+    assert [st.status for st in task.steps] == [StepStatus.PENDING] * 3
 
 
 def test_a_retracted_drop_redrives_from_the_beds_move(monkeypatch):
@@ -845,7 +856,7 @@ def test_a_scan_trigger_reports_the_bed_it_is_parked_at(monkeypatch):
     eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
     eng.target_bed = "B_104-2"
     task = _two_bed_task()
-    trigger = task.steps[0]
+    trigger = task.steps[1]
 
     events, skipped, handled = _run_drop_all(monkeypatch, eng, task, trigger_step=trigger)
 
@@ -912,6 +923,9 @@ def test_retraction_yields_to_an_operator_stop(monkeypatch):
     assert handled is True
     assert task.status == TaskStatus.CANCELLED
     assert [e.severity for e in events] == [Severity.CRITICAL]
+    # the shelf is on the robot: resume-latest must not offer this run
+    assert task.metadata["shelf_drop"] is False
+    assert task.metadata["remaining_beds"] == []
 
 
 def test_cancel_during_the_verify_window_stands(monkeypatch):
@@ -958,6 +972,43 @@ def test_shelf_already_placed_means_nothing_to_report(monkeypatch):
     assert task.status == TaskStatus.IN_PROGRESS
 
 
+def test_release_before_the_first_dock_is_nothing_to_report(monkeypatch):
+    """Outage during the approach to the first dock: the robot comes back
+    carrying none — the shelf is still at home, not dropped."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    task = Task(
+        task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
+        steps=[TaskStep(step_id="m0", action=StepAction.MOVE_SHELF,
+                        params={"shelf_id": "S_04", "location_id": "B_101-1"},
+                        status=StepStatus.FAIL),
+               TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
+                        params={"bed_key": "B_101-1"})],
+    )
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task, step_index=1)
+
+    assert handled is False
+    assert events == []
+
+
+def test_a_move_shelf_trigger_always_counts_as_carrying(monkeypatch):
+    """The controller's monitor fired inside the first move_shelf: the dock
+    happened, the run's steps just do not show it yet."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    task = Task(
+        task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
+        steps=[TaskStep(step_id="m0", action=StepAction.MOVE_SHELF,
+                        params={"shelf_id": "S_04", "location_id": "B_101-1"},
+                        skip_on_failure=["s1"]),
+               TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
+                        params={"bed_key": "B_101-1"})],
+    )
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task, step_index=0,
+                                             trigger_step=task.steps[0])
+
+    assert handled is True
+    assert [e.severity for e in events] == [Severity.CRITICAL]
+
+
 def test_shelf_picked_up_again_after_placing_still_reports(monkeypatch):
     eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
     task = Task(
@@ -991,5 +1042,59 @@ def test_other_return_home_failures_leave_the_drop_standing(monkeypatch):
     assert task.metadata["shelf_drop"] is True
     # loop-top signal: the pending scan at step_index is unprocessed too
     assert skipped == ["貨架掉落，巡房中斷"] * 2
-    assert task.steps[0].status == StepStatus.SKIPPED
     assert task.steps[1].status == StepStatus.SKIPPED
+    assert task.steps[2].status == StepStatus.SKIPPED
+
+
+def test_a_cleanup_run_retries_its_own_placement(monkeypatch):
+    """Nobody queues a cleanup for a cleanup: a retracted placement failure
+    re-runs its return_shelf (bounded by the retraction budget)."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng.fleet.return_home = AsyncMock(return_value={
+        "ok": False, "error_code": 11501, "error": "error_code=11501: Charging canceled",
+    })
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released"])
+    task = Task(
+        task_id="c-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
+        metadata={"mode": "cleanup"},
+        steps=[TaskStep(step_id="cleanup_return_shelf", action=StepAction.RETURN_SHELF,
+                        params={"shelf_id": "S_04"}),
+               TaskStep(step_id="cleanup_return_home", action=StepAction.RETURN_HOME, params={})],
+    )
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task, step_index=0,
+                                             trigger_step=task.steps[0])
+
+    assert handled is False
+    assert task.status == TaskStatus.IN_PROGRESS
+    assert task.metadata["mode"] == "cleanup"
+    assert eng._resume_step_index == 0
+    assert task.steps[0].status == StepStatus.PENDING
+    assert "重試貨架歸位" in events[1].body
+
+
+def test_a_low_battery_pause_is_not_resumed_by_a_docked_shelf(monkeypatch):
+    low = {"ok": True, "percentage": 8.0, "power_status": "2"}
+    returning = {"ok": True, "state": "2", "command": "return_home_command", "is_running": True}
+    eng = _engine(low, returning)
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released", "docked"])
+    task = _two_bed_task()
+
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task)
+
+    assert task.metadata["low_battery"] is True
+    assert handled is True
+    assert task.status == TaskStatus.CANCELLED
+
+
+def test_a_refusal_from_a_robot_that_then_vanishes_leaves_the_drop_standing(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng.fleet.return_home = AsyncMock(return_value={
+        "ok": False, "error_code": 11501, "error": "error_code=11501: Charging canceled",
+    })
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released", "unreachable"])
+    task = _two_bed_task()
+
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task)
+
+    assert handled is True
+    assert task.status == TaskStatus.SHELF_DROPPED
