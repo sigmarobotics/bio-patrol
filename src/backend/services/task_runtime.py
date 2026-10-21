@@ -214,9 +214,6 @@ class TaskEngine:
         # True once the robot stopped answering: the run still pauses, but the
         # shelf state is reported as unknown instead of dropped.
         self._disconnect_suspected = False
-        # Verdict the watcher reached before raising shelf_drop_event, so the
-        # handler does not ask the robot a second time for the same signal.
-        self._release_verdict: Optional[str] = None
         # monotonic timestamp of the current stationary window, or None while a
         # motion step is in flight — see MOTION_ACTIONS / BATTERY_ABORT_CONSECUTIVE.
         self._stationary_since: Optional[float] = None
@@ -325,7 +322,7 @@ class TaskEngine:
                             f"return_shelf — normal placement, not a drop"
                         )
                     elif self.shelf_drop_event is not None:
-                        await self._raise_release("empty moving-shelf read")
+                        await self._raise_release("empty moving-shelf read", shelf_confirmed=True)
                     confirmed_docked = False
                     last_seen_id = None
             except Exception as e:
@@ -349,7 +346,8 @@ class TaskEngine:
                     fail_streak = 0
                     if self.shelf_drop_event is not None:
                         await self._raise_release(
-                            f"{DISCONNECT_POLL_THRESHOLD} failed polls"
+                            f"{DISCONNECT_POLL_THRESHOLD} failed polls",
+                            shelf_confirmed=confirmed_docked,
                         )
                     else:
                         self._disconnect_suspected = True
@@ -360,14 +358,17 @@ class TaskEngine:
             except asyncio.CancelledError:
                 break
 
-    async def _raise_release(self, source: str) -> None:
+    async def _raise_release(self, source: str, *, shelf_confirmed: bool) -> None:
         """Raise shelf_drop_event for ``source`` — after asking the robot.
 
         Verified here, at the source, so every consumer of the event sees a
         signal the robot has already failed to deny. A robot that answers
         and still carries the shelf makes the signal noise: a WiFi blip that
         outlasts three polls (板橋 2026-10-19, 4 s) or a transient empty
-        moving-shelf read. The verdict is stashed for the handler.
+        moving-shelf read. A blip while no shelf was being carried
+        (``shelf_confirmed`` False: before the first dock, after return_shelf)
+        that ends with the robot answering is nothing to report either — a
+        "released" verdict only says the robot carries none now.
         """
         verdict = await self._verify_shelf_still_docked()
         if verdict == "docked":
@@ -377,7 +378,13 @@ class TaskEngine:
             )
             self._disconnect_suspected = False
             return
-        self._release_verdict = verdict
+        if verdict == "released" and not shelf_confirmed:
+            logger.info(
+                f"[STATE WATCHER] {source} on robot {self.robot_id}; the robot "
+                f"answers again and was carrying no shelf — nothing to report"
+            )
+            self._disconnect_suspected = False
+            return
         self._disconnect_suspected = verdict == "unreachable"
         self.shelf_drop_event.set()
 
@@ -744,8 +751,10 @@ class TaskEngine:
                     if empty_reads >= 2:
                         return "released"
                 else:
+                    empty_reads = 0
                     logger.debug(f"[SHELF VERIFY] read {attempt + 1} error: {res.get('error')}")
             except Exception as e:
+                empty_reads = 0
                 logger.debug(
                     f"[SHELF VERIFY] read {attempt + 1}/{SHELF_VERIFY_POLLS} failed: {e}"
                 )
@@ -780,10 +789,12 @@ class TaskEngine:
             # the robot is being asked survives this handler.
             if self.shelf_drop_event is not None:
                 self.shelf_drop_event.clear()
-            # The watcher verified the signal it raised; a signal from the
-            # controller's own monitor (during move_shelf) is verified here.
-            verdict = self._release_verdict or await self._verify_shelf_still_docked()
-            self._release_verdict = None
+            # Asked again here even though the watcher verified before
+            # raising: a robot that was unreachable then may be back by the
+            # time the step ends (one instant read when it is), and a signal
+            # from the controller's own monitor (armed from move_shelf until
+            # return_shelf, polled inside its commands) was never verified.
+            verdict = await self._verify_shelf_still_docked()
             # The verify reads are the freshest word on reachability — the
             # watcher's flag may be a poll behind in either direction.
             self._disconnect_suspected = verdict == "unreachable"
@@ -839,8 +850,11 @@ class TaskEngine:
         last_known_robot_pose = None if shelf_pose else await self._last_known_robot_pose()
         remaining_beds = self._collect_remaining_beds(task, step_index, trigger_step, location_id)
 
-        # Store shelf-drop context in task metadata
+        # Store shelf-drop context in task metadata — merged, so mode
+        # (cleanup / demo) survives: a retracted drop on a cleanup run that
+        # lost "mode" would make run_task queue another cleanup, forever.
         task.metadata = {
+            **(task.metadata or {}),
             "shelf_drop": True,
             "shelf_id": shelf_id,
             "bed_key": location_id,
@@ -940,9 +954,7 @@ class TaskEngine:
             # docked). A 11501/11019 refusal 「車上有家具不能充電」 is the same
             # answer in refusal form, trusted when the reads cannot get through.
             verdict = await self._verify_shelf_still_docked()
-            refused_with_shelf = any(
-                code in str(rh.get("error")) for code in ("11501", "11019")
-            )
+            refused_with_shelf = rh.get("error_code") in (11501, 11019)
             if verdict == "docked" or (verdict == "unreachable" and refused_with_shelf):
                 await self._retract_false_drop(task, shelf_id, location_id)
                 retracted = True
@@ -1021,7 +1033,6 @@ class TaskEngine:
         self.shelf_drop_event.clear()
         self._shelf_release_expected = False
         self._disconnect_suspected = False
-        self._release_verdict = None
         # The run starts at the dock, standing still.
         self._stationary_since = time.monotonic()
         self._low_battery_streak = 0
@@ -1037,6 +1048,7 @@ class TaskEngine:
             step_index = 0
             skipped_steps = set()
             skip_reasons = {}
+            rerun_steps = set()
 
             while step_index < len(task.steps):
                 step = task.steps[step_index]
@@ -1094,8 +1106,17 @@ class TaskEngine:
                     if self.shelf_drop_event.is_set():
                         if await self._handle_shelf_drop(task, step_index, trigger_step=step):
                             break
-                        # False signal (the controller's own monitor during a
-                        # move): the step keeps its own result.
+                        # False signal. A scan it cut short is re-run once so
+                        # the bed is not silently lost; a second cut is
+                        # recorded as skipped. Any other step keeps its result.
+                        if "interrupted by shelf release" in (step_result.error_message or ""):
+                            if step.step_id not in rerun_steps:
+                                rerun_steps.add(step.step_id)
+                                logger.info(f"[SHELF] Re-running {step.step_id} after a false release signal")
+                                step.status = StepStatus.PENDING
+                                continue
+                            if step.action == StepAction.BIO_SCAN:
+                                self._record_skipped_scan(step, "量測兩度被誤判的掉落訊號中斷")
 
                     if step_result.success:
                         logger.info(f"[✓] Robot {self.robot_id}, Step {step.step_id} completed successfully")
