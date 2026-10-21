@@ -178,3 +178,49 @@ async def test_second_false_release_on_the_same_bed_records_the_skip(monkeypatch
     assert calls == ["a0", "a0"]
     assert len(skipped) == 1
     assert task.status == TaskStatus.DONE
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_scan_is_not_the_drop_handlers_current_bed(monkeypatch):
+    """A scan whose move failed is handled by the skip branch; a release
+    signal pending at that loop top is handled at the next real step."""
+    from services.task_runtime import TaskEngine, StepResult
+
+    fleet = MagicMock()
+    fleet._robots = {}
+    fleet.get_shelves = AsyncMock(return_value={"ok": True, "shelves": []})
+    fleet.get_locations = AsyncMock(return_value={"ok": True, "locations": []})
+    fleet.get_metrics = AsyncMock(return_value={"poll_count": 0, "poll_rtt_list": [], "poll_success_count": 0})
+    fleet.reset_metrics = AsyncMock()
+    eng = TaskEngine(fleet, "kachaka")
+    handled_at: list[int] = []
+
+    async def fake_execute(step):
+        if step.step_id == "m0":
+            eng.shelf_drop_event.set()
+            return StepResult(success=False, error_code=19004, error_message="blocked", data={}, timestamp="t")
+        return StepResult(success=True, error_code=0, error_message="", data={}, timestamp="t")
+
+    async def fake_handle(task, idx, trigger_step=None, error_code=0):
+        handled_at.append(idx)
+        eng.shelf_drop_event.clear()
+        return False
+
+    monkeypatch.setattr(eng, "_execute_step", fake_execute)
+    monkeypatch.setattr(eng, "_handle_shelf_drop", fake_handle)
+    monkeypatch.setattr(eng, "_record_skipped_scan", lambda *a, **kw: None)
+
+    task = Task(
+        task_id="t5", robot_id="kachaka", status=TaskStatus.QUEUED,
+        steps=[TaskStep(step_id="m0", action=StepAction.MOVE_SHELF,
+                        params={"shelf_id": "S_04", "location_id": "B_101-1"},
+                        skip_on_failure=["a0"]),
+               TaskStep(step_id="a0", action=StepAction.BIO_SCAN, params={"bed_key": "101-1"}),
+               TaskStep(step_id="w1", action=StepAction.WAIT, params={"seconds": "0"})],
+    )
+    await eng.run_task(task)
+
+    # handled once after the failed move (trigger path); never at the
+    # skipped scan's loop top
+    assert handled_at == [0]
+    assert task.steps[1].status == StepStatus.SKIPPED

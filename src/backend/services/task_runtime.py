@@ -764,9 +764,15 @@ class TaskEngine:
             # The handler's own verify, passed as a value rather than read
             # back from the shared flag the watcher also writes: unreachable
             # there plus any failed read here is a dead link; two reads that
-            # both get through mean the robot is back.
+            # both get through mean the robot is back. A "released" verdict
+            # (the robot answered twice: no shelf) stays a drop even if the
+            # two reads here then hit a blip — a drop must not be filed as
+            # an outage the reconnect sweep clears.
             any_failed = is_connection_error(battery_err) or is_connection_error(state_err)
-            disconnected = both_failed or (verdict == "unreachable" and any_failed)
+            if verdict == "released":
+                disconnected = False
+            else:
+                disconnected = both_failed or (verdict == "unreachable" and any_failed)
         else:
             disconnected = self._disconnect_suspected or both_failed
         kind = classify_shelf_release(
@@ -874,9 +880,17 @@ class TaskEngine:
             self._false_signal_step = step_index
             self._false_signals = 0
         if self._false_signals >= FALSE_SIGNAL_CAP:
+            if shelf_confirmed is False:
+                # Nothing was on the robot when this was raised: still
+                # nothing to report, and no verify to spin on.
+                logger.warning(
+                    f"[SHELF DROP] past the false-signal cap, but no shelf was "
+                    f"being carried — nothing to report, resuming task {task.task_id}"
+                )
+                return False
             logger.error(
-                f"[SHELF DROP] {self._false_signals} false release signals this run — "
-                f"handling this one as a drop so the run does not spin"
+                f"[SHELF DROP] {self._false_signals} false release signals at this "
+                f"step — handling this one as a drop so the run does not spin"
             )
         elif trigger_step is None or trigger_step.action != StepAction.RETURN_SHELF:
             # Asked again here even though the watcher verified before
@@ -1147,6 +1161,11 @@ class TaskEngine:
             task.metadata["shelf_drop"] = False
             task.metadata["remaining_beds"] = []
             task.metadata["false_drop"] = True
+            if shelf_id != "unknown":
+                # Whoever queues the cleanup (this retraction, or the stop
+                # that landed meanwhile): it decides its return_shelf step
+                # from the same moving-shelf read that may just have lied.
+                task.metadata["cleanup_shelf_id"] = shelf_id
         if task.status != TaskStatus.SHELF_DROPPED:
             return
         logger.warning(
@@ -1155,10 +1174,6 @@ class TaskEngine:
             f"to park the shelf"
         )
         task.status = TaskStatus.CANCELLED
-        if task.metadata is not None and shelf_id != "unknown":
-            # The cleanup decides its return_shelf step from the same
-            # moving-shelf read that may just have lied; name the shelf.
-            task.metadata["cleanup_shelf_id"] = shelf_id
         # The N/A rows written for the beds this run will not reach now say
         # 貨架掉落; the record should say what actually happened.
         await asyncio.to_thread(
@@ -1247,7 +1262,10 @@ class TaskEngine:
                     break
 
                 # --- SHELF DROP via slot event / state watcher ---
-                if self.shelf_drop_event.is_set():
+                # Checked only for a step that is about to run: a scan whose
+                # move already failed is handled by the skip branch below, not
+                # listed as the drop's unprocessed current bed.
+                if self.shelf_drop_event.is_set() and step.step_id not in skipped_steps:
                     if await self._handle_shelf_drop(task, step_index):
                         break
                     continue  # false signal: same step, event cleared
@@ -1818,6 +1836,13 @@ class TaskEngine:
                         f"shelf docked — ending run {task.task_id} for the cleanup to park it"
                     )
                     task.status = TaskStatus.CANCELLED
+                    held = next((st.params.get("shelf_id") for st in task.steps
+                                 if st.action in (StepAction.RETURN_SHELF, StepAction.MOVE_SHELF)
+                                 and st.params.get("shelf_id")), None)
+                    if held and task.metadata is not None:
+                        # Name the shelf for the cleanup: the moving-shelf
+                        # read it would otherwise rely on may say none.
+                        task.metadata["cleanup_shelf_id"] = held
                     body = "機器人無法在載著貨架時回充\n本次巡房結束，將再試一次貨架歸位後回充"
                 try:
                     await dispatcher.dispatch(AnomalyEvent(

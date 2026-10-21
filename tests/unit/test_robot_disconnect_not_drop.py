@@ -933,9 +933,11 @@ def test_retraction_yields_to_an_operator_stop(monkeypatch):
     assert handled is True
     assert task.status == TaskStatus.CANCELLED
     assert [e.severity for e in events] == [Severity.CRITICAL]
-    # the shelf is on the robot: resume-latest must not offer this run
+    # the shelf is on the robot: resume-latest must not offer this run, and
+    # the stop's cleanup parks the named shelf
     assert task.metadata["shelf_drop"] is False
     assert task.metadata["remaining_beds"] == []
+    assert task.metadata["cleanup_shelf_id"] == "S_04"
 
 
 def test_cancel_during_the_verify_window_stands(monkeypatch):
@@ -1200,6 +1202,7 @@ def test_return_home_refused_with_the_shelf_docked_ends_the_run_for_cleanup(monk
     assert task.status == TaskStatus.CANCELLED
     assert [e.severity for e in events] == [Severity.WARN]
     assert "歸位失敗" in events[0].title
+    assert task.metadata.get("cleanup_shelf_id") is None     # go_home: no shelf step
 
 
 @pytest.mark.asyncio
@@ -1417,3 +1420,26 @@ def test_the_false_signal_cap_resets_on_progress(monkeypatch):
 
     assert asyncio.run(eng._handle_shelf_drop(_task(), 1)) is False
     assert eng._false_signals == 1
+
+
+def test_a_released_verdict_stays_a_drop_when_the_classify_reads_blip(monkeypatch):
+    """The robot answered the verify twice (no shelf): a blip during the
+    two classify reads must not file the drop as an outage the reconnect
+    sweep would clear."""
+    eng = _engine(UNREACHABLE_READ, UNREACHABLE_READ, verify="released")
+
+    task, event = _run_drop(monkeypatch, eng)
+
+    assert event.severity == Severity.CRITICAL
+    assert task.metadata["disconnect"] is False
+
+
+def test_past_the_cap_a_no_shelf_signal_is_still_nothing(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    eng._false_signals = task_runtime.FALSE_SIGNAL_CAP
+    eng._false_signal_step = 1
+    eng._signal_shelf_confirmed = False
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", AsyncMock())
+
+    assert asyncio.run(eng._handle_shelf_drop(_task(), 1)) is False
+    eng._verify_shelf_still_docked.assert_not_awaited()
