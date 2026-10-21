@@ -55,8 +55,9 @@ SHELF_VERIFY_INTERVAL = 2.0
 # return_home refused because furniture is docked: 11501 / 11019 「車上有家具
 # 不能充電」 — the firmware's own word that the shelf is still on the robot.
 CHARGE_REFUSED_WITH_SHELF = (11501, 11019)
-# False release signals a run tolerates before the next one is handled as a
-# drop regardless (a flapping moving-shelf read must not spin the run).
+# False release signals tolerated at one step boundary before the next one is
+# handled as a drop regardless (a flapping moving-shelf read must not spin
+# the run there); progress to another step resets the count.
 FALSE_SIGNAL_CAP = 5
 
 # PFR: this pack's BMU has no proper regulation, so motor start/stop swings the
@@ -233,6 +234,7 @@ class TaskEngine:
         # handled as a drop so a flapping shelf read cannot spin the run at
         # one step boundary forever.
         self._false_signals = 0
+        self._false_signal_step: Optional[int] = None
         # monotonic timestamp of the current stationary window, or None while a
         # motion step is in flight — see MOTION_ACTIONS / BATTERY_ABORT_CONSECUTIVE.
         self._stationary_since: Optional[float] = None
@@ -867,6 +869,10 @@ class TaskEngine:
         shelf_confirmed = self._signal_shelf_confirmed
         self._signal_shelf_confirmed = None
         verdict: Optional[str] = None
+        if self._false_signal_step != step_index:
+            # The cap is about one step boundary spinning; progress resets it.
+            self._false_signal_step = step_index
+            self._false_signals = 0
         if self._false_signals >= FALSE_SIGNAL_CAP:
             logger.error(
                 f"[SHELF DROP] {self._false_signals} false release signals this run — "
@@ -1149,13 +1155,15 @@ class TaskEngine:
             f"to park the shelf"
         )
         task.status = TaskStatus.CANCELLED
-        if task.metadata is not None:
+        if task.metadata is not None and shelf_id != "unknown":
             # The cleanup decides its return_shelf step from the same
             # moving-shelf read that may just have lied; name the shelf.
             task.metadata["cleanup_shelf_id"] = shelf_id
         # The N/A rows written for the beds this run will not reach now say
         # 貨架掉落; the record should say what actually happened.
-        self._relabel_skipped_scans(skip_detail, "掉落訊號誤判，巡房提前結束")
+        await asyncio.to_thread(
+            self._relabel_skipped_scans, skip_detail, "掉落訊號誤判，巡房提前結束"
+        )
         try:
             await dispatcher.dispatch(AnomalyEvent(
                 severity=Severity.WARN,
@@ -1212,6 +1220,7 @@ class TaskEngine:
         self._disconnect_suspected = False
         self._signal_shelf_confirmed = None
         self._false_signals = 0
+        self._false_signal_step = None
         # The run starts at the dock, standing still; no bed targeted yet.
         self.target_bed = ""
         self._stationary_since = time.monotonic()

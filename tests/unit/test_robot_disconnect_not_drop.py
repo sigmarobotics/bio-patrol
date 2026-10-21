@@ -1406,3 +1406,13 @@ def test_a_return_shelf_trigger_does_not_borrow_the_last_bed(monkeypatch):
     asyncio.run(eng._handle_shelf_drop(_task(), 1, trigger_step=trigger))
 
     assert events[0].bed_key == "unknown"
+
+
+def test_the_false_signal_cap_resets_on_progress(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="docked")
+    eng._false_signals = task_runtime.FALSE_SIGNAL_CAP
+    eng._false_signal_step = 0          # counted at another step boundary
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", AsyncMock())
+
+    assert asyncio.run(eng._handle_shelf_drop(_task(), 1)) is False
+    assert eng._false_signals == 1
