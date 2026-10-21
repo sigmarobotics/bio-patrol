@@ -215,6 +215,8 @@ def test_shelf_drop_cuts_a_waiting_voice_step_short(monkeypatch):
     async def _go():
         engine.shelf_drop_event = asyncio.Event()
         engine._battery_abort_event = asyncio.Event()
+        # the wait verifies the signal against the robot first: a real release
+        engine._verify_shelf_still_docked = AsyncMock(return_value="released")
         return await asyncio.wait_for(engine._do_play_sound(step), 5)
 
     result = asyncio.run(_go())

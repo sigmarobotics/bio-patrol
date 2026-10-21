@@ -28,6 +28,8 @@ def test_shelf_drop_handler_swallows_dispatcher_exception():
     fleet.cancel_command = AsyncMock(return_value=None)
     fleet.return_home = AsyncMock(return_value=None)
     engine = task_runtime.TaskEngine(fleet, "kachaka")
+    # the handler asks the robot first; this is the classic drop
+    engine._verify_shelf_still_docked = AsyncMock(return_value="released")
 
     task = Task(task_id="t-1", robot_id="kachaka", steps=[], status=TaskStatus.IN_PROGRESS)
 
@@ -56,6 +58,8 @@ def test_run_task_summary_dispatch_failure_does_not_change_task_status():
     })
     fleet.reset_metrics = AsyncMock(return_value=None)
     engine = task_runtime.TaskEngine(fleet, "kachaka")
+    # the handler asks the robot first; this is the classic drop
+    engine._verify_shelf_still_docked = AsyncMock(return_value="released")
 
     task = Task(
         task_id="t-2",

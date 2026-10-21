@@ -26,6 +26,8 @@ def test_shelf_drop_dispatches_critical_event():
     fleet.cancel_command = AsyncMock(return_value=None)
     fleet.return_home = AsyncMock(return_value=None)
     engine = task_runtime.TaskEngine(fleet, "kachaka")
+    # the handler asks the robot first; this is the classic drop
+    engine._verify_shelf_still_docked = AsyncMock(return_value="released")
 
     task = Task(
         task_id="t-1", robot_id="kachaka", steps=[], status=TaskStatus.IN_PROGRESS
@@ -62,6 +64,8 @@ def _engine_with_event():
     from services import task_runtime
     fleet = MagicMock()
     engine = task_runtime.TaskEngine(fleet, "kachaka")
+    # the handler asks the robot first; this is the classic drop
+    engine._verify_shelf_still_docked = AsyncMock(return_value="released")
     engine.shelf_drop_event = asyncio.Event()
     return engine, fleet
 
