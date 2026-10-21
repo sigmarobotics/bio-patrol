@@ -217,6 +217,9 @@ class TaskEngine:
         # Set by a retracted drop: the run re-drives from this step (the
         # bed's move_shelf) because return_home may have moved the robot.
         self._resume_step_index: Optional[int] = None
+        # Retracted drops this run: a third lying pair ends the run as a
+        # drop rather than paging the ward CRITICAL/WARN forever.
+        self._false_drops = 0
         # monotonic timestamp of the current stationary window, or None while a
         # motion step is in flight — see MOTION_ACTIONS / BATTERY_ABORT_CONSECUTIVE.
         self._stationary_since: Optional[float] = None
@@ -381,7 +384,13 @@ class TaskEngine:
         that ends with the robot answering is nothing to report either — a
         "released" verdict only says the robot carries none now.
         """
-        verdict = await self._verify_shelf_still_docked()
+        try:
+            verdict = await self._verify_shelf_still_docked()
+        except Exception:
+            # The verify catches its own read errors; anything else must not
+            # take the watcher down — raise the signal unverified, as before.
+            logger.exception("[STATE WATCHER] verify failed — raising unverified")
+            verdict = "unreachable" if from_disconnect else "released"
         if verdict == "docked":
             logger.warning(
                 f"[STATE WATCHER] {source} on robot {self.robot_id}, but the "
@@ -789,12 +798,11 @@ class TaskEngine:
         of a shelf sitting at home)."""
         placed = False
         for st in task.steps[:step_index]:
-            if st.action == StepAction.MOVE_SHELF and st.status == StepStatus.SUCCESS:
+            if st.status != StepStatus.SUCCESS:
+                continue
+            if st.action == StepAction.MOVE_SHELF:
                 placed = False
-            elif st.action == StepAction.RETURN_SHELF and (
-                st.status == StepStatus.SUCCESS
-                or (st.result is not None and (st.result.data or {}).get("shelf_placed"))
-            ):
+            elif st.action == StepAction.RETURN_SHELF:
                 placed = True
         return placed
 
@@ -839,9 +847,12 @@ class TaskEngine:
                     f"cleanup owns the wrap-up"
                 )
                 return True
-            # Reachability is decided by _classify_release's own reads below,
-            # the freshest word; the watcher's flag may be a poll behind.
-            self._disconnect_suspected = False
+            # A robot that answered is not suspected any more; one that did
+            # not keeps the watcher's suspicion into _classify_release — a
+            # link that flaps back for one of its two reads must still be a
+            # 失聯 pause, not a CRITICAL drop.
+            if verdict != "unreachable":
+                self._disconnect_suspected = False
             if verdict == "docked":
                 logger.warning(
                     f"[SHELF DROP] Robot {self.robot_id} still carries the shelf — "
@@ -881,7 +892,12 @@ class TaskEngine:
         else:
             logger.error(f"[SHELF DROP] Detected via {source} on robot {self.robot_id}, pausing task")
 
-        location_id = trigger_step.params.get("location_id", "unknown") if trigger_step else "unknown"
+        location_id = "unknown"
+        if trigger_step is not None:
+            # A bio_scan step carries no location; the bed it is parked at
+            # is the engine's current target.
+            location_id = (trigger_step.params.get("location_id")
+                           or getattr(self, "target_bed", None) or "unknown")
         shelf_id = trigger_step.params.get("shelf_id", "unknown") if trigger_step else "unknown"
         if shelf_id == "unknown":
             # A bio_scan trigger step carries no shelf, but the run's own
@@ -903,7 +919,7 @@ class TaskEngine:
         # (cleanup / demo) survives: a retracted drop on a cleanup run that
         # lost "mode" would make run_task queue another cleanup, forever.
         task.metadata = {
-            **(task.metadata or {}),
+            **{k: v for k, v in (task.metadata or {}).items() if k != "false_drop"},
             "shelf_drop": True,
             "shelf_id": shelf_id,
             "bed_key": location_id,
@@ -1036,13 +1052,13 @@ class TaskEngine:
         if verdict == "docked" or rh.get("error_code") in (11501, 11019):
             resume = trigger_step is None or trigger_step.action != StepAction.RETURN_SHELF
             if await self._retract_false_drop(task, step_index, shelf_id, location_id,
-                                              steps_to_skip, resume=resume):
+                                              steps_to_skip, skip_detail, resume=resume):
                 return False
         return True
 
     async def _retract_false_drop(self, task: Task, step_index: int, shelf_id: str,
                                   location_id: str, skipped: List[TaskStep],
-                                  *, resume: bool) -> bool:
+                                  skip_detail: str, *, resume: bool) -> bool:
         """The robot reports the shelf still docked after the drop was
         reported (a 11501/11019 「車上有家具不能充電」 refusal, or a plain read):
         the alert just sent was false. With ``resume`` the run goes on — the
@@ -1061,6 +1077,14 @@ class TaskEngine:
         """
         if task.status != TaskStatus.SHELF_DROPPED:
             return False
+        self._false_drops += 1
+        if self._false_drops > 2:
+            logger.error(
+                f"[SHELF DROP] Robot {self.robot_id} reports the shelf docked again "
+                f"after {self._false_drops - 1} retracted drops this run — leaving "
+                f"the drop standing for a person to check"
+            )
+            return False
         if task.metadata:
             task.metadata["shelf_drop"] = False
             task.metadata["remaining_beds"] = []
@@ -1073,15 +1097,26 @@ class TaskEngine:
             task.status = TaskStatus.IN_PROGRESS
             for st in skipped:
                 st.status = StepStatus.PENDING
-            redrive = next(
-                (i for i in range(min(step_index, len(task.steps) - 1), -1, -1)
-                 if task.steps[i].action == StepAction.MOVE_SHELF),
-                None,
+            self._unrecord_skipped_scans(
+                [st.params.get("bed_key") for st in skipped], skip_detail
             )
+            # Re-drive only when a bed's scan was put back: from the move
+            # that brings the robot to the first of them. Beds already
+            # measured stay measured.
+            restored = [i for i, st in enumerate(task.steps) if st in skipped]
+            redrive = None
+            if restored:
+                redrive = next(
+                    (i for i in range(restored[0] - 1, -1, -1)
+                     if task.steps[i].action == StepAction.MOVE_SHELF),
+                    None,
+                )
             if redrive is not None:
                 task.steps[redrive].status = StepStatus.PENDING
                 self._resume_step_index = redrive
-            outcome = "巡房繼續，重新前往該床"
+                outcome = "巡房繼續，重新前往該床"
+            else:
+                outcome = "巡房繼續"
         else:
             logger.warning(
                 f"[SHELF DROP] Robot {self.robot_id} reports the shelf still docked — "
@@ -1107,6 +1142,27 @@ class TaskEngine:
         except Exception:
             logger.exception("Failed to dispatch false-drop retraction")
         return resume
+
+    def _unrecord_skipped_scans(self, bed_names: List[Optional[str]], details: str) -> None:
+        """Delete the N/A rows a drop wrote for beds the retracted drop gives
+        back to the run — the run summary keeps the first row on a tie, so a
+        leftover N/A row could still outrank the real attempt."""
+        if not bed_names:
+            return
+        try:
+            client = get_bio_sensor_client()
+            if client is None:
+                return
+            conn = connect_db(client.db_path)
+            conn.executemany(
+                "DELETE FROM sensor_scan_data WHERE task_id = ? AND bed_name = ? "
+                "AND details = ? AND is_valid = 0",
+                [(self.current_task_id, b, details) for b in bed_names if b],
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"[SHELF DROP] Could not remove retracted N/A rows: {e}")
 
     def _resume_from(self, task: Task, default: Optional[int],
                      skipped_steps: set) -> Optional[int]:
@@ -1137,6 +1193,7 @@ class TaskEngine:
         self._shelf_release_expected = False
         self._disconnect_suspected = False
         self._resume_step_index = None
+        self._false_drops = 0
         # The run starts at the dock, standing still.
         self._stationary_since = time.monotonic()
         self._low_battery_streak = 0
@@ -1581,10 +1638,7 @@ class TaskEngine:
         elif self.shelf_drop_event is not None and self.shelf_drop_event.is_set():
             logger.info("[SHELF] Clearing stale drop signal raised during normal placement")
             self.shelf_drop_event.clear()
-        # shelf_placed: a placement that timed out app-side but finished on
-        # the robot still counts as placed for _shelf_placed.
-        return self._make_result(result, step.action,
-                                 {"shelf_id": shelf_id, "shelf_placed": not dropped})
+        return self._make_result(result, step.action, {"shelf_id": shelf_id})
 
     def _run_outcome_buckets(self, task_id: str, demo: bool = False) -> Optional[tuple]:
         """Per-bed outcome buckets and readings for one run, from the scan DB.
