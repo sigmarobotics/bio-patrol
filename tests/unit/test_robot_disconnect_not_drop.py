@@ -191,7 +191,7 @@ async def test_watcher_blip_with_no_shelf_carried_is_nothing_to_report(no_sleep)
     """A blip during the final return_home (shelf already placed) that ends
     with the robot answering: "released" only says it carries none now."""
     eng = _watcher_engine([None, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, None],
-                          verify_reads=[UNAVAILABLE, NO_SHELF, NO_SHELF])
+                          verify_reads=[NO_SHELF, NO_SHELF])
 
     await eng._watch_shelf_state()
 
@@ -202,7 +202,7 @@ async def test_watcher_blip_with_no_shelf_carried_is_nothing_to_report(no_sleep)
 @pytest.mark.asyncio
 async def test_watcher_blip_with_the_shelf_carried_and_then_none_is_a_drop(no_sleep):
     eng = _watcher_engine(["S_04", UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, None],
-                          verify_reads=[UNAVAILABLE, NO_SHELF, NO_SHELF])
+                          verify_reads=[NO_SHELF, NO_SHELF])
 
     await eng._watch_shelf_state()
 
@@ -219,6 +219,20 @@ async def test_watcher_ignores_an_empty_read_the_robot_denies(no_sleep):
     await eng._watch_shelf_state()
 
     assert not eng.shelf_drop_event.is_set()
+    assert eng._shelf_seen_on_robot is True
+
+
+@pytest.mark.asyncio
+async def test_watcher_keeps_watching_after_a_denied_empty_read(no_sleep):
+    """The denied transient must not blind the watcher: the shelf really
+    falling on the next poll is still a drop."""
+    eng = _watcher_engine(["S_04", "S_04", None, None, None], final=None,
+                          verify_reads=[DOCKED, NO_SHELF, NO_SHELF])
+
+    await eng._watch_shelf_state()
+
+    assert eng.shelf_drop_event.is_set()
+    assert eng._shelf_seen_on_robot is False
 
 
 @pytest.mark.asyncio
@@ -297,15 +311,20 @@ def test_unreachable_robot_reports_disconnect_not_drop(monkeypatch):
     assert task.metadata["shelf_drop"] is True
 
 
-def test_watcher_disconnect_flag_reaches_the_notification(monkeypatch):
-    """The verify reads are the freshest word: all failed, so the robot is
-    offline even if the later battery/state reads happen to get through."""
+def test_robot_back_by_the_classify_reads_is_not_reported_offline(monkeypatch):
+    """The verify window ended unreachable but the robot answers the
+    battery/state reads right after: those reads are the freshest word, so
+    this is classified from them (a drop), not reported as 失聯 with
+    return_home skipped — the post-return_home read then settles whether the
+    shelf is still docked."""
     eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="unreachable")
+    eng._disconnect_suspected = True
 
     task, event = _run_drop(monkeypatch, eng)
 
-    assert event.severity == Severity.WARN
-    assert task.metadata["disconnect"] is True
+    assert event.severity == Severity.CRITICAL
+    assert task.metadata["disconnect"] is False
+    eng.fleet.return_home.assert_awaited_once()
 
 
 def test_reachable_robot_drop_is_still_critical(monkeypatch):
@@ -509,7 +528,7 @@ def _verify_engine(reads):
 
 @pytest.mark.asyncio
 async def test_verify_rides_out_a_blip(no_sleep):
-    eng = _verify_engine([UNAVAILABLE, UNAVAILABLE, DOCKED])
+    eng = _verify_engine([UNAVAILABLE, DOCKED])
     assert await eng._verify_shelf_still_docked() == "docked"
 
 
@@ -703,28 +722,29 @@ def _run_drop_all(monkeypatch, eng, task):
     monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
     monkeypatch.setattr(task_runtime.TaskEngine, "_record_skipped_scan",
                         lambda self, step, details, **kw: skipped.append(details))
-    asyncio.run(eng._handle_shelf_drop(task, 0))
-    return events, skipped
+    handled = asyncio.run(eng._handle_shelf_drop(task, 0))
+    return events, skipped, handled
 
 
 def test_firmware_refusing_return_home_retracts_the_drop(monkeypatch):
-    """11501/11019 is the firmware saying the shelf is still docked: the run
-    ends cancelled (run_task's wrap-up queues return_shelf + return_home and
-    sends 已取消), the ward is told, and 續巡 no longer offers this run."""
+    """11501/11019 is the firmware saying the shelf is still docked, whatever
+    the reads said (2026-10-02: reboot, reads empty, shelf still latched):
+    the run resumes, the ward is told, 續巡 no longer offers this run."""
     eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
     eng.fleet.return_home = AsyncMock(return_value={
         "ok": False, "error_code": 11501, "error": "error_code=11501: Charging canceled",
     })
-    # entry: a drop; after the refusal the reads cannot get through
-    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released", "unreachable"])
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released", "released"])
     task = _two_bed_task()
 
-    events, skipped = _run_drop_all(monkeypatch, eng, task)
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task)
 
+    assert handled is False
     assert [e.severity for e in events] == [Severity.CRITICAL, Severity.WARN]
     assert events[1].raw["false_drop"] is True
     assert "仍在機器人身上" in events[1].title
-    assert task.status == TaskStatus.CANCELLED
+    assert "巡房繼續" in events[1].body
+    assert task.status == TaskStatus.IN_PROGRESS
     assert task.metadata["shelf_drop"] is False
     assert task.metadata["remaining_beds"] == []
     # the beds after the false drop are not written off as 貨架掉落
@@ -739,11 +759,62 @@ def test_shelf_still_docked_after_return_home_retracts_the_drop(monkeypatch):
     eng._verify_shelf_still_docked = AsyncMock(side_effect=["released", "docked"])
     task = _two_bed_task()
 
-    events, skipped = _run_drop_all(monkeypatch, eng, task)
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task)
 
+    assert handled is False
     assert [e.severity for e in events] == [Severity.CRITICAL, Severity.WARN]
-    assert task.status == TaskStatus.CANCELLED
+    assert task.status == TaskStatus.IN_PROGRESS
     assert skipped == []
+
+
+def test_retraction_yields_to_an_operator_stop(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    task = _two_bed_task()
+
+    async def _verify():
+        if eng._verify_shelf_still_docked.await_count == 2:
+            task.status = TaskStatus.CANCELLED   # 停止 pressed during return_home
+            return "docked"
+        return "released"
+
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=_verify)
+
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task)
+
+    assert handled is True
+    assert task.status == TaskStatus.CANCELLED
+    assert [e.severity for e in events] == [Severity.CRITICAL]
+
+
+def test_cancel_during_the_verify_window_stands(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    task = _two_bed_task()
+
+    async def _verify():
+        task.status = TaskStatus.CANCELLED
+        return "released"
+
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=_verify)
+
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task)
+
+    assert handled is True
+    assert events == []
+    assert task.status == TaskStatus.CANCELLED
+
+
+def test_no_shelf_carried_means_nothing_to_report(monkeypatch):
+    """Blip on the final return_home, shelf already placed: the robot comes
+    back carrying none — that is not a drop."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    eng._shelf_seen_on_robot = False
+    task = _two_bed_task()
+
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task)
+
+    assert handled is False
+    assert events == []
+    assert task.status == TaskStatus.IN_PROGRESS
 
 
 def test_other_return_home_failures_leave_the_drop_standing(monkeypatch):
@@ -753,10 +824,13 @@ def test_other_return_home_failures_leave_the_drop_standing(monkeypatch):
     })
 
     task = _two_bed_task()
-    events, skipped = _run_drop_all(monkeypatch, eng, task)
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task)
 
+    assert handled is True
     assert [e.severity for e in events] == [Severity.CRITICAL]
     assert task.status == TaskStatus.SHELF_DROPPED
     assert task.metadata["shelf_drop"] is True
-    assert skipped == ["貨架掉落，巡房中斷"]
+    # loop-top signal: the pending scan at step_index is unprocessed too
+    assert skipped == ["貨架掉落，巡房中斷"] * 2
+    assert task.steps[0].status == StepStatus.SKIPPED
     assert task.steps[1].status == StepStatus.SKIPPED

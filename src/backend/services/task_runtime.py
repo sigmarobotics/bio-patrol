@@ -48,9 +48,12 @@ _CHARGING_POWER_STATUSES = {
 DISCONNECT_POLL_THRESHOLD = 3
 # A release signal is verified against the robot before it is believed: up to
 # this many get_moving_shelf reads, this far apart, so a WiFi blip that raised
-# the signal has time to end (板橋 blips last 4–12 s; each failed read already
-# spends ~3 s inside kachaka_core's with_retry, so 3 polls span ~13 s).
-SHELF_VERIFY_POLLS = 3
+# the signal has time to end (板橋 blips last 4–12 s). A failed read is not
+# cheap — kachaka_core's with_retry makes 3 attempts with 1 s + 2 s backoff
+# and a 5 s deadline each, so a dropped-packet blip can cost ~18 s per read
+# and a verify on a dead robot ~40 s; that is the price of not paging the
+# ward for a shelf that never left the robot.
+SHELF_VERIFY_POLLS = 2
 SHELF_VERIFY_INTERVAL = 2.0
 
 # PFR: this pack's BMU has no proper regulation, so motor start/stop swings the
@@ -214,6 +217,12 @@ class TaskEngine:
         # True once the robot stopped answering: the run still pauses, but the
         # shelf state is reported as unknown instead of dropped.
         self._disconnect_suspected = False
+        # True once the watcher has seen a shelf on the robot in this run and
+        # not yet seen it released: a "carries none now" answer only reports a
+        # drop while this is True (a blip during the final return_home, shelf
+        # already placed, is nothing). Unknown before a run starts → assume
+        # carried, the side that still reports.
+        self._shelf_seen_on_robot = True
         # monotonic timestamp of the current stationary window, or None while a
         # motion step is in flight — see MOTION_ACTIONS / BATTERY_ABORT_CONSECUTIVE.
         self._stationary_since: Optional[float] = None
@@ -312,7 +321,9 @@ class TaskEngine:
                 if mid:
                     last_seen_id = mid
                     confirmed_docked = True
+                    self._shelf_seen_on_robot = True
                 elif confirmed_docked and last_seen_id:
+                    released = True
                     if self._shelf_release_expected:
                         # return_shelf is placing the shelf — a legal release,
                         # not a drop (2026-07-23/24 false alarms: both patrol
@@ -322,9 +333,15 @@ class TaskEngine:
                             f"return_shelf — normal placement, not a drop"
                         )
                     elif self.shelf_drop_event is not None:
-                        await self._raise_release("empty moving-shelf read", shelf_confirmed=True)
-                    confirmed_docked = False
-                    last_seen_id = None
+                        released = await self._raise_release(
+                            "empty moving-shelf read", shelf_confirmed=True
+                        )
+                    if released:
+                        confirmed_docked = False
+                        last_seen_id = None
+                        self._shelf_seen_on_robot = False
+                    # else: a transient the robot denied — still docked, keep
+                    # watching for the real thing.
             except Exception as e:
                 # A failed read says nothing about the shelf — only a
                 # successful read reporting no shelf can be a drop. Repeated
@@ -358,8 +375,9 @@ class TaskEngine:
             except asyncio.CancelledError:
                 break
 
-    async def _raise_release(self, source: str, *, shelf_confirmed: bool) -> None:
+    async def _raise_release(self, source: str, *, shelf_confirmed: bool) -> bool:
         """Raise shelf_drop_event for ``source`` — after asking the robot.
+        Returns whether it was raised.
 
         Verified here, at the source, so every consumer of the event sees a
         signal the robot has already failed to deny. A robot that answers
@@ -377,16 +395,17 @@ class TaskEngine:
                 f"robot still carries the shelf — release signal ignored"
             )
             self._disconnect_suspected = False
-            return
+            return False
         if verdict == "released" and not shelf_confirmed:
             logger.info(
                 f"[STATE WATCHER] {source} on robot {self.robot_id}; the robot "
                 f"answers again and was carrying no shelf — nothing to report"
             )
             self._disconnect_suspected = False
-            return
+            return False
         self._disconnect_suspected = verdict == "unreachable"
         self.shelf_drop_event.set()
+        return True
 
     async def _maybe_abort_low_battery(self) -> bool:
         """Cancel the running patrol when the battery drops below the abort
@@ -633,7 +652,7 @@ class TaskEngine:
         # If no trigger step (polling detection), include current executing bio_scan
         if not trigger_step:
             current = task.steps[step_index] if step_index < len(task.steps) else None
-            if current and current.action == StepAction.BIO_SCAN and current.status == StepStatus.EXECUTING:
+            if current and current.action == StepAction.BIO_SCAN and current.status in (StepStatus.PENDING, StepStatus.EXECUTING):
                 remaining.insert(0, {
                     "bed_key": current.params.get("bed_key", ""),
                     "location_id": getattr(self, "target_bed", ""),
@@ -795,13 +814,28 @@ class TaskEngine:
             # from the controller's own monitor (armed from move_shelf until
             # return_shelf, polled inside its commands) was never verified.
             verdict = await self._verify_shelf_still_docked()
-            # The verify reads are the freshest word on reachability — the
-            # watcher's flag may be a poll behind in either direction.
-            self._disconnect_suspected = verdict == "unreachable"
+            if task.status == TaskStatus.CANCELLED:
+                # An operator stop (or the battery abort) landed during the
+                # verify window; the CANCELLED ending stands.
+                logger.info(
+                    f"[SHELF DROP] Task {task.task_id} cancelled while verifying — "
+                    f"cleanup owns the wrap-up"
+                )
+                return True
+            # Reachability is decided by _classify_release's own reads below,
+            # the freshest word; the watcher's flag may be a poll behind.
+            self._disconnect_suspected = False
             if verdict == "docked":
                 logger.warning(
                     f"[SHELF DROP] Robot {self.robot_id} still carries the shelf — "
                     f"release signal was false, resuming task {task.task_id}"
+                )
+                return False
+            if verdict == "released" and not self._shelf_seen_on_robot:
+                logger.info(
+                    f"[SHELF DROP] Robot {self.robot_id} answers and carries no "
+                    f"shelf, but none was being carried — nothing to report, "
+                    f"resuming task {task.task_id}"
                 )
                 return False
             if self.shelf_drop_event is not None:
@@ -955,52 +989,60 @@ class TaskEngine:
             # answer in refusal form, trusted when the reads cannot get through.
             verdict = await self._verify_shelf_still_docked()
             refused_with_shelf = rh.get("error_code") in (11501, 11019)
-            if verdict == "docked" or (verdict == "unreachable" and refused_with_shelf):
-                await self._retract_false_drop(task, shelf_id, location_id)
-                retracted = True
-        if not retracted:
-            # Record all skipped bio_scan steps to DB
-            steps_to_skip = []
-            if trigger_step and trigger_step.skip_on_failure:
-                for skip_id in trigger_step.skip_on_failure:
-                    s = next((s for s in task.steps if s.step_id == skip_id), None)
-                    if s and s.action == StepAction.BIO_SCAN:
-                        steps_to_skip.append(s)
-            for future in task.steps[step_index + 1:]:
-                if future.action == StepAction.BIO_SCAN and future.status == StepStatus.PENDING and future not in steps_to_skip:
-                    steps_to_skip.append(future)
+            if verdict == "docked" or refused_with_shelf:
+                retracted = await self._retract_false_drop(task, shelf_id, location_id)
+        if retracted:
+            return False
+        # The drop stands: write the beds it took off tonight's run.
+        # Record all skipped bio_scan steps to DB
+        steps_to_skip = []
+        if trigger_step and trigger_step.skip_on_failure:
+            for skip_id in trigger_step.skip_on_failure:
+                s = next((s for s in task.steps if s.step_id == skip_id), None)
+                if s and s.action == StepAction.BIO_SCAN:
+                    steps_to_skip.append(s)
+        # With no trigger step the current step has not run yet (loop
+        # top): it is unprocessed too.
+        first = step_index + 1 if trigger_step else step_index
+        for future in task.steps[first:]:
+            if future.action == StepAction.BIO_SCAN and future.status == StepStatus.PENDING and future not in steps_to_skip:
+                steps_to_skip.append(future)
 
-            if disconnected:
-                skip_detail = "機器人失聯，巡房中斷"
-            elif low_battery:
-                skip_detail = "電量不足，巡房中止待充電"
-            else:
-                skip_detail = "貨架掉落，巡房中斷"
-            for s in steps_to_skip:
-                self._record_skipped_scan(s, skip_detail, location_id=s.params.get("location_id", ""))
-                s.status = StepStatus.SKIPPED
+        if disconnected:
+            skip_detail = "機器人失聯，巡房中斷"
+        elif low_battery:
+            skip_detail = "電量不足，巡房中止待充電"
+        else:
+            skip_detail = "貨架掉落，巡房中斷"
+        for s in steps_to_skip:
+            self._record_skipped_scan(s, skip_detail, location_id=s.params.get("location_id", ""))
+            s.status = StepStatus.SKIPPED
         return True
 
     async def _retract_false_drop(self, task: Task, shelf_id: str,
-                                  location_id: str) -> None:
+                                  location_id: str) -> bool:
         """The robot reports the shelf still docked after the drop was
         reported (a 11501/11019 「車上有家具不能充電」 refusal, or a plain read):
-        the alert just sent was false. The run ends as CANCELLED — run_task's
-        wrap-up then queues the cleanup that parks the shelf and recharges and
-        sends the 已取消 summary — and the drop marker comes off the task so
-        續巡 does not offer to resume onto a docked shelf. Leaving the robot in
-        the corridor carrying the shelf until someone walked over was the
-        板橋 2026-10-19 outcome.
+        the alert just sent was false. The run resumes — the shelf is on the
+        robot and the beds are still there — the drop marker comes off the
+        task so 續巡 does not offer to resume onto a docked shelf, and the ward
+        is told. Leaving the robot in the corridor carrying the shelf until
+        someone walked over was the 板橋 2026-10-19 outcome. Returns whether
+        the run resumes (an operator stop that landed meanwhile stands).
         """
+        if task.status == TaskStatus.CANCELLED:
+            return False
         logger.warning(
             f"[SHELF DROP] Robot {self.robot_id} reports the shelf still docked — "
-            f"drop was a false alarm, ending run {task.task_id} as cancelled"
+            f"drop was a false alarm, resuming run {task.task_id}"
         )
-        task.status = TaskStatus.CANCELLED
+        task.status = TaskStatus.IN_PROGRESS
         if task.metadata:
             task.metadata["shelf_drop"] = False
             task.metadata["remaining_beds"] = []
             task.metadata["false_drop"] = True
+        if self.shelf_drop_event is not None:
+            self.shelf_drop_event.clear()
         try:
             await dispatcher.dispatch(AnomalyEvent(
                 severity=Severity.WARN,
@@ -1011,12 +1053,13 @@ class TaskEngine:
                 body=(
                     f"機器人回報貨架仍在車上\n"
                     f"位置：{location_id}\n"
-                    f"本次巡房已取消，機器人將把貨架歸位後回充"
+                    f"巡房繼續"
                 ),
                 raw={"shelf_id": shelf_id, "false_drop": True},
             ))
         except Exception:
             logger.exception("Failed to dispatch false-drop retraction")
+        return True
 
     # ── Task execution ────────────────────────────────────────────────
 
@@ -1033,6 +1076,7 @@ class TaskEngine:
         self.shelf_drop_event.clear()
         self._shelf_release_expected = False
         self._disconnect_suspected = False
+        self._shelf_seen_on_robot = False
         # The run starts at the dock, standing still.
         self._stationary_since = time.monotonic()
         self._low_battery_streak = 0
