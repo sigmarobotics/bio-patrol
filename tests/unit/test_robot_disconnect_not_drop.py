@@ -1302,6 +1302,7 @@ def test_past_the_false_signal_cap_the_signal_is_a_drop(monkeypatch):
     # no entry verify any more: only the post-return_home read
     eng._verify_shelf_still_docked = AsyncMock(side_effect=["released"])
     eng._false_signals = task_runtime.FALSE_SIGNAL_CAP
+    eng._false_signal_step = 1          # all at this step boundary
 
     task, event = _run_drop(monkeypatch, eng)
 
