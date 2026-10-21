@@ -18,7 +18,7 @@ from fastapi import HTTPException
 
 import dependencies
 import routers.patrol as patrol
-from common_types import Task, TaskStatus, TaskStep, StepAction
+from common_types import Task, TaskStatus, TaskStep, StepAction, StepStatus
 from services import task_runtime
 from services.notifications import Severity
 from services.notifications.events import Source
@@ -32,6 +32,8 @@ UNAVAILABLE = RuntimeError(
 HEALTHY_BATTERY = {"ok": True, "percentage": 74.0, "power_status": "2"}
 IDLE_CMD = {"ok": True, "state": "1", "command": None, "is_running": False}
 UNREACHABLE_READ = {"ok": False, "error": str(UNAVAILABLE), "retryable": True}
+DOCKED = {"ok": True, "shelf_id": "S_04"}
+NO_SHELF = {"ok": True, "shelf_id": None}
 
 
 # ── connection-error recogniser ──────────────────────────────────────────────
@@ -80,7 +82,7 @@ def test_connected_robot_classification_is_unchanged():
 
 # ── state watcher ────────────────────────────────────────────────────────────
 
-def _watcher_engine(responses, *, final="S_04"):
+def _watcher_engine(responses, *, final="S_04", verify_reads=None):
     """TaskEngine whose watcher reads ``responses`` then stops the loop.
 
     ``final`` is the read that ends the loop: a neutral "shelf still docked"
@@ -106,6 +108,12 @@ def _watcher_engine(responses, *, final="S_04"):
     slot.conn = MagicMock(client=fake_client)
     fleet = MagicMock()
     fleet._robots = {"kachaka": slot}
+    # The watcher asks the robot before raising; by default it cannot get
+    # through (the signal stands as "unreachable").
+    if verify_reads is None:
+        fleet.get_moving_shelf = AsyncMock(side_effect=UNAVAILABLE)
+    else:
+        fleet.get_moving_shelf = AsyncMock(side_effect=list(verify_reads) * 8)
     eng = task_runtime.TaskEngine(fleet, "kachaka")
     eng.shelf_drop_event = asyncio.Event()
     eng._state_watcher_stop = False
@@ -170,11 +178,36 @@ async def test_disconnect_suspicion_clears_when_the_robot_answers_again(no_sleep
 @pytest.mark.asyncio
 async def test_real_drop_still_fires_from_the_watcher(no_sleep):
     """A successful read reporting no shelf is still a drop, not a disconnect."""
-    eng = _watcher_engine(["S_04", "S_04", None, None])
+    eng = _watcher_engine(["S_04", "S_04", None, None], verify_reads=[NO_SHELF])
 
     await eng._watch_shelf_state()
 
     assert eng.shelf_drop_event.is_set()
+    assert eng._disconnect_suspected is False
+    assert eng._release_verdict == "released"
+
+
+@pytest.mark.asyncio
+async def test_watcher_ignores_an_empty_read_the_robot_denies(no_sleep):
+    """A transient empty moving-shelf read: asked again, the robot still
+    carries the shelf, so nothing is raised."""
+    eng = _watcher_engine(["S_04", "S_04", None, "S_04"], verify_reads=[DOCKED])
+
+    await eng._watch_shelf_state()
+
+    assert not eng.shelf_drop_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_watcher_ignores_a_blip_the_robot_outlives(no_sleep):
+    """板橋 2026-10-19: three failed polls, then the robot answers with the
+    shelf still docked — no pause, no suspicion."""
+    eng = _watcher_engine(["S_04", UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, "S_04"],
+                          verify_reads=[UNAVAILABLE, DOCKED])
+
+    await eng._watch_shelf_state()
+
+    assert not eng.shelf_drop_event.is_set()
     assert eng._disconnect_suspected is False
 
 
@@ -193,8 +226,6 @@ def _engine(battery, command_state, *, shelf_pose=None, controller_state=None,
         else {"pose_x": 3.0, "pose_y": -1.0, "pose_theta": 0.25, "last_updated": 1.0}
     )
     fleet.get_raw_client = MagicMock(side_effect=RuntimeError("no robot"))
-    # post-return_home read: no shelf on the robot unless a test says so
-    fleet.get_moving_shelf = AsyncMock(return_value={"ok": True, "shelf_id": None})
     eng = task_runtime.TaskEngine(fleet, "kachaka")
     eng.current_task_id = "t-1"
     eng._query_shelf_pose = AsyncMock(return_value=shelf_pose)
@@ -446,10 +477,6 @@ def test_resume_returns_503_when_robot_never_registered(monkeypatch):
 # return_home then failed 11501 「車上有家具不能充電」 and the robot sat in
 # the corridor all night. The handler now asks the robot first.
 
-DOCKED = {"ok": True, "shelf_id": "S_04"}
-NO_SHELF = {"ok": True, "shelf_id": None}
-
-
 def _verify_engine(reads):
     """Engine whose fleet answers get_moving_shelf from ``reads``."""
     fleet = MagicMock()
@@ -474,9 +501,10 @@ async def test_verify_needs_two_empty_reads_for_a_release(no_sleep):
 
 
 @pytest.mark.asyncio
-async def test_verify_empty_then_silent_is_a_release(no_sleep):
+async def test_verify_empty_then_silent_is_not_a_release(no_sleep):
+    """One empty read followed by a blip is a pause, not a drop."""
     eng = _verify_engine([NO_SHELF] + [UNAVAILABLE] * (task_runtime.SHELF_VERIFY_POLLS - 1))
-    assert await eng._verify_shelf_still_docked() == "released"
+    assert await eng._verify_shelf_still_docked() == "unreachable"
 
 
 @pytest.mark.asyncio
@@ -510,39 +538,13 @@ async def test_watcher_counts_three_fresh_failures_after_a_withdrawn_pause(no_sl
     assert eng._disconnect_suspected is False
 
 
-# ── _await_or_drop: verify before cutting the call short ─────────────────────
-
-def _await_engine(verdict):
-    eng = task_runtime.TaskEngine(MagicMock(), "kachaka")
-    eng.shelf_drop_event = asyncio.Event()
-    eng._battery_abort_event = asyncio.Event()
-    eng._verify_shelf_still_docked = AsyncMock(return_value=verdict)
-    return eng
-
-
-@pytest.mark.asyncio
-async def test_await_or_drop_keeps_the_scan_running_on_a_false_signal():
-    eng = _await_engine("docked")
-    eng._disconnect_suspected = True
-
-    async def scan():
-        await asyncio.sleep(0.05)
-        return "reading"
-
-    async def trip():
-        await asyncio.sleep(0.01)
-        eng.shelf_drop_event.set()
-
-    asyncio.ensure_future(trip())
-    assert await eng._await_or_drop(scan()) == "reading"
-    assert not eng.shelf_drop_event.is_set()
-    assert eng._disconnect_suspected is False
-    eng._verify_shelf_still_docked.assert_awaited_once()
-
+# ── _await_or_drop: a raised signal still cuts the call short ────────────────
 
 @pytest.mark.asyncio
 async def test_await_or_drop_still_cuts_a_real_release_short():
-    eng = _await_engine("released")
+    eng = task_runtime.TaskEngine(MagicMock(), "kachaka")
+    eng.shelf_drop_event = asyncio.Event()
+    eng._battery_abort_event = asyncio.Event()
 
     async def scan():
         await asyncio.sleep(1.0)
@@ -555,22 +557,6 @@ async def test_await_or_drop_still_cuts_a_real_release_short():
     asyncio.ensure_future(trip())
     assert await eng._await_or_drop(scan()) is None
     assert eng.shelf_drop_event.is_set()
-
-
-@pytest.mark.asyncio
-async def test_await_or_drop_battery_abort_does_not_verify():
-    eng = _await_engine("docked")
-
-    async def scan():
-        await asyncio.sleep(1.0)
-
-    async def trip():
-        await asyncio.sleep(0.01)
-        eng._battery_abort_event.set()
-
-    asyncio.ensure_future(trip())
-    assert await eng._await_or_drop(scan()) is None
-    eng._verify_shelf_still_docked.assert_not_awaited()
 
 
 def test_false_release_signal_resumes_the_run(monkeypatch):
@@ -604,13 +590,31 @@ def test_a_real_drop_is_handled_and_reported(monkeypatch):
 
     assert event.severity == Severity.CRITICAL
     assert task.status == TaskStatus.SHELF_DROPPED
-    eng._verify_shelf_still_docked.assert_awaited_once()
+    # once on entry, once after return_home
+    assert eng._verify_shelf_still_docked.await_count == 2
+
+
+def test_handler_reuses_the_watcher_verdict(monkeypatch):
+    """The watcher already asked the robot before raising; the handler must
+    not spend another verify window on the same signal."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    eng._release_verdict = "released"
+
+    task, event = _run_drop(monkeypatch, eng)
+
+    assert event.severity == Severity.CRITICAL
+    assert eng._release_verdict is None
+    # only the post-return_home read
+    assert eng._verify_shelf_still_docked.await_count == 1
 
 
 def test_return_shelf_trigger_is_not_reverified(monkeypatch):
     """A failed placement with the shelf still on the robot is its own
     problem — _do_return_shelf already verified it, so no second opinion."""
-    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="docked")
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    # one answer only: the post-return_home read. An entry verify would
+    # exhaust the script.
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released"])
     events = []
 
     async def _capture(event):
@@ -626,35 +630,46 @@ def test_return_shelf_trigger_is_not_reverified(monkeypatch):
     handled = asyncio.run(eng._handle_shelf_drop(task, 0, trigger_step=trigger))
 
     assert handled is True
-    eng._verify_shelf_still_docked.assert_not_awaited()
+    assert eng._verify_shelf_still_docked.await_count == 1
     assert len(events) == 1
 
 
+def _two_bed_task():
+    return Task(
+        task_id="t-1", robot_id="kachaka", status=TaskStatus.IN_PROGRESS,
+        steps=[TaskStep(step_id="s1", action=StepAction.BIO_SCAN,
+                        params={"bed_key": "B_101-1"}),
+               TaskStep(step_id="s2", action=StepAction.BIO_SCAN,
+                        params={"bed_key": "B_101-2"})],
+    )
+
+
 def _run_drop_all(monkeypatch, eng, task):
-    events = []
+    events, skipped = [], []
 
     async def _capture(event):
         events.append(event)
 
     monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
     monkeypatch.setattr(task_runtime.TaskEngine, "_record_skipped_scan",
-                        lambda self, *a, **kw: None)
+                        lambda self, step, details, **kw: skipped.append(details))
     asyncio.run(eng._handle_shelf_drop(task, 0))
-    return events
+    return events, skipped
 
 
 def test_firmware_refusing_return_home_retracts_the_drop(monkeypatch):
     """11501/11019 is the firmware saying the shelf is still docked: the run
     ends cancelled (run_task's wrap-up queues return_shelf + return_home and
     sends 已取消), the ward is told, and 續巡 no longer offers this run."""
-    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
     eng.fleet.return_home = AsyncMock(return_value={
         "ok": False, "error": "error_code=11501: Charging canceled",
     })
-    eng.fleet.get_moving_shelf = AsyncMock(side_effect=UNAVAILABLE)
-    task = _task()
+    # entry: a drop; after the refusal the reads cannot get through
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released", "unreachable"])
+    task = _two_bed_task()
 
-    events = _run_drop_all(monkeypatch, eng, task)
+    events, skipped = _run_drop_all(monkeypatch, eng, task)
 
     assert [e.severity for e in events] == [Severity.CRITICAL, Severity.WARN]
     assert events[1].raw["false_drop"] is True
@@ -662,19 +677,23 @@ def test_firmware_refusing_return_home_retracts_the_drop(monkeypatch):
     assert task.status == TaskStatus.CANCELLED
     assert task.metadata["shelf_drop"] is False
     assert task.metadata["remaining_beds"] == []
+    # the beds after the false drop are not written off as 貨架掉落
+    assert skipped == []
+    assert task.steps[1].status != StepStatus.SKIPPED
 
 
 def test_shelf_still_docked_after_return_home_retracts_the_drop(monkeypatch):
     """With 「握持家具時充電」 ON return_home succeeds carrying the shelf —
     the robot's own read, not the refusal, is what decides."""
-    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
-    eng.fleet.get_moving_shelf = AsyncMock(return_value=DOCKED)
-    task = _task()
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released", "docked"])
+    task = _two_bed_task()
 
-    events = _run_drop_all(monkeypatch, eng, task)
+    events, skipped = _run_drop_all(monkeypatch, eng, task)
 
     assert [e.severity for e in events] == [Severity.CRITICAL, Severity.WARN]
     assert task.status == TaskStatus.CANCELLED
+    assert skipped == []
 
 
 def test_other_return_home_failures_leave_the_drop_standing(monkeypatch):
@@ -683,7 +702,11 @@ def test_other_return_home_failures_leave_the_drop_standing(monkeypatch):
         "ok": False, "error": "error_code=11502: Failed to charge",
     })
 
-    task, event = _run_drop(monkeypatch, eng)
+    task = _two_bed_task()
+    events, skipped = _run_drop_all(monkeypatch, eng, task)
 
+    assert [e.severity for e in events] == [Severity.CRITICAL]
     assert task.status == TaskStatus.SHELF_DROPPED
     assert task.metadata["shelf_drop"] is True
+    assert skipped == ["貨架掉落，巡房中斷"]
+    assert task.steps[1].status == StepStatus.SKIPPED
