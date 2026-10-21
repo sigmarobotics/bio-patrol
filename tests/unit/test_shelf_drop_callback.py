@@ -131,3 +131,46 @@ async def test_false_release_reruns_the_interrupted_scan_once(monkeypatch):
     assert calls == ["a0", "a0"]
     assert task.status == TaskStatus.DONE
     assert task.steps[0].status.value == "success"
+
+
+@pytest.mark.asyncio
+async def test_second_false_release_on_the_same_bed_records_the_skip(monkeypatch):
+    """The re-run budget is one; a second cut scan is recorded as skipped so
+    the bed does not vanish from the night's record."""
+    from services.task_runtime import TaskEngine, StepResult
+
+    fleet = MagicMock()
+    fleet._robots = {}
+    fleet.get_shelves = AsyncMock(return_value={"ok": True, "shelves": []})
+    fleet.get_locations = AsyncMock(return_value={"ok": True, "locations": []})
+    fleet.get_metrics = AsyncMock(return_value={"poll_count": 0, "poll_rtt_list": [], "poll_success_count": 0})
+    fleet.reset_metrics = AsyncMock()
+    eng = TaskEngine(fleet, "kachaka")
+    calls: list[str] = []
+    skipped: list[str] = []
+
+    async def fake_execute(step):
+        calls.append(step.step_id)
+        eng.shelf_drop_event.set()
+        return StepResult(success=False, error_code=-1,
+                          error_message="Bio scan interrupted by shelf release",
+                          data={}, timestamp="t")
+
+    async def fake_handle(task, idx, trigger_step=None, error_code=0):
+        eng.shelf_drop_event.clear()
+        return False
+
+    monkeypatch.setattr(eng, "_execute_step", fake_execute)
+    monkeypatch.setattr(eng, "_handle_shelf_drop", fake_handle)
+    monkeypatch.setattr(eng, "_record_skipped_scan",
+                        lambda step, details, **kw: skipped.append(details))
+
+    task = Task(
+        task_id="t3", robot_id="kachaka", status=TaskStatus.QUEUED,
+        steps=[TaskStep(step_id="a0", action=StepAction.BIO_SCAN, params={"bed_key": "101-1"})],
+    )
+    await eng.run_task(task)
+
+    assert calls == ["a0", "a0"]
+    assert len(skipped) == 1
+    assert task.status == TaskStatus.DONE

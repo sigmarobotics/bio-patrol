@@ -250,6 +250,8 @@ async def test_bio_scan_wait_is_interrupted_by_shelf_drop(monkeypatch):
     eng.current_task_id = "t-1"
     eng.target_bed = "L_101-1"
     eng.shelf_drop_event = asyncio.Event()
+    # the wait verifies the signal against the robot first: a real release
+    eng._verify_shelf_still_docked = AsyncMock(return_value="released")
     step = TaskStep(step_id="s1", action=StepAction.BIO_SCAN, params={"bed_key": "B_101-1"})
 
     async def _trip():
