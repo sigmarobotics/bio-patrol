@@ -360,17 +360,17 @@ def test_robot_back_and_still_docked_resumes(monkeypatch):
     assert eng._disconnect_suspected is False
 
 
-def test_shelf_read_still_failing_on_a_robot_that_answers_is_a_drop(monkeypatch):
-    """Both classify reads got through, so the robot is reachable; a shelf
-    read that still fails is ambiguous and handled as the drop the reads
-    say it is (the post-return_home verify retracts a docked shelf)."""
+def test_two_unreachable_verifies_are_a_flapping_link(monkeypatch):
+    """Both classify reads got through but the shelf read failed twice in a
+    row: paused as offline, not driven home on a link that is flapping."""
     eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
-    eng._verify_shelf_still_docked = AsyncMock(side_effect=["unreachable", "unreachable", "released"])
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["unreachable", "unreachable"])
 
     task, event = _run_drop(monkeypatch, eng)
 
-    assert event.severity == Severity.CRITICAL
-    assert task.metadata["disconnect"] is False
+    assert event.severity == Severity.WARN
+    assert task.metadata["disconnect"] is True
+    eng.fleet.return_home.assert_not_awaited()
 
 
 def test_a_robot_that_answers_the_verify_drops_the_suspicion(monkeypatch):
@@ -1359,3 +1359,50 @@ async def test_cleanup_parks_the_named_shelf_when_the_read_says_none(monkeypatch
     assert [st.action for st in submitted[0].steps] == [
         StepAction.RETURN_SHELF.value, StepAction.RETURN_HOME.value]
     assert submitted[0].steps[0].params["shelf_id"] == "S_04"
+
+
+@pytest.mark.asyncio
+async def test_a_later_raise_does_not_downgrade_a_pending_confirmed_signal(no_sleep):
+    """Empty read with the shelf confirmed raises (verify unreachable); the
+    outage then trips the failed-polls source with no shelf confirmed —
+    the pending signal keeps its 'shelf was carried' context."""
+    eng = _watcher_engine(["S_04", None, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE],
+                          final=UNAVAILABLE)
+    await eng._watch_shelf_state()
+
+    assert eng.shelf_drop_event.is_set()
+    assert eng._signal_shelf_confirmed is True
+
+
+def test_a_step_that_clears_the_event_drops_its_context(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng.fleet.move_shelf = AsyncMock(return_value={"ok": True})
+    eng.shelf_drop_event = asyncio.Event()
+    eng.shelf_drop_event.set()
+    eng._signal_shelf_confirmed = False
+    step = TaskStep(step_id="m1", action=StepAction.MOVE_SHELF,
+                    params={"shelf_id": "S_04", "location_id": "B_101-1"})
+
+    asyncio.run(eng._do_move_shelf(step))
+
+    assert not eng.shelf_drop_event.is_set()
+    assert eng._signal_shelf_confirmed is None
+
+
+def test_a_return_shelf_trigger_does_not_borrow_the_last_bed(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
+    eng._verify_shelf_still_docked = AsyncMock(side_effect=["released"])
+    eng.target_bed = "B_107-3"
+    events = []
+
+    async def _capture(event):
+        events.append(event)
+
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
+    monkeypatch.setattr(task_runtime.TaskEngine, "_record_skipped_scan",
+                        lambda self, *a, **kw: None)
+    trigger = TaskStep(step_id="r1", action=StepAction.RETURN_SHELF, params={"shelf_id": "S_04"})
+
+    asyncio.run(eng._handle_shelf_drop(_task(), 1, trigger_step=trigger))
+
+    assert events[0].bed_key == "unknown"

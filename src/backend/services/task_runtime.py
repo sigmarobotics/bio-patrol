@@ -388,6 +388,21 @@ class TaskEngine:
             except asyncio.CancelledError:
                 break
 
+    @staticmethod
+    def _signal_is_false(verdict: str, shelf_confirmed: Optional[bool]) -> Optional[str]:
+        """Why a verified release signal is nothing to act on, or None.
+
+        "docked": the robot still carries the shelf. "released" while no
+        shelf had been seen on the robot when the signal was raised (before
+        the first dock, after return_shelf placed it): it carries none, as
+        expected. Shared by the watcher's raise and both handler verifies.
+        """
+        if verdict == "docked":
+            return "the robot still carries the shelf"
+        if verdict == "released" and shelf_confirmed is False:
+            return "the robot carries no shelf and none was being carried"
+        return None
+
     async def _raise_release(self, source: str, *, shelf_confirmed: bool,
                              from_disconnect: bool = False) -> bool:
         """Raise shelf_drop_event for ``source`` — after asking the robot.
@@ -405,22 +420,15 @@ class TaskEngine:
         if self.shelf_drop_event is None:
             return False
         verdict = await self._verify_shelf_still_docked()
-        if verdict == "docked":
+        # A blip overlapping the placement must not become a drop once the
+        # placement's own clear has passed: while return_shelf is placing,
+        # no shelf is expected on the robot.
+        expected = shelf_confirmed and not self._shelf_release_expected
+        why = self._signal_is_false(verdict, expected)
+        if why:
             logger.warning(
-                f"[STATE WATCHER] {source} on robot {self.robot_id}, but the "
-                f"robot still carries the shelf — release signal ignored"
-            )
-            self._disconnect_suspected = False
-            return False
-        if verdict == "released" and (not shelf_confirmed or self._shelf_release_expected):
-            # Carrying none and answering again: either no shelf was on the
-            # robot, or return_shelf is placing it right now (a blip that
-            # overlaps the placement must not become a drop once the
-            # placement's own clear has passed).
-            logger.info(
-                f"[STATE WATCHER] {source} on robot {self.robot_id}; the robot "
-                f"answers again and carries no shelf it was expected to — "
-                f"nothing to report"
+                f"[STATE WATCHER] {source} on robot {self.robot_id}, but {why} — "
+                f"release signal ignored"
             )
             self._disconnect_suspected = False
             return False
@@ -428,7 +436,10 @@ class TaskEngine:
         # hit a blip — the handler's own reads decide reachability; only the
         # failed-polls source carries the disconnect suspicion.
         self._disconnect_suspected = from_disconnect and verdict == "unreachable"
-        self._signal_shelf_confirmed = shelf_confirmed and not self._shelf_release_expected
+        # A signal already pending keeps its context: a later raise during
+        # the same outage must not downgrade a confirmed shelf to "none".
+        if not self.shelf_drop_event.is_set() or expected:
+            self._signal_shelf_confirmed = expected
         self.shelf_drop_event.set()
         return True
 
@@ -879,22 +890,11 @@ class TaskEngine:
             # Classification below takes the verdict as a value; the flag
             # only keeps the watcher from re-raising the same outage.
             self._disconnect_suspected = verdict == "unreachable"
-            if verdict == "docked":
+            why = self._signal_is_false(verdict, shelf_confirmed)
+            if why:
                 logger.warning(
-                    f"[SHELF DROP] Robot {self.robot_id} still carries the shelf — "
-                    f"release signal was false, resuming task {task.task_id}"
-                )
-                self._false_signals += 1
-                return False
-            if verdict == "released" and shelf_confirmed is False:
-                # The watcher raised this during an outage while it had seen
-                # no shelf on the robot (before the first dock, or after
-                # return_shelf placed it): the robot is back carrying none,
-                # which is what was expected — nothing to report.
-                logger.info(
-                    f"[SHELF DROP] Robot {self.robot_id} answers and carries no "
-                    f"shelf, and none was being carried when the signal was "
-                    f"raised — nothing to report, resuming task {task.task_id}"
+                    f"[SHELF DROP] {why} — release signal was false, "
+                    f"resuming task {task.task_id}"
                 )
                 self._false_signals += 1
                 return False
@@ -905,25 +905,20 @@ class TaskEngine:
             # verify before paging the ward with a CRITICAL it may retract.
             verdict = await self._verify_shelf_still_docked()
             self._disconnect_suspected = verdict == "unreachable"
-            if verdict == "docked":
+            why = self._signal_is_false(verdict, shelf_confirmed)
+            if why:
                 logger.warning(
-                    f"[SHELF DROP] Robot {self.robot_id} is back and still carries "
-                    f"the shelf — release signal was false, resuming task {task.task_id}"
+                    f"[SHELF DROP] robot is back and {why} — release signal was "
+                    f"false, resuming task {task.task_id}"
                 )
                 self._false_signals += 1
                 return False
-            if verdict == "released" and shelf_confirmed is False:
-                logger.info(
-                    f"[SHELF DROP] Robot {self.robot_id} is back carrying no shelf, "
-                    f"and none was being carried when the signal was raised — "
-                    f"nothing to report, resuming task {task.task_id}"
-                )
-                self._false_signals += 1
-                return False
-            # "unreachable" here, with both classify reads through, is an
-            # ambiguous shelf read on a reachable robot: handled as the drop
-            # the classify reads say it is; the post-return_home verify
-            # still retracts a docked shelf.
+            if verdict == "unreachable":
+                # Two verifies in a row could not reach the shelf read: a
+                # flapping link. Paused as offline rather than driven home
+                # on it — return_home would block for its full timeout and
+                # a CRITICAL could not be retracted afterwards.
+                kind = "disconnected"
         low_battery = kind == "low_battery_return"
         disconnected = kind == "disconnected"
         battery_pct = battery.get("percentage")
@@ -951,10 +946,13 @@ class TaskEngine:
 
         # A bio_scan trigger, or none (loop top), carries no location; the
         # bed the robot is parked at is the engine's current target.
-        location_id = (
-            (trigger_step.params.get("location_id") if trigger_step is not None else None)
-            or getattr(self, "target_bed", "") or "unknown"
-        )
+        location_id = "unknown"
+        if trigger_step is not None and trigger_step.params.get("location_id"):
+            location_id = trigger_step.params["location_id"]
+        elif trigger_step is None or trigger_step.action == StepAction.BIO_SCAN:
+            # Parked at the bed: the engine's current target names it. A
+            # return_shelf trigger is en route home — no bed to point at.
+            location_id = getattr(self, "target_bed", "") or "unknown"
         shelf_id = trigger_step.params.get("shelf_id", "unknown") if trigger_step else "unknown"
         if shelf_id == "unknown":
             # A bio_scan trigger step carries no shelf, but the run's own
@@ -1622,6 +1620,7 @@ class TaskEngine:
             self._current_shelf_id = shelf_id
             if self.shelf_drop_event is not None:
                 self.shelf_drop_event.clear()
+                self._signal_shelf_confirmed = None
         return self._make_result(result, step.action, {"shelf_id": shelf_id, "location_id": location_id})
 
     async def _do_return_shelf(self, step: TaskStep) -> StepResult:
@@ -1657,6 +1656,7 @@ class TaskEngine:
         elif self.shelf_drop_event is not None and self.shelf_drop_event.is_set():
             logger.info("[SHELF] Clearing stale drop signal raised during normal placement")
             self.shelf_drop_event.clear()
+            self._signal_shelf_confirmed = None
         return self._make_result(result, step.action, {"shelf_id": shelf_id})
 
     def _run_outcome_buckets(self, task_id: str, demo: bool = False) -> Optional[tuple]:
@@ -1809,11 +1809,6 @@ class TaskEngine:
                         f"shelf docked — ending run {task.task_id} for the cleanup to park it"
                     )
                     task.status = TaskStatus.CANCELLED
-                    held = next((st.params.get("shelf_id") for st in task.steps
-                                 if st.action == StepAction.RETURN_SHELF
-                                 and st.params.get("shelf_id")), None)
-                    if held and task.metadata is not None:
-                        task.metadata["cleanup_shelf_id"] = held
                     body = "機器人無法在載著貨架時回充\n本次巡房結束，將再試一次貨架歸位後回充"
                 try:
                     await dispatcher.dispatch(AnomalyEvent(
