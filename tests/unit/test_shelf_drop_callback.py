@@ -37,6 +37,7 @@ async def test_shelf_drop_event_triggers_handle_shelf_drop(monkeypatch):
     async def fake_handle(task, idx, trigger_step=None, error_code=0):
         handled.append(idx)
         task.status = TaskStatus.SHELF_DROPPED
+        return True
 
     monkeypatch.setattr(eng, "_handle_shelf_drop", fake_handle)
 
@@ -86,3 +87,47 @@ async def test_state_watcher_fires_on_shelf_id_transition():
 
     assert slot.shelf_drop_event.is_set()
     assert fake_client.get_moving_shelf_id.call_count >= 3
+
+
+@pytest.mark.asyncio
+async def test_false_release_reruns_the_interrupted_scan_once(monkeypatch):
+    """A scan cut short by a release signal the robot then denies is re-run
+    once rather than silently lost (板橋 2026-10-19 pattern, seen from the
+    run loop)."""
+    from services.task_runtime import TaskEngine, StepResult
+
+    fleet = MagicMock()
+    fleet._robots = {}
+    fleet.get_shelves = AsyncMock(return_value={"ok": True, "shelves": []})
+    fleet.get_locations = AsyncMock(return_value={"ok": True, "locations": []})
+    fleet.get_metrics = AsyncMock(return_value={"poll_count": 0, "poll_rtt_list": [], "poll_success_count": 0})
+    fleet.reset_metrics = AsyncMock()
+    eng = TaskEngine(fleet, "kachaka")
+    calls: list[str] = []
+
+    async def fake_execute(step):
+        calls.append(step.step_id)
+        if len(calls) == 1:
+            eng.shelf_drop_event.set()
+            return StepResult(success=False, error_code=-1,
+                              error_message="Bio scan interrupted by shelf release",
+                              data={}, timestamp="t")
+        return StepResult(success=True, error_code=0, error_message="",
+                          data={}, timestamp="t")
+
+    async def fake_handle(task, idx, trigger_step=None, error_code=0):
+        eng.shelf_drop_event.clear()
+        return False
+
+    monkeypatch.setattr(eng, "_execute_step", fake_execute)
+    monkeypatch.setattr(eng, "_handle_shelf_drop", fake_handle)
+
+    task = Task(
+        task_id="t2", robot_id="kachaka", status=TaskStatus.QUEUED,
+        steps=[TaskStep(step_id="a0", action=StepAction.BIO_SCAN, params={"bed_key": "101-1"})],
+    )
+    await eng.run_task(task)
+
+    assert calls == ["a0", "a0"]
+    assert task.status == TaskStatus.DONE
+    assert task.steps[0].status.value == "success"

@@ -157,55 +157,13 @@ async def test_two_failures_below_threshold_do_not_trigger(no_sleep):
 @pytest.mark.asyncio
 async def test_disconnect_suspicion_clears_when_the_robot_answers_again(no_sleep):
     """The flag is per-incident, not per-run: a sticky one downgrades a later
-    real drop to "offline" for the rest of the patrol. The pause it raised
-    goes with it when the robot comes back still carrying the shelf
-    (2026-10-19 板橋: a 4-second blip, consumed at the next step boundary,
-    ended the run as a CRITICAL drop with the shelf still docked)."""
+    real drop to "offline" for the rest of the patrol."""
     eng = _watcher_engine(["S_04", UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, "S_04"])
 
     await eng._watch_shelf_state()
 
     assert eng._disconnect_suspected is False
-    assert eng._disconnect_pause_raised is False
-    assert not eng.shelf_drop_event.is_set()
-
-
-@pytest.mark.asyncio
-async def test_reconnect_without_the_shelf_keeps_the_pause(no_sleep):
-    """A robot that answers again with no shelf has dropped it — nothing to
-    withdraw."""
-    eng = _watcher_engine(["S_04", UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, None])
-
-    await eng._watch_shelf_state()
-
-    assert eng._disconnect_suspected is False
-    assert eng.shelf_drop_event.is_set()
-
-
-@pytest.mark.asyncio
-async def test_real_drop_after_a_withdrawn_pause_still_fires(no_sleep):
-    """Withdrawing the blip's pause must not blind the watcher to a drop that
-    follows it."""
-    eng = _watcher_engine(
-        ["S_04", UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, "S_04", "S_04", None]
-    )
-
-    await eng._watch_shelf_state()
-
-    assert eng.shelf_drop_event.is_set()
-    assert eng._disconnect_suspected is False
-
-
-@pytest.mark.asyncio
-async def test_a_real_drop_signal_is_not_withdrawn_on_reconnect(no_sleep):
-    """Only the pause the disconnect itself raised is withdrawn: a drop seen
-    before the blip stays an event the run must handle."""
-    eng = _watcher_engine(
-        ["S_04", None, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, "S_04"]
-    )
-
-    await eng._watch_shelf_state()
-
+    # The pause raised while it was unreachable still stands.
     assert eng.shelf_drop_event.is_set()
 
 
@@ -222,7 +180,8 @@ async def test_real_drop_still_fires_from_the_watcher(no_sleep):
 
 # ── drop handler ─────────────────────────────────────────────────────────────
 
-def _engine(battery, command_state, *, shelf_pose=None, controller_state=None):
+def _engine(battery, command_state, *, shelf_pose=None, controller_state=None,
+            verify="released"):
     fleet = MagicMock()
     fleet.get_battery_info = AsyncMock(return_value=battery)
     fleet.get_command_state = AsyncMock(return_value=command_state)
@@ -237,6 +196,9 @@ def _engine(battery, command_state, *, shelf_pose=None, controller_state=None):
     eng = task_runtime.TaskEngine(fleet, "kachaka")
     eng.current_task_id = "t-1"
     eng._query_shelf_pose = AsyncMock(return_value=shelf_pose)
+    # The handler first asks the robot whether it still carries the shelf;
+    # "released" is the classic drop these tests were written for.
+    eng._verify_shelf_still_docked = AsyncMock(return_value=verify)
     return eng
 
 
@@ -264,7 +226,7 @@ def _run_drop(monkeypatch, eng):
 
 
 def test_unreachable_robot_reports_disconnect_not_drop(monkeypatch):
-    eng = _engine(UNREACHABLE_READ, UNREACHABLE_READ)
+    eng = _engine(UNREACHABLE_READ, UNREACHABLE_READ, verify="unreachable")
 
     task, event = _run_drop(monkeypatch, eng)
 
@@ -280,9 +242,9 @@ def test_unreachable_robot_reports_disconnect_not_drop(monkeypatch):
 
 
 def test_watcher_disconnect_flag_reaches_the_notification(monkeypatch):
-    """Even if the robot answers again by the time the handler runs."""
-    eng = _engine(HEALTHY_BATTERY, IDLE_CMD)
-    eng._disconnect_suspected = True
+    """The verify reads are the freshest word: all failed, so the robot is
+    offline even if the later battery/state reads happen to get through."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="unreachable")
 
     task, event = _run_drop(monkeypatch, eng)
 
@@ -307,7 +269,7 @@ def test_reachable_robot_drop_is_still_critical(monkeypatch):
 def test_disconnected_drop_skips_return_home(monkeypatch):
     """An unreachable robot takes no commands — sending it home would only
     burn the controller's 240s timeout inside the drop handler."""
-    eng = _engine(UNREACHABLE_READ, UNREACHABLE_READ)
+    eng = _engine(UNREACHABLE_READ, UNREACHABLE_READ, verify="unreachable")
 
     _run_drop(monkeypatch, eng)
 
@@ -334,7 +296,7 @@ def test_one_failed_read_alone_is_not_a_disconnect(monkeypatch):
 
 
 def test_unknown_pose_carries_last_known_robot_pose(monkeypatch):
-    eng = _engine(UNREACHABLE_READ, UNREACHABLE_READ)
+    eng = _engine(UNREACHABLE_READ, UNREACHABLE_READ, verify="unreachable")
 
     task, _ = _run_drop(monkeypatch, eng)
 
@@ -472,3 +434,139 @@ def test_resume_returns_503_when_robot_never_registered(monkeypatch):
 
     assert err.status_code == 503
     assert "機器人失聯" in err.detail
+
+
+# ── false release signal: the robot still carries the shelf ──────────────────
+#
+# 板橋 2026-10-19: a 4-second WiFi blip raised the watcher's disconnect pause;
+# the robot answered again before the run consumed it, the handler read a
+# healthy robot and reported a CRITICAL 貨架掉落 with the shelf still docked.
+# return_home then failed 11501 「車上有家具不能充電」 and the robot sat in
+# the corridor all night. The handler now asks the robot first.
+
+def _verify_engine(reads):
+    """Engine whose raw client answers get_moving_shelf_id from ``reads``."""
+    fake_client = MagicMock()
+    fake_client.get_moving_shelf_id = MagicMock(side_effect=list(reads))
+    fleet = MagicMock()
+    fleet.get_raw_client = MagicMock(return_value=fake_client)
+    return task_runtime.TaskEngine(fleet, "kachaka")
+
+
+@pytest.mark.asyncio
+async def test_verify_rides_out_a_blip(no_sleep):
+    eng = _verify_engine([UNAVAILABLE, UNAVAILABLE, "S_04"])
+    assert await eng._verify_shelf_still_docked() == "docked"
+
+
+@pytest.mark.asyncio
+async def test_verify_reports_a_released_shelf(no_sleep):
+    eng = _verify_engine([""])
+    assert await eng._verify_shelf_still_docked() == "released"
+
+
+@pytest.mark.asyncio
+async def test_verify_gives_up_on_a_robot_that_never_answers(no_sleep):
+    eng = _verify_engine([UNAVAILABLE] * task_runtime.SHELF_VERIFY_POLLS)
+    assert await eng._verify_shelf_still_docked() == "unreachable"
+
+
+def test_false_release_signal_resumes_the_run(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="docked")
+    eng.shelf_drop_event = asyncio.Event()
+    eng.shelf_drop_event.set()
+    eng._disconnect_suspected = True
+    events = []
+
+    async def _capture(event):
+        events.append(event)
+
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
+    task = _task()
+
+    handled = asyncio.run(eng._handle_shelf_drop(task, 0))
+
+    assert handled is False
+    assert events == []
+    assert not eng.shelf_drop_event.is_set()
+    assert eng._disconnect_suspected is False
+    assert task.status == TaskStatus.IN_PROGRESS
+    eng.fleet.cancel_command.assert_not_awaited()
+    eng.fleet.return_home.assert_not_awaited()
+
+
+def test_a_real_drop_is_handled_and_reported(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+
+    task, event = _run_drop(monkeypatch, eng)
+
+    assert event.severity == Severity.CRITICAL
+    assert task.status == TaskStatus.SHELF_DROPPED
+    eng._verify_shelf_still_docked.assert_awaited_once()
+
+
+def test_return_shelf_trigger_is_not_reverified(monkeypatch):
+    """A failed placement with the shelf still on the robot is its own
+    problem — _do_return_shelf already verified it, so no second opinion."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="docked")
+    events = []
+
+    async def _capture(event):
+        events.append(event)
+
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
+    monkeypatch.setattr(task_runtime.TaskEngine, "_record_skipped_scan",
+                        lambda self, *a, **kw: None)
+    task = _task()
+    trigger = TaskStep(step_id="r1", action=StepAction.RETURN_SHELF,
+                       params={"shelf_id": "S_04"})
+
+    handled = asyncio.run(eng._handle_shelf_drop(task, 0, trigger_step=trigger))
+
+    assert handled is True
+    eng._verify_shelf_still_docked.assert_not_awaited()
+    assert len(events) == 1
+
+
+def test_firmware_refusing_return_home_retracts_the_drop(monkeypatch):
+    """11501/11019 is the firmware saying the shelf is still docked: retract
+    the alert and queue the cleanup instead of leaving the robot in the
+    corridor carrying the shelf."""
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    eng.fleet.return_home = AsyncMock(return_value={
+        "ok": False, "error": "error_code=11501: Charging canceled",
+    })
+    events = []
+
+    async def _capture(event):
+        events.append(event)
+
+    cleanup = AsyncMock(return_value="cleanup-1")
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
+    monkeypatch.setattr(task_runtime, "submit_cleanup_task", cleanup)
+    monkeypatch.setattr(task_runtime.TaskEngine, "_record_skipped_scan",
+                        lambda self, *a, **kw: None)
+    task = _task()
+    monkeypatch.setitem(task_runtime.tasks_db, task.task_id, task)
+
+    asyncio.run(eng._handle_shelf_drop(task, 0))
+
+    cleanup.assert_awaited_once_with("kachaka")
+    assert [e.severity for e in events] == [Severity.CRITICAL, Severity.WARN]
+    assert events[1].raw["false_drop"] is True
+    assert "仍在機器人身上" in events[1].title
+    assert task.status == TaskStatus.DONE
+
+
+def test_other_return_home_failures_leave_the_drop_standing(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    eng.fleet.return_home = AsyncMock(return_value={
+        "ok": False, "error": "error_code=11502: Failed to charge",
+    })
+    cleanup = AsyncMock()
+    monkeypatch.setattr(task_runtime, "submit_cleanup_task", cleanup)
+
+    task, event = _run_drop(monkeypatch, eng)
+
+    cleanup.assert_not_awaited()
+    assert task.status == TaskStatus.SHELF_DROPPED
