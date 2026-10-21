@@ -350,18 +350,15 @@ class TaskEngine:
                     # shelf and withdraws the suspicion, a single further
                     # failed poll must not re-raise the pause on its own.
                     fail_streak = 0
-                    if self.shelf_drop_event is not None:
-                        raised = await self._raise_release(
-                            f"{DISCONNECT_POLL_THRESHOLD} failed polls",
-                            shelf_confirmed=confirmed_docked, from_disconnect=True,
-                        )
-                        if raised:
-                            # One signal per release: the empty-read source
-                            # must not raise the same one again.
-                            confirmed_docked = False
-                            last_seen_id = None
-                    else:
-                        self._disconnect_suspected = True
+                    raised = await self._raise_release(
+                        f"{DISCONNECT_POLL_THRESHOLD} failed polls",
+                        shelf_confirmed=confirmed_docked, from_disconnect=True,
+                    )
+                    if raised:
+                        # One signal per release: the empty-read source
+                        # must not raise the same one again.
+                        confirmed_docked = False
+                        last_seen_id = None
             try:
                 # 3s matches the legacy _monitor_shelf cadence; in-command
                 # drops are caught faster by the controller's on_shelf_dropped.
@@ -391,10 +388,15 @@ class TaskEngine:
             )
             self._disconnect_suspected = False
             return False
-        if verdict == "released" and not shelf_confirmed:
+        if verdict == "released" and (not shelf_confirmed or self._shelf_release_expected):
+            # Carrying none and answering again: either no shelf was on the
+            # robot, or return_shelf is placing it right now (a blip that
+            # overlaps the placement must not become a drop once the
+            # placement's own clear has passed).
             logger.info(
                 f"[STATE WATCHER] {source} on robot {self.robot_id}; the robot "
-                f"answers again and was carrying no shelf — nothing to report"
+                f"answers again and carries no shelf it was expected to — "
+                f"nothing to report"
             )
             self._disconnect_suspected = False
             return False
@@ -650,8 +652,7 @@ class TaskEngine:
         # The current bed: a scan the signal cut short (trigger), or the
         # pending/executing scan at step_index (loop-top detection).
         current = None
-        if (trigger_step is not None and trigger_step.action == StepAction.BIO_SCAN
-                and not (trigger_step.result and trigger_step.result.success)):
+        if self._scan_cut_by_release(trigger_step):
             current = trigger_step
         elif trigger_step is None:
             candidate = task.steps[step_index] if step_index < len(task.steps) else None
@@ -792,6 +793,15 @@ class TaskEngine:
                 return "unreachable"
             await asyncio.sleep(SHELF_VERIFY_INTERVAL)
 
+    @staticmethod
+    def _scan_cut_by_release(step: Optional[TaskStep]) -> bool:
+        """The trigger scan the release signal cut short — as opposed to a
+        scan that completed (valid, or timed out on its own) and already
+        wrote its row."""
+        return (step is not None and step.action == StepAction.BIO_SCAN
+                and step.result is not None
+                and (step.result.data or {}).get("interrupted_by") == "shelf_release")
+
     async def _handle_shelf_drop(self, task: Task, step_index: int,
                                    trigger_step: Optional[TaskStep] = None,
                                    error_code: int = 0) -> bool:
@@ -834,7 +844,9 @@ class TaskEngine:
                     f"cleanup owns the wrap-up"
                 )
                 return True
-            self._disconnect_suspected = False
+            # Classification below takes the verdict as a value; the flag
+            # only keeps the watcher from re-raising the same outage.
+            self._disconnect_suspected = verdict == "unreachable"
             if verdict == "docked":
                 logger.warning(
                     f"[SHELF DROP] Robot {self.robot_id} still carries the shelf — "
@@ -880,12 +892,12 @@ class TaskEngine:
         else:
             logger.error(f"[SHELF DROP] Detected via {source} on robot {self.robot_id}, pausing task")
 
-        location_id = "unknown"
-        if trigger_step is not None:
-            # A bio_scan step carries no location; the bed it is parked at
-            # is the engine's current target.
-            location_id = (trigger_step.params.get("location_id")
-                           or getattr(self, "target_bed", None) or "unknown")
+        # A bio_scan trigger, or none (loop top), carries no location; the
+        # bed the robot is parked at is the engine's current target.
+        location_id = (
+            (trigger_step.params.get("location_id") if trigger_step is not None else None)
+            or getattr(self, "target_bed", None) or "unknown"
+        )
         shelf_id = trigger_step.params.get("shelf_id", "unknown") if trigger_step else "unknown"
         if shelf_id == "unknown":
             # A bio_scan trigger step carries no shelf, but the run's own
@@ -999,10 +1011,9 @@ class TaskEngine:
                 s = next((s for s in task.steps if s.step_id == skip_id), None)
                 if s and s.action == StepAction.BIO_SCAN:
                     steps_to_skip.append(s)
-        if (trigger_step and trigger_step.action == StepAction.BIO_SCAN
-                and not (trigger_step.result and trigger_step.result.success)):
+        if self._scan_cut_by_release(trigger_step):
             # The scan the signal cut short is unprocessed too (a scan that
-            # had already completed keeps its reading).
+            # had already completed, or timed out on its own, keeps its row).
             steps_to_skip.append(trigger_step)
         # With no trigger step the current step has not run yet (loop
         # top): it is unprocessed too.
@@ -1050,11 +1061,11 @@ class TaskEngine:
         still_docked = verdict == "docked" or (refused_with_shelf and verdict != "unreachable")
         if (still_docked and not low_battery
                 and (task.metadata or {}).get("mode") != "cleanup"):
-            await self._retract_false_drop(task, shelf_id, location_id)
+            await self._retract_false_drop(task, shelf_id, location_id, skip_detail)
         return True
 
     async def _retract_false_drop(self, task: Task, shelf_id: str,
-                                  location_id: str) -> None:
+                                  location_id: str, skip_detail: str) -> None:
         """The robot reports the shelf still docked after the drop was
         reported (a 11501/11019 「車上有家具不能充電」 refusal, or a plain read):
         the alert just sent was false. The run ends CANCELLED so run_task's
@@ -1080,6 +1091,9 @@ class TaskEngine:
             f"to park the shelf"
         )
         task.status = TaskStatus.CANCELLED
+        # The N/A rows written for the beds this run will not reach now say
+        # 貨架掉落; the record should say what actually happened.
+        self._relabel_skipped_scans(skip_detail, "掉落訊號誤判，巡房提前結束")
         try:
             await dispatcher.dispatch(AnomalyEvent(
                 severity=Severity.WARN,
@@ -1096,6 +1110,24 @@ class TaskEngine:
             ))
         except Exception:
             logger.exception("Failed to dispatch false-drop retraction")
+
+    def _relabel_skipped_scans(self, old_detail: str, new_detail: str) -> None:
+        """Rewrite the details of this run's N/A rows written with
+        ``old_detail`` (best effort)."""
+        try:
+            client = get_bio_sensor_client()
+            if client is None:
+                return
+            conn = connect_db(client.db_path)
+            conn.execute(
+                "UPDATE sensor_scan_data SET details = ? "
+                "WHERE task_id = ? AND details = ? AND is_valid = 0",
+                (new_detail, self.current_task_id, old_detail),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"[SHELF DROP] Could not relabel retracted N/A rows: {e}")
 
     # ── Task execution ────────────────────────────────────────────────
 

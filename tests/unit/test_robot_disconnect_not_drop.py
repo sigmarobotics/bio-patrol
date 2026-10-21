@@ -786,6 +786,8 @@ def _run_drop_all(monkeypatch, eng, task, step_index=1, trigger_step=None):
     monkeypatch.setattr(task_runtime.dispatcher, "dispatch", _capture)
     monkeypatch.setattr(task_runtime.TaskEngine, "_record_skipped_scan",
                         lambda self, step, details, **kw: skipped.append(details))
+    monkeypatch.setattr(task_runtime.TaskEngine, "_relabel_skipped_scans",
+                        lambda self, old, new: skipped.append(("relabel", old, new)))
     handled = asyncio.run(eng._handle_shelf_drop(task, step_index, trigger_step=trigger_step))
     return events, skipped, handled
 
@@ -812,7 +814,9 @@ def test_firmware_refusing_return_home_retracts_the_drop(monkeypatch):
     assert task.status == TaskStatus.CANCELLED
     assert task.metadata["shelf_drop"] is False
     assert task.metadata["remaining_beds"] == []
-    assert skipped == ["貨架掉落，巡房中斷"] * 2
+    # the rows written for the unreached beds are relabelled
+    assert skipped == ["貨架掉落，巡房中斷"] * 2 + [
+        ("relabel", "貨架掉落，巡房中斷", "掉落訊號誤判，巡房提前結束")]
 
 
 def test_shelf_still_docked_after_return_home_retracts_the_drop(monkeypatch):
@@ -1094,6 +1098,51 @@ def test_a_completed_scan_as_trigger_keeps_its_reading(monkeypatch):
     assert [b["bed_key"] for b in task.metadata["remaining_beds"]] == ["B_101-2"]
 
 
+def test_a_scan_that_timed_out_on_its_own_keeps_its_row(monkeypatch):
+    """A scan that ran its full window and failed already wrote its row;
+    only a scan the release cut short is unprocessed."""
+    from common_types import StepResult
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    task = _two_bed_task()
+    trigger = task.steps[1]
+    trigger.status = StepStatus.FAIL
+    trigger.result = StepResult(success=False, error_code=-1,
+                                error_message="No valid data obtained after all retries",
+                                data={"bed_key": "B_101-1"}, timestamp="t")
+
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task, trigger_step=trigger)
+
+    assert skipped == ["貨架掉落，巡房中斷"]
+    assert [b["bed_key"] for b in task.metadata["remaining_beds"]] == ["B_101-2"]
+
+
+def test_a_scan_the_release_cut_short_is_unprocessed(monkeypatch):
+    from common_types import StepResult
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    task = _two_bed_task()
+    trigger = task.steps[1]
+    trigger.status = StepStatus.FAIL
+    trigger.result = StepResult(success=False, error_code=-1,
+                                error_message="Bio scan interrupted by shelf release",
+                                data={"bed_key": "B_101-1", "interrupted_by": "shelf_release"},
+                                timestamp="t")
+
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task, trigger_step=trigger)
+
+    assert skipped == ["貨架掉落，巡房中斷"] * 2
+    assert [b["bed_key"] for b in task.metadata["remaining_beds"]] == ["B_101-1", "B_101-2"]
+
+
+def test_loop_top_detection_reports_the_parked_bed(monkeypatch):
+    eng = _engine(HEALTHY_BATTERY, IDLE_CMD, verify="released")
+    eng.target_bed = "B_104-2"
+    task = _two_bed_task()
+
+    events, skipped, handled = _run_drop_all(monkeypatch, eng, task)
+
+    assert events[0].bed_key == "B_104-2"
+
+
 def test_return_home_refused_with_the_shelf_docked_ends_the_run_for_cleanup(monkeypatch):
     """A return_shelf that failed with the shelf still latched is followed
     by the ordinary return_home step; its 11501 refusal must end the run
@@ -1112,3 +1161,17 @@ def test_return_home_refused_with_the_shelf_docked_ends_the_run_for_cleanup(monk
 
     assert result.success is False
     assert task.status == TaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_a_blip_overlapping_the_placement_is_not_a_drop(no_sleep):
+    """return_shelf is placing the shelf when the link drops for three
+    polls; by the time the verify answers the shelf is (rightly) off the
+    robot — that is the placement, not a drop."""
+    eng = _watcher_engine(["S_04", UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, None],
+                          verify_reads=[NO_SHELF, NO_SHELF])
+    eng._shelf_release_expected = True
+
+    await eng._watch_shelf_state()
+
+    assert not eng.shelf_drop_event.is_set()
