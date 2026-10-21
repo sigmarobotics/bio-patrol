@@ -208,6 +208,10 @@ class TaskEngine:
         # True once the robot stopped answering: the run still pauses, but the
         # shelf state is reported as unknown instead of dropped.
         self._disconnect_suspected = False
+        # True while the pause raised by that disconnect is still pending in
+        # shelf_drop_event — so a reconnect that finds the shelf still docked
+        # can withdraw exactly that signal and nothing else.
+        self._disconnect_pause_raised = False
         # monotonic timestamp of the current stationary window, or None while a
         # motion step is in flight — see MOTION_ACTIONS / BATTERY_ABORT_CONSECUTIVE.
         self._stationary_since: Optional[float] = None
@@ -294,6 +298,7 @@ class TaskEngine:
                     except Exception:
                         logger.exception("[BATTERY ABORT] check failed")
                 poll_count += 1
+                mid = mid or None
                 if self._disconnect_suspected:
                     # The robot answers again, so the suspicion is over. Left
                     # sticky it would downgrade a later real drop to "offline".
@@ -302,7 +307,24 @@ class TaskEngine:
                         f"clearing disconnect suspicion"
                     )
                     self._disconnect_suspected = False
-                mid = mid or None
+                    if self._disconnect_pause_raised:
+                        self._disconnect_pause_raised = False
+                        if mid and self.shelf_drop_event is not None:
+                            # The blip is over and the shelf is still on the
+                            # robot, so the pause it raised has nothing to
+                            # report. Consumed later instead, it ended two
+                            # 板橋 runs as a CRITICAL "drop" with the shelf
+                            # still docked (2026-10-02 reboot, 2026-10-19
+                            # 4-second WiFi blip): return_home then failed
+                            # 11501 and the robot sat in the corridor all
+                            # night. A reconnect that reports no shelf keeps
+                            # the pause — the drop branch below owns that.
+                            logger.info(
+                                f"[STATE WATCHER] Robot {self.robot_id} still "
+                                f"carries {mid} after the blip — withdrawing the "
+                                f"disconnect pause"
+                            )
+                            self.shelf_drop_event.clear()
                 if mid:
                     last_seen_id = mid
                     confirmed_docked = True
@@ -336,6 +358,10 @@ class TaskEngine:
                     )
                     self._disconnect_suspected = True
                     if self.shelf_drop_event is not None:
+                        # Only a pause this disconnect raises is ours to
+                        # withdraw on reconnect; a drop already signalled
+                        # before the blip stays.
+                        self._disconnect_pause_raised = not self.shelf_drop_event.is_set()
                         self.shelf_drop_event.set()
             try:
                 # 3s matches the legacy _monitor_shelf cadence; in-command
@@ -851,6 +877,14 @@ class TaskEngine:
                 logger.info(f"[SHELF DROP] Robot {self.robot_id} sent home")
             else:
                 logger.error(f"[SHELF DROP] return_home failed: {rh.get('error')}")
+                if any(code in str(rh.get("error")) for code in ("11501", "11019")):
+                    # "Charging canceled: cannot charge with a furniture on
+                    # it" — the firmware's own word that the shelf is still
+                    # docked, i.e. the release signal was false.
+                    logger.warning(
+                        f"[SHELF DROP] Robot {self.robot_id} reports the shelf "
+                        f"still docked — this drop was a false alarm"
+                    )
         except Exception as rh_err:
             logger.error(f"[SHELF DROP] Failed to send robot home: {rh_err}")
 
@@ -869,6 +903,7 @@ class TaskEngine:
         self.shelf_drop_event.clear()
         self._shelf_release_expected = False
         self._disconnect_suspected = False
+        self._disconnect_pause_raised = False
         # The run starts at the dock, standing still.
         self._stationary_since = time.monotonic()
         self._low_battery_streak = 0

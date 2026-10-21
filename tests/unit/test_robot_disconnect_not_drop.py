@@ -157,13 +157,55 @@ async def test_two_failures_below_threshold_do_not_trigger(no_sleep):
 @pytest.mark.asyncio
 async def test_disconnect_suspicion_clears_when_the_robot_answers_again(no_sleep):
     """The flag is per-incident, not per-run: a sticky one downgrades a later
-    real drop to "offline" for the rest of the patrol."""
+    real drop to "offline" for the rest of the patrol. The pause it raised
+    goes with it when the robot comes back still carrying the shelf
+    (2026-10-19 板橋: a 4-second blip, consumed at the next step boundary,
+    ended the run as a CRITICAL drop with the shelf still docked)."""
     eng = _watcher_engine(["S_04", UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, "S_04"])
 
     await eng._watch_shelf_state()
 
     assert eng._disconnect_suspected is False
-    # The pause raised while it was unreachable still stands.
+    assert eng._disconnect_pause_raised is False
+    assert not eng.shelf_drop_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_without_the_shelf_keeps_the_pause(no_sleep):
+    """A robot that answers again with no shelf has dropped it — nothing to
+    withdraw."""
+    eng = _watcher_engine(["S_04", UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, None])
+
+    await eng._watch_shelf_state()
+
+    assert eng._disconnect_suspected is False
+    assert eng.shelf_drop_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_real_drop_after_a_withdrawn_pause_still_fires(no_sleep):
+    """Withdrawing the blip's pause must not blind the watcher to a drop that
+    follows it."""
+    eng = _watcher_engine(
+        ["S_04", UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, "S_04", "S_04", None]
+    )
+
+    await eng._watch_shelf_state()
+
+    assert eng.shelf_drop_event.is_set()
+    assert eng._disconnect_suspected is False
+
+
+@pytest.mark.asyncio
+async def test_a_real_drop_signal_is_not_withdrawn_on_reconnect(no_sleep):
+    """Only the pause the disconnect itself raised is withdrawn: a drop seen
+    before the blip stays an event the run must handle."""
+    eng = _watcher_engine(
+        ["S_04", None, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, "S_04"]
+    )
+
+    await eng._watch_shelf_state()
+
     assert eng.shelf_drop_event.is_set()
 
 
