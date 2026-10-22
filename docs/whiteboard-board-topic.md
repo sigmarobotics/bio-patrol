@@ -49,7 +49,7 @@ sequenceDiagram
 | 欄位 | 型別 | 說明 |
 |---|---|---|
 | `bed` | string | 床號（已套用 bed map） |
-| `time` | string | 結果定案時間，ISO 8601 含時區（站點 `timezone`，預設 Asia/Taipei） |
+| `time` | string | 結果定案時間，ISO 8601 含時區、秒精度無小數（站點 `timezone`，預設 Asia/Taipei） |
 | `bpm` | int \| null | 心跳；只有 `normal`／`restless` 有值 |
 | `rpm` | int \| null | 呼吸；只有 `normal`／`restless` 有值 |
 | `status` | string | 下表五值之一 |

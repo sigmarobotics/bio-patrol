@@ -138,6 +138,7 @@ def test_payload_has_exactly_five_fields(cfg):
     assert payload["rpm"] == 13 and type(payload["rpm"]) is int
     assert payload["status"] == "normal"
     assert datetime.fromisoformat(payload["time"]).tzinfo is not None
+    assert "." not in payload["time"]  # second precision, no fractional part
     json.dumps(payload)  # wire-serialisable
 
 
