@@ -26,6 +26,7 @@ from services.scheduler import scheduler_service
 from services.fleet_api import RobotNotRegistered
 from services import action_registry, button_db
 from services.zigbee_mqtt import ZigbeeMQTT
+from services.integration import board_publisher
 from services.zigbee_snapshot import snapshot_service
 from services.button_manager import ButtonManager
 from dependencies import get_fleet, get_bio_sensor_client
@@ -132,9 +133,14 @@ async def lifespan(app: FastAPI):
                 os.environ.get("Z2M_SNAPSHOT_DIR", ""),
             )
             if cfg.get("zigbee_enabled", True):
+                # IT-25: whiteboard online LWT + announce ride the shared
+                # connection; off / no site id → neither is set.
+                board_will = board_publisher.will()
                 zigbee_mqtt = ZigbeeMQTT(
                     host=cfg.get("zigbee_mqtt_host", "mqtt-broker"),
                     port=int(cfg.get("zigbee_mqtt_port", 1883)),
+                    will=board_will,
+                    on_connect=board_publisher.announce_online if board_will else None,
                 )
                 button_manager = ButtonManager(zigbee_mqtt)
                 zigbee_mqtt.set_handler(button_manager.handle_event)
@@ -145,6 +151,8 @@ async def lifespan(app: FastAPI):
                 logger.info("Zigbee bindings disabled (zigbee_enabled=false)")
         except Exception as e:
             logger.error(f"Failed to initialise zigbee button bindings: {e}")
+        # None (zigbee off) → the board falls back to a short-lived connection per publish.
+        board_publisher.configure(zigbee_mqtt)
 
         # Register notification sinks before any task_worker is started so an
         # early-firing patrol sees a populated sink list.

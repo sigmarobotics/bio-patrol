@@ -87,6 +87,15 @@ DEFAULT_SETTINGS = {
     # 設了 token 時直送 Telegram API，不經 notify hub。
     "demo_telegram_bot_token": "",
     "demo_telegram_chat_id": "",
+    # IT-25: 電子白板（板榮 1F 開）。每床結果定案即 publish retained QoS1 到
+    # bio-patrol/board/<whiteboard_site_id>/bed/<床號>；demo 一律不推。
+    # site_id 空＝不推（開關開著會 WARN 一次）。床號預設原樣（如 101-1），
+    # whiteboard_bed_id_map 可轉廠商床號，如 {"101-1": "A01"}。
+    # online/LWT 綁在共享 MQTT 連線上，開關與 site_id 改了要重啟容器才生效。
+    # 契約見 docs/whiteboard-board-topic.md。
+    "whiteboard_enabled": False,
+    "whiteboard_site_id": "",
+    "whiteboard_bed_id_map": {},
 }
 
 DEFAULT_BEDS = {
