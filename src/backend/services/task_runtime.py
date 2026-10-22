@@ -8,9 +8,10 @@ from datetime import datetime
 from services.fleet_api import FleetAPI
 from services.notifications import AnomalyEvent, Severity, Source, dispatcher
 from services.notifications.evaluator import (
-    BioScanFailureEvaluator, ScanOutcome, VitalsOutOfBandEvaluator,
+    BioScanFailureEvaluator, ScanOutcome, VitalsOutOfBandEvaluator, classify_scan,
 )
 from services import announcer, demo_data
+from services.integration import board_publisher
 from common_types import (
     Task, TaskStep, TaskStatus, StepStatus, StepResult, StepAction,
     NON_CRITICAL_ACTIONS, get_now,
@@ -244,6 +245,8 @@ class TaskEngine:
         # Set when the abort fires, so a dwell already waiting out its scan
         # window stops now instead of at the next step boundary.
         self._battery_abort_event: Optional[asyncio.Event] = None
+        # IT-25: demo runs never reach the whiteboard; set per run in run_task.
+        self._board_demo = False
         self._action_handlers: Dict[str, Any] = {
             StepAction.SPEAK.value: self._do_speak,
             StepAction.MOVE_TO_POSE.value: self._do_move_to_pose,
@@ -732,6 +735,12 @@ class TaskEngine:
         except Exception as e:
             logger.error(f"Failed to record skipped bio_scan {step.step_id}: {e}")
 
+    async def _board_publish(self, step: TaskStep, status: str, bpm=None, rpm=None) -> None:
+        """IT-25: push one bed's final result to the whiteboard (never raises)."""
+        await board_publisher.publish_bed_status(
+            step.params.get("bed_key"), status, bpm, rpm, demo=self._board_demo,
+        )
+
     # ── Shelf drop handler ────────────────────────────────────────────
 
     async def _classify_release(self, verdict: Optional[str] = None) -> tuple[str, dict]:
@@ -1108,6 +1117,9 @@ class TaskEngine:
         for s in steps_to_skip:
             self._record_skipped_scan(s, skip_detail, location_id=s.params.get("location_id", ""))
             s.status = StepStatus.SKIPPED
+        # IT-25: concurrently, so a dead broker costs at most one publish
+        # timeout before return_home, not one per bed.
+        await asyncio.gather(*(self._board_publish(s, "unreachable") for s in steps_to_skip))
 
         # Robot return home — controller failures come back as {"ok": False},
         # not exceptions, so check the result explicitly. An unreachable robot
@@ -1247,6 +1259,7 @@ class TaskEngine:
         # Captured up front: a 續巡 / cleanup path may replace task.metadata later.
         is_demo = (task.metadata or {}).get("mode") == "demo"
         demo_synthetic = (task.metadata or {}).get("demo_synthetic", True)
+        self._board_demo = is_demo
 
         try:
             step_index = 0
@@ -1285,6 +1298,7 @@ class TaskEngine:
                             "original_error_code": skip_reason.get("error_code"),
                             "original_error_message": skip_reason.get("error_message"),
                         })
+                        await self._board_publish(step, "unreachable")
 
                     step.result = StepResult(
                         success=False,
@@ -1324,6 +1338,7 @@ class TaskEngine:
                                 continue
                             if step.action == StepAction.BIO_SCAN:
                                 self._record_skipped_scan(step, "量測兩度被誤判的掉落訊號中斷")
+                                await self._board_publish(step, "unreachable")
                             step.status = StepStatus.SKIPPED
 
                     if step_result.success:
@@ -1736,15 +1751,11 @@ class TaskEngine:
             ):
                 best[bed] = r
         buckets: Dict[str, list] = {"valid": [], "restless": [], "unreachable": [], "no_reading": []}
+        # Same rule as the whiteboard (IT-25); the summary folds absent into no_reading.
+        bucket_of = {"normal": "valid", "absent": "no_reading"}
         for bed, r in best.items():
-            if r["is_valid"]:
-                buckets["valid"].append(bed)
-            elif str(r["status"]) == "2":
-                buckets["restless"].append(bed)
-            elif str(r["status"]) == "N/A":
-                buckets["unreachable"].append(bed)
-            else:
-                buckets["no_reading"].append(bed)
+            kind = classify_scan(r["status"], r["is_valid"])
+            buckets[bucket_of.get(kind, kind)].append(bed)
         for v in buckets.values():
             v.sort()
         readings = {
@@ -1901,9 +1912,16 @@ class TaskEngine:
                 data={}, timestamp=get_now().isoformat(),
             )
         bed_key = step.params.get("bed_key")
-        outcome = await self._await_or_drop(client.get_valid_scan_data(
-            target_bed=self.target_bed, task_id=self.current_task_id, bed_name=bed_key,
-        ))
+        try:
+            outcome = await self._await_or_drop(client.get_valid_scan_data(
+                target_bed=self.target_bed, task_id=self.current_task_id, bed_name=bed_key,
+            ))
+        except Exception:
+            # IT-25: a scan that raises (e.g. sqlite "database is locked") is
+            # still this bed's final result — don't leave last night's reading
+            # on the board. Re-raise keeps the step-failure semantics.
+            await self._board_publish(step, "no_reading")
+            raise
         dropped = self.shelf_drop_event is not None and self.shelf_drop_event.is_set()
         aborted = (self._battery_abort_event is not None
                    and self._battery_abort_event.is_set())
@@ -1947,6 +1965,15 @@ class TaskEngine:
             vitals = _vitals_evaluator.evaluate(outcome, cfg)
             if vitals:
                 await dispatcher.dispatch(vitals)
+
+        # IT-25: this bed's result is final — push it to the whiteboard.
+        raw = outcome.last_record_raw or {}
+        reading = outcome.valid_record if success else raw
+        await self._board_publish(
+            step,
+            classify_scan(raw.get("status"), success),
+            reading.get("bpm"), reading.get("rpm"),
+        )
 
         limit = cfg.get("sensor_silent_abort_beds", 3) or 0  # None/"" in settings.json = disabled
         if counts and limit > 0 and self._silent_streak >= limit:

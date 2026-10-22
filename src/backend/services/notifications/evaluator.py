@@ -26,6 +26,25 @@ _STATUS_TEXT = {
 }
 
 
+def classify_scan(status, is_valid) -> str:
+    """One scan row → normal / restless / absent / unreachable / no_reading.
+
+    The same rule the Telegram run summary buckets by (absent is folded into
+    no_reading there). ``status`` is the Wisleep status (int or str) or "N/A"
+    for a skipped scan.
+    """
+    if is_valid:
+        return "normal"
+    s = str(status)
+    if s == "2":
+        return "restless"
+    if s == "0":
+        return "absent"
+    if s == "N/A":
+        return "unreachable"
+    return "no_reading"
+
+
 class BioScanFailureEvaluator:
     """Emits BIO_SCAN_FAILURE / WARN when retries exhaust without a valid hit."""
 

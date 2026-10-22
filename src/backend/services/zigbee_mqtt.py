@@ -22,6 +22,11 @@ logger = logging.getLogger("services.zigbee_mqtt")
 BRIDGE_DEVICES_TOPIC = "zigbee2mqtt/bridge/devices"
 
 Handler = Callable[[dict], Awaitable[None]]
+# Called with the live aiomqtt.Client right after each (re)connect + subscribe.
+ConnectHook = Callable[[aiomqtt.Client], Awaitable[None]]
+# stop() sends the will payload itself (a clean DISCONNECT discards the LWT);
+# bounded so a dead broker cannot hold up shutdown.
+STOP_PUBLISH_TIMEOUT_S = 2.0
 
 
 def parse_zigbee_message(topic: str, payload: str) -> dict | None:
@@ -79,9 +84,22 @@ class ZigbeeMQTT:
     PERMIT_JOIN_TOPIC = "zigbee2mqtt/bridge/request/permit_join"
     REMOVE_DEVICE_TOPIC = "zigbee2mqtt/bridge/request/device/remove"
 
-    def __init__(self, host: str = "mqtt-broker", port: int = 1883):
+    def __init__(self, host: str = "mqtt-broker", port: int = 1883, *,
+                 will: aiomqtt.Will | None = None,
+                 on_connect: ConnectHook | None = None,
+                 identifier: str | None = None):
         self._host = host
         self._port = port
+        # IT-25: a fixed client id (None = aiomqtt picks a random one per
+        # connect). With a random id, a socket that died silently leaves the
+        # old session alive at the broker until keepalive expires, and its LWT
+        # ("0") then lands AFTER the new session announced "1". With a fixed
+        # id the reconnect takes over the stale session, so the broker fires
+        # that will at CONNECT — before on_connect publishes "1".
+        self._identifier = identifier
+        # IT-25: whiteboard online LWT + "online" announce ride this connection.
+        self._will = will
+        self._on_connect = on_connect
         self._client: aiomqtt.Client | None = None
         self._task: asyncio.Task | None = None
         self._handler: Handler | None = None
@@ -104,6 +122,17 @@ class ZigbeeMQTT:
 
     async def stop(self) -> None:
         self._stop.set()
+        # IT-25: the broker discards the LWT on a clean DISCONNECT, so a planned
+        # stop publishes the will payload (whiteboard online="0") itself.
+        will, client = self._will, self._client
+        if will is not None and client is not None and self._connected:
+            try:
+                await asyncio.wait_for(
+                    client.publish(will.topic, will.payload, qos=will.qos, retain=will.retain),
+                    STOP_PUBLISH_TIMEOUT_S,
+                )
+            except Exception as e:
+                logger.warning("MQTT offline publish to %s on stop failed: %r", will.topic, e)
         if self._task:
             self._task.cancel()
             try:
@@ -116,12 +145,19 @@ class ZigbeeMQTT:
         backoff = 1.0
         while not self._stop.is_set():
             try:
-                async with aiomqtt.Client(hostname=self._host, port=self._port) as client:
+                async with aiomqtt.Client(hostname=self._host, port=self._port,
+                                          identifier=self._identifier,
+                                          will=self._will) as client:
                     self._client = client
                     self._connected = True
                     backoff = 1.0
                     logger.info("Connected to MQTT %s:%s", self._host, self._port)
                     await client.subscribe(self.SUB_TOPIC)
+                    if self._on_connect is not None:
+                        try:
+                            await self._on_connect(client)
+                        except Exception:
+                            logger.exception("MQTT on_connect hook raised")
                     async for message in client.messages:
                         if str(message.topic) == BRIDGE_DEVICES_TOPIC:
                             snapshot_service.notify_bridge_devices()
