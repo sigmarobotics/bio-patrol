@@ -141,6 +141,10 @@ async def lifespan(app: FastAPI):
                     port=int(cfg.get("zigbee_mqtt_port", 1883)),
                     will=board_will,
                     on_connect=board_publisher.announce_online if board_will else None,
+                    # One app per Pi → a fixed client id. A reconnect then takes
+                    # over a silently-dead session, so its LWT "0" fires at
+                    # CONNECT instead of after the new session's "1".
+                    identifier="bio-patrol-app",
                 )
                 button_manager = ButtonManager(zigbee_mqtt)
                 zigbee_mqtt.set_handler(button_manager.handle_event)
@@ -211,11 +215,6 @@ async def lifespan(app: FastAPI):
         yield
 
         # Cleanup
-        if zigbee_mqtt:
-            try:
-                await zigbee_mqtt.stop()
-            except Exception:
-                pass
         if bio_sensor_client:
             bio_sensor_client.stop()
         await scheduler_service.stop()
@@ -230,6 +229,15 @@ async def lifespan(app: FastAPI):
             await dispatcher.drain(timeout=3.0)
         except Exception:
             logger.exception("Error during dispatcher drain")
+
+        # IT-25: the shared MQTT client stops only after the workers (their
+        # final whiteboard bed results) and the dispatcher drain (MqttSink
+        # rides this client) are done — and its offline "0" goes out last.
+        if zigbee_mqtt:
+            try:
+                await zigbee_mqtt.stop()
+            except Exception:
+                pass
 
         try:
             from services import telegram_service

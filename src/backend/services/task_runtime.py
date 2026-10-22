@@ -8,7 +8,7 @@ from datetime import datetime
 from services.fleet_api import FleetAPI
 from services.notifications import AnomalyEvent, Severity, Source, dispatcher
 from services.notifications.evaluator import (
-    BioScanFailureEvaluator, ScanOutcome, VitalsOutOfBandEvaluator,
+    BioScanFailureEvaluator, ScanOutcome, VitalsOutOfBandEvaluator, classify_scan,
 )
 from services import announcer, demo_data
 from services.integration import board_publisher
@@ -1754,7 +1754,7 @@ class TaskEngine:
         # Same rule as the whiteboard (IT-25); the summary folds absent into no_reading.
         bucket_of = {"normal": "valid", "absent": "no_reading"}
         for bed, r in best.items():
-            kind = board_publisher.classify_scan(r["status"], r["is_valid"])
+            kind = classify_scan(r["status"], r["is_valid"])
             buckets[bucket_of.get(kind, kind)].append(bed)
         for v in buckets.values():
             v.sort()
@@ -1971,7 +1971,7 @@ class TaskEngine:
         reading = outcome.valid_record if success else raw
         await self._board_publish(
             step,
-            board_publisher.classify_scan(raw.get("status"), success),
+            classify_scan(raw.get("status"), success),
             reading.get("bpm"), reading.get("rpm"),
         )
 

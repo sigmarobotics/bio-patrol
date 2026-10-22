@@ -124,3 +124,17 @@ def test_stop_survives_a_failing_or_hanging_offline_publish(monkeypatch, caplog)
     zig = _stop_live(will, _LiveClient(delay=1.0))
     assert zig.connected is False
     assert "offline" in caplog.text
+
+
+def test_default_identifier_is_none(monkeypatch):
+    _, created = _run_once(monkeypatch)
+    (client,) = created
+    assert client.kwargs.get("identifier") is None
+
+
+def test_fixed_identifier_is_passed_to_aiomqtt(monkeypatch):
+    # A fixed client id makes a reconnect take over the stale session, so the
+    # broker fires the old LWT at CONNECT — before on_connect announces "1".
+    _, created = _run_once(monkeypatch, identifier="bio-patrol-app")
+    (client,) = created
+    assert client.kwargs["identifier"] == "bio-patrol-app"

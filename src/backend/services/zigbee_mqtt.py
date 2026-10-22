@@ -86,9 +86,17 @@ class ZigbeeMQTT:
 
     def __init__(self, host: str = "mqtt-broker", port: int = 1883, *,
                  will: aiomqtt.Will | None = None,
-                 on_connect: ConnectHook | None = None):
+                 on_connect: ConnectHook | None = None,
+                 identifier: str | None = None):
         self._host = host
         self._port = port
+        # IT-25: a fixed client id (None = aiomqtt picks a random one per
+        # connect). With a random id, a socket that died silently leaves the
+        # old session alive at the broker until keepalive expires, and its LWT
+        # ("0") then lands AFTER the new session announced "1". With a fixed
+        # id the reconnect takes over the stale session, so the broker fires
+        # that will at CONNECT — before on_connect publishes "1".
+        self._identifier = identifier
         # IT-25: whiteboard online LWT + "online" announce ride this connection.
         self._will = will
         self._on_connect = on_connect
@@ -138,6 +146,7 @@ class ZigbeeMQTT:
         while not self._stop.is_set():
             try:
                 async with aiomqtt.Client(hostname=self._host, port=self._port,
+                                          identifier=self._identifier,
                                           will=self._will) as client:
                     self._client = client
                     self._connected = True

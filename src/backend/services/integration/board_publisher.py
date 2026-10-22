@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 import aiomqtt
 
 from common_types import get_now
+from services.notifications.evaluator import classify_scan  # noqa: F401 — re-exported
 from settings.config import get_runtime_settings
 
 if TYPE_CHECKING:
@@ -35,25 +36,6 @@ _WITH_VITALS = ("normal", "restless")
 
 _client: "ZigbeeMQTT | None" = None
 _warned_no_site = False
-
-
-def classify_scan(status, is_valid) -> str:
-    """One scan row → normal / restless / absent / unreachable / no_reading.
-
-    The same rule the Telegram run summary buckets by (absent is folded into
-    no_reading there). ``status`` is the Wisleep status (int or str) or "N/A"
-    for a skipped scan.
-    """
-    if is_valid:
-        return "normal"
-    s = str(status)
-    if s == "2":
-        return "restless"
-    if s == "0":
-        return "absent"
-    if s == "N/A":
-        return "unreachable"
-    return "no_reading"
 
 
 def configure(client: "ZigbeeMQTT | None") -> None:
@@ -82,16 +64,19 @@ def _online_topic(site: str) -> str:
 
 
 def _as_int(value) -> int | None:
+    """A reading as int, or None. <= 0 is not a reading (Wisleep a-HR=0 on a
+    status-2 record is a carried value) — same rule as the app's bpm > 0."""
     if value is None or isinstance(value, bool):
         return None
     try:
-        return int(round(float(value)))
+        n = int(round(float(value)))
     except (TypeError, ValueError):
         return None
+    return n if n > 0 else None
 
 
 async def publish_bed_status(bed_key: str, status: str, bpm, rpm, *,
-                             demo: bool = False, ts: str | None = None) -> bool:
+                             demo: bool = False) -> bool:
     """Publish one bed's final result. Returns True when it went out; never raises."""
     if demo:
         return False  # demo runs never reach the whiteboard
@@ -107,18 +92,22 @@ async def publish_bed_status(bed_key: str, status: str, bpm, rpm, *,
         has_vitals = status in _WITH_VITALS
         payload = {
             "bed": bed,
-            "time": ts or get_now().isoformat(),
+            "time": get_now().isoformat(),
             "bpm": _as_int(bpm) if has_vitals else None,
             "rpm": _as_int(rpm) if has_vitals else None,
             "status": status,
         }
 
-        if _client is not None:
+        # Shared client down (e.g. mid-reconnect) → fall through to a
+        # short-lived connection: the broker is on the same compose network and
+        # is usually back within seconds. Checked first so ZigbeeMQTT.publish
+        # never logs its own "not connected" WARN on top of ours.
+        if _client is not None and _client.connected:
             ok = await asyncio.wait_for(
                 _client.publish(topic, payload, qos=1, retain=True),
                 timeout=PUBLISH_TIMEOUT_S,
             )
-            if not ok:
+            if not ok:  # lost the connection between the check and the publish
                 logger.warning("Board publish to %s skipped — shared MQTT client not connected", topic)
                 return False
             return True

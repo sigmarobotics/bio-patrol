@@ -22,6 +22,8 @@ from services.task_runtime import current_tasks, tasks_db
 
 
 class _Shared:
+    connected = True  # a live ZigbeeMQTT
+
     def __init__(self):
         self.calls = []
 

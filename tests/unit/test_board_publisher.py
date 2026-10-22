@@ -43,8 +43,9 @@ def cfg(monkeypatch):
 class _Shared:
     """Stands in for the long-lived ZigbeeMQTT (publish(topic, dict, qos, retain) -> bool)."""
 
-    def __init__(self, result=True, exc=None, delay=0.0):
+    def __init__(self, result=True, exc=None, delay=0.0, connected=True):
         self.calls = []
+        self.connected = connected
         self.result = result
         self.exc = exc
         self.delay = delay
@@ -79,6 +80,11 @@ def _pub(*args, **kwargs):
 ])
 def test_classify_scan_five_values(status, is_valid, expected):
     assert board_publisher.classify_scan(status, is_valid) == expected
+
+
+def test_classify_scan_lives_in_evaluator_and_is_reexported():
+    from services.notifications import evaluator
+    assert evaluator.classify_scan is board_publisher.classify_scan
 
 
 # ── gates ──────────────────────────────────────────────────────────────
@@ -135,10 +141,13 @@ def test_payload_has_exactly_five_fields(cfg):
     json.dumps(payload)  # wire-serialisable
 
 
-def test_explicit_ts_is_used(cfg):
+def test_time_is_stamped_from_get_now(cfg, monkeypatch):
+    from datetime import timedelta, timezone
+    fixed = datetime(2026, 10, 13, 22, 41, 3, tzinfo=timezone(timedelta(hours=8)))
+    monkeypatch.setattr(board_publisher, "get_now", lambda: fixed)
     shared = _Shared()
     board_publisher.configure(shared)
-    _pub("101-1", "normal", 58, 13, ts="2026-10-13T22:41:03+08:00")
+    _pub("101-1", "normal", 58, 13)
     assert shared.calls[0][1]["time"] == "2026-10-13T22:41:03+08:00"
 
 
@@ -150,6 +159,18 @@ def test_restless_keeps_values_float_becomes_int(cfg):
     assert payload["status"] == "restless"
     assert payload["bpm"] == 74 and type(payload["bpm"]) is int
     assert payload["rpm"] == 20 and type(payload["rpm"]) is int
+
+
+def test_zero_vitals_are_null(cfg):
+    # Wisleep a-HR=0 on a status-2 record = a carried value, not a reading.
+    shared = _Shared()
+    board_publisher.configure(shared)
+    _pub("101-2", "restless", 0, 0)
+    _pub("101-1", "normal", 58, 13)
+    restless, normal = shared.calls[0][1], shared.calls[1][1]
+    assert restless["status"] == "restless"
+    assert restless["bpm"] is None and restless["rpm"] is None
+    assert normal["bpm"] == 58 and normal["rpm"] == 13
 
 
 @pytest.mark.parametrize("status", ["absent", "unreachable", "no_reading"])
@@ -176,11 +197,12 @@ def test_bed_id_map_rewrites_topic_and_bed(cfg):
 
 # ── never raise, never block ───────────────────────────────────────────
 
-def test_shared_client_not_connected_warns(cfg, caplog):
+def test_shared_publish_refused_race_warns_once(cfg, caplog):
+    # connected when checked, refused by the time publish ran → one WARN, False.
     board_publisher.configure(_Shared(result=False))
     with caplog.at_level(logging.WARNING, logger=board_publisher.logger.name):
         assert _pub("101-1", "normal", 58, 13) is False
-    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
 
 def test_shared_client_exception_is_swallowed(cfg, caplog):
@@ -250,6 +272,28 @@ def test_fallback_short_lived_client(cfg, fake_aio):
         "bed": "101-1", "time": json.loads(wire)["time"],
         "bpm": 58, "rpm": 13, "status": "normal",
     }
+
+
+def test_shared_not_connected_falls_back_to_short_lived(cfg, fake_aio, caplog):
+    # The broker is on the same compose network: usually back within seconds.
+    shared = _Shared(connected=False)
+    board_publisher.configure(shared)
+    with caplog.at_level(logging.WARNING, logger=board_publisher.logger.name):
+        assert _pub("101-1", "normal", 58, 13) is True
+    assert shared.calls == []
+    (client,) = fake_aio.instances
+    (topic, wire, qos, retain), = client.published
+    assert topic == "bio-patrol/board/banqiao-1f/bed/101-1"
+    assert qos == 1 and retain is True
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_shared_connected_skips_short_lived(cfg, fake_aio):
+    shared = _Shared()
+    board_publisher.configure(shared)
+    assert _pub("101-1", "normal", 58, 13) is True
+    assert len(shared.calls) == 1
+    assert fake_aio.instances == []
 
 
 def test_fallback_connect_failure_is_swallowed(cfg, fake_aio, caplog):
