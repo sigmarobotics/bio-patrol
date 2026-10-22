@@ -92,7 +92,9 @@ async def publish_bed_status(bed_key: str, status: str, bpm, rpm, *,
         has_vitals = status in _WITH_VITALS
         payload = {
             "bed": bed,
-            "time": get_now().isoformat(),
+            # Second precision: the vendor parses "2026-10-13T22:41:03+08:00";
+            # a fractional part is a surprise, not information.
+            "time": get_now().replace(microsecond=0).isoformat(),
             "bpm": _as_int(bpm) if has_vitals else None,
             "rpm": _as_int(rpm) if has_vitals else None,
             "status": status,
