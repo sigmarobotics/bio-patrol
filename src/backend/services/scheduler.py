@@ -4,6 +4,7 @@ Manages recurring patrol tasks using APScheduler, driven by schedule.json.
 """
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -20,6 +21,19 @@ logger = logging.getLogger(__name__)
 # executing. For a twice-daily patrol that window is far too tight; 15 min
 # tolerates any realistic delay while still keeping the patrol near its slot.
 MISFIRE_GRACE_SECONDS = 900
+
+# AsyncIOScheduler arms its next wakeup with loop.call_later — monotonic time —
+# computed from the wall clock at that moment. The Pi has no RTC battery: it
+# boots on the last saved timestamp and NTP steps the clock once the network is
+# up (新營 2026-10-24: +38 h), leaving the timer aimed at a stale slot so every
+# patrol until then is silently skipped. Re-arm whenever the wall clock steps.
+CLOCK_CHECK_SECONDS = 30
+CLOCK_STEP_TOLERANCE_SECONDS = 60
+
+
+def _clock_offset() -> float:
+    """Wall clock minus monotonic clock; constant unless the wall clock steps."""
+    return time.time() - time.monotonic()
 
 # start_patrol 的拒絕理由是英文 detail（給 API 呼叫者看的），通報是給現場人員看的，
 # 所以已知的兩種拒絕各給一句繁中；認不出來的就原樣帶出 detail。
@@ -68,21 +82,38 @@ class TaskSchedulerService:
     def __init__(self):
         self.scheduler = AsyncIOScheduler()
         self.is_running = False
+        self._clock_task: Optional[asyncio.Task] = None
 
     async def start(self):
         """Start the scheduler and load schedules from JSON."""
         if not self.is_running:
             self.scheduler.start()
             self.is_running = True
+            self._clock_task = asyncio.create_task(self._watch_clock_steps())
             logger.info("Task scheduler started")
             await self.reload_from_json()
 
     async def stop(self):
         """Stop the scheduler."""
         if self.is_running:
+            if self._clock_task:
+                self._clock_task.cancel()
+                self._clock_task = None
             self.scheduler.shutdown()
             self.is_running = False
             logger.info("Task scheduler stopped")
+
+    async def _watch_clock_steps(self):
+        """Re-arm the APScheduler timer after a wall-clock step (see CLOCK_CHECK_SECONDS)."""
+        offset = _clock_offset()
+        while True:
+            await asyncio.sleep(CLOCK_CHECK_SECONDS)
+            new_offset = _clock_offset()
+            step = new_offset - offset
+            offset = new_offset
+            if abs(step) > CLOCK_STEP_TOLERANCE_SECONDS:
+                logger.warning(f"Wall clock stepped by {step:+.0f}s, re-arming scheduler timer")
+                self.scheduler.wakeup()
 
     async def reload_from_json(self):
         """
