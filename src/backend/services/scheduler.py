@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
+from apscheduler.events import EVENT_JOB_MISSED
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -27,9 +28,7 @@ MISFIRE_GRACE_SECONDS = 900
 # computed from the wall clock at that moment. The Pi has no RTC battery: it
 # boots on the last saved timestamp and NTP steps the clock once the network is
 # up (新營 2026-10-24: +38 h), leaving the timer aimed at a stale slot so every
-# patrol until then is silently skipped. Cron jobs computed under the wrong
-# clock also keep a wrong next_run_time (a backward step would push tonight's
-# slot to tomorrow), so on a step every job is recomputed, not just re-armed.
+# patrol until then is silently skipped. Re-arm whenever the wall clock steps.
 CLOCK_CHECK_SECONDS = 30
 CLOCK_STEP_TOLERANCE_SECONDS = 60
 
@@ -86,6 +85,8 @@ class TaskSchedulerService:
         self.scheduler = AsyncIOScheduler()
         self.is_running = False
         self._clock_task: Optional[asyncio.Task] = None
+        self._notice_tasks: set[asyncio.Task] = set()
+        self.scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
 
     async def start(self):
         """Start the scheduler and load schedules from JSON."""
@@ -112,47 +113,50 @@ class TaskSchedulerService:
             logger.info("Task scheduler stopped")
 
     async def _watch_clock_steps(self, offset: float):
-        """Realign jobs whenever the wall clock steps (see CLOCK_CHECK_SECONDS)."""
+        """Re-arm the scheduler whenever the wall clock steps (see CLOCK_CHECK_SECONDS)."""
         while True:
             await asyncio.sleep(CLOCK_CHECK_SECONDS)
             new_offset = _clock_offset()
             step = new_offset - offset
             offset = new_offset
             if abs(step) > CLOCK_STEP_TOLERANCE_SECONDS:
-                logger.warning(f"Wall clock stepped by {step:+.0f}s, realigning scheduler jobs")
-                await self._realign_after_clock_step(step)
+                logger.warning(f"Wall clock stepped by {step:+.0f}s, re-arming scheduler")
+                try:
+                    self._realign_after_clock_step(step)
+                except Exception:
+                    logger.exception("Failed to re-arm scheduler after clock step")
 
-    async def _realign_after_clock_step(self, step: float):
-        """Recompute every job's next run from the corrected clock, then re-arm.
-
-        Cron slots that passed while the clock was wrong (or the Pi was off)
-        beyond the misfire grace are reported, not run late; a slot still
-        inside the grace runs now. Sensor-retry DateTriggers keep their delay.
-        """
-        now = datetime.now(self.scheduler.timezone)
-        grace = timedelta(seconds=MISFIRE_GRACE_SECONDS)
-        for job in self.scheduler.get_jobs():
-            if job.next_run_time is None:
-                continue
-            if isinstance(job.trigger, DateTrigger):
-                job.modify(next_run_time=job.next_run_time + timedelta(seconds=step))
-                continue
-            fresh = job.trigger.get_next_fire_time(None, now - grace)
-            if fresh <= now and job.next_run_time > fresh:
-                # That slot already ran before the step; don't run it twice.
-                fresh = job.trigger.get_next_fire_time(None, now)
-            if job.id.startswith("patrol_") and job.next_run_time < now - grace:
-                schedule_id = job.id[len("patrol_"):]
-                missed = job.next_run_time.strftime("%m/%d %H:%M")
-                logger.warning(f"Scheduled patrol '{schedule_id}' slot {missed} missed during clock step")
-                await notify_schedule_issue(
-                    "⚠️ 排程巡房已錯過",
-                    f"排程時間：{missed}\n原因：主機時鐘剛校正（多半是剛開機），"
-                    f"該時段已過，如仍需巡房請手動啟動",
-                    raw={"schedule_id": schedule_id, "missed": job.next_run_time.isoformat()},
-                )
-            job.modify(next_run_time=fresh)
+    def _realign_after_clock_step(self, step: float):
+        """Forward step: wakeup() lets APScheduler run the slots that went by
+        within the misfire grace and drop the rest (_on_job_missed reports them).
+        Backward step: cron jobs computed under the fast clock point too far
+        ahead, so pull each back to its next slot from now first."""
+        if step < 0:
+            now = datetime.now(self.scheduler.timezone)
+            for job in self.scheduler.get_jobs():
+                if isinstance(job.trigger, CronTrigger) and job.next_run_time:
+                    fresh = job.trigger.get_next_fire_time(None, now)
+                    if fresh and fresh < job.next_run_time:
+                        job.modify(next_run_time=fresh)
         self.scheduler.wakeup()
+
+    def _on_job_missed(self, event):
+        """APScheduler dropped a patrol slot past its misfire grace (clock step
+        after boot, stalled loop). Slots older than a day are only logged: they
+        are history by now, and a long power-off would otherwise page once per slot."""
+        if not event.job_id.startswith("patrol_"):
+            return
+        when = event.scheduled_run_time
+        logger.warning(f"Scheduled patrol job '{event.job_id}' missed its {when} slot")
+        if datetime.now(when.tzinfo) - when > timedelta(hours=24):
+            return
+        task = asyncio.get_running_loop().create_task(notify_schedule_issue(
+            "⚠️ 排程巡房已錯過",
+            f"排程時間：{when:%m/%d %H:%M}\n原因：主機當時離線、或開機後時鐘尚未校正",
+            raw={"job_id": event.job_id, "scheduled": when.isoformat()},
+        ))
+        self._notice_tasks.add(task)
+        task.add_done_callback(self._notice_tasks.discard)
 
     async def reload_from_json(self):
         """
