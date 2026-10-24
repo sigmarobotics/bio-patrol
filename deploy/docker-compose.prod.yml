@@ -19,6 +19,13 @@ services:
       # hours with `docker logs` showing nothing, and the buffered lines are
       # lost when the process exits.
       - PYTHONUNBUFFERED=1
+    # Docker freezes the container's DNS upstream from the host resolv.conf at
+    # container start. On a 4G dongle the Pi boots with the carrier's IPv6 DNS
+    # before tailscale rewrites resolv.conf; once IPv6 drops, every lookup in
+    # the container fails (新營 2026-10-24: Wisleep MQTT and hub notices down).
+    dns:
+      - 100.100.100.100
+      - 8.8.8.8
     networks:
       - bio-patrol-net
     depends_on:
