@@ -2,7 +2,9 @@
 import asyncio
 import json
 import logging
+import math
 import os
+import re
 import ssl
 from typing import AsyncIterator
 
@@ -14,9 +16,11 @@ from fastapi.responses import StreamingResponse
 
 import lifespan_state
 from settings.config import SETTINGS_FILE, get_runtime_settings, update_settings
+from settings.defaults import DEFAULT_SETTINGS
 from utils.json_io import load_json, save_json
 from services.bio_sensor_mqtt import is_valid_scan
 from services.line_service import send_line_message
+from services import telegram_service
 from services.notifications.recipients import StaticResolver
 from services.task_runtime import engines, task_queues, task_worker, TaskEngine
 
@@ -112,6 +116,96 @@ def _drop_unchanged_secrets(body: dict, cfg: dict) -> dict:
     return cleaned
 
 
+# ─── POST /api/settings validation (F-01) ───────────────────────────────────
+# The Settings form posts every field; a cleared number box used to save 0 and
+# the backend took it. Each known key is coerced to its default's type and the
+# values that silently break a night's patrol are refused with 400.
+
+_BOOL_STRINGS = {
+    "true": True, "1": True, "yes": True, "on": True,
+    "false": False, "0": False, "no": False, "off": False,
+}
+_VITALS_PAIRS = (("vitals_hr_low", "vitals_hr_high"), ("vitals_rr_low", "vitals_rr_high"))
+_REBOOT_WINDOW_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d-([01]?\d|2[0-3]):[0-5]\d$")
+
+
+def _bad(key: str, reason: str) -> HTTPException:
+    return HTTPException(status_code=400, detail=f"{key}: {reason}")
+
+
+def _coerce(key: str, value, default):
+    """Coerce ``value`` to the type of ``default``; raise 400 if it cannot be."""
+    if isinstance(default, (list, dict)):
+        return value
+    kind = type(default).__name__
+    cannot = _bad(key, f"cannot convert {value!r} to {kind}")
+    if isinstance(default, bool):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str) and value.strip().lower() in _BOOL_STRINGS:
+            return _BOOL_STRINGS[value.strip().lower()]
+        raise cannot
+    if isinstance(default, (int, float)):
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise cannot
+        try:
+            number = float(value)
+        except ValueError:
+            raise cannot
+        if not math.isfinite(number):
+            raise cannot
+        if isinstance(default, int):
+            if not number.is_integer():
+                raise cannot
+            return int(number)
+        return number
+    if isinstance(default, str):
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value)
+        raise cannot
+    return value
+
+
+def _validate_settings_body(body: dict, cfg: dict) -> dict:
+    """Drop unknown keys, coerce known ones, and range-check what was posted.
+
+    Only posted keys are range-checked, so a value already stored never
+    blocks an unrelated save; the vitals low/high pairs compare against the
+    merged current value when just one side is posted.
+    """
+    cleaned: dict = {}
+    for key, value in body.items():
+        if key not in DEFAULT_SETTINGS:
+            logger.warning("POST /api/settings: dropping unknown key %r", key)
+            continue
+        cleaned[key] = _coerce(key, value, DEFAULT_SETTINGS[key])
+
+    if cleaned.get("bio_scan_retry_count", 1) < 1:
+        raise _bad("bio_scan_retry_count", "must be >= 1")
+    if cleaned.get("bio_scan_initial_wait", 60) < 60:
+        # CLAUDE.md: sensor is a 60 s moving average and the pole sways after
+        # the stop, so every bed waits blind for at least 60 s.
+        raise _bad("bio_scan_initial_wait", "must be >= 60")
+    if "mqtt_port" in cleaned and not 1 <= cleaned["mqtt_port"] <= 65535:
+        raise _bad("mqtt_port", "must be between 1 and 65535")
+    for key, value in cleaned.items():
+        if key.startswith("vitals_") and isinstance(value, (int, float)) \
+                and not isinstance(value, bool) and value <= 0:
+            raise _bad(key, "must be > 0")
+    merged = {**cfg, **cleaned}
+    for low, high in _VITALS_PAIRS:
+        if (low in cleaned or high in cleaned) and merged[low] >= merged[high]:
+            raise _bad(low, f"must be lower than {high} ({merged[high]})")
+    window = cleaned.get("robot_reboot_window", "")
+    if window and not _REBOOT_WINDOW_RE.match(window):
+        raise _bad("robot_reboot_window", "must be HH:MM-HH:MM or empty")
+    return cleaned
+
+
 # ─── Settings GET / POST + manual reconnect ──────────────────────────────────
 
 @router.get("/settings")
@@ -137,8 +231,14 @@ async def reconnect_robot():
 
 @router.post("/settings")
 async def save_settings(body: dict):
-    """Merge incoming JSON into settings.json. Re-register the robot on IP change."""
-    body = _drop_unchanged_secrets(body, get_runtime_settings())
+    """Merge incoming JSON into settings.json. Re-register the robot on IP change.
+
+    Unknown keys are dropped (logged); a value that cannot be converted to its
+    default's type, or that is out of range, is refused with 400 "<key>: <reason>".
+    """
+    cfg = get_runtime_settings()
+    body = _drop_unchanged_secrets(body, cfg)
+    body = _validate_settings_body(body, cfg)
     if "robot_ip" in body:
         body["robot_ip"] = _normalize_robot_ip(body["robot_ip"])
 
@@ -500,3 +600,24 @@ async def test_line():
     )
     ok = all(results)
     return {"status": "ok" if ok else "error", "results": dict(zip(targets, results))}
+
+
+# ─── Telegram test send + last outcome (F-29) ───────────────────────────────
+
+@router.post("/settings/test-telegram")
+async def test_telegram():
+    """Send one message through send_telegram_message itself, so a hub-relay
+    site tests the hub path. Returns the outcome; the bot token never appears."""
+    cfg = get_runtime_settings()
+    if not cfg.get("enable_telegram", False):
+        raise HTTPException(status_code=400, detail="enable_telegram is off")
+    result = await telegram_service.send_telegram_message("🔔 bio-patrol Telegram 通報測試訊息")
+    if result is None:
+        return {"ok": False, "status": None, "description": "enable_telegram is off", "via": None}
+    return {k: result[k] for k in ("ok", "status", "description", "via")}
+
+
+@router.get("/settings/telegram-status")
+async def telegram_status():
+    """Outcome of the most recent Telegram send attempt (any caller)."""
+    return dict(telegram_service.last_send_result)

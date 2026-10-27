@@ -12,7 +12,9 @@ from services.notifications.sinks.line import LineSink
 def _event():
     return AnomalyEvent(
         severity=Severity.WARN,
-        source=Source.BIO_SCAN_FAILURE,
+        # BIZ-019 (F-56): per-bed scan failures no longer go to LINE; use a
+        # source on the default allow-list so these tests exercise delivery.
+        source=Source.SHELF_DROP,
         title="⚠️ 101-1 量測失敗",
         body="床位：101-1\n狀況：人員躁動，無穩定讀值\n重試次數：19",
         bed_key="101-1",

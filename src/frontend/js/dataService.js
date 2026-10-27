@@ -30,6 +30,16 @@ class DataService {
     return res.data;
   }
 
+  async testTelegram() {
+    const res = await axios.post('/api/settings/test-telegram');
+    return res.data;
+  }
+
+  async getTelegramStatus() {
+    const res = await axios.get('/api/settings/telegram-status');
+    return res.data;
+  }
+
   async getBeds() {
     const res = await axios.get('/api/beds');
     return res.data;
@@ -251,16 +261,15 @@ class DataService {
     return res.data;
   }
 
-  async speak(text) {
-    const res = await axios.post(`/kachaka/${this.robotId}/command/speak`, { text });
+  // Robot-level cancel: stops whatever command is running (Return Home etc.)
+  // without touching any TaskEngine task. 200 with ok:false on refusal.
+  async cancelRobotCommand() {
+    const res = await axios.post(`/kachaka/${this.robotId}/command/cancel`);
     return res.data;
   }
 
-  async moveToLocation(locationId) {
-    const res = await axios.post(`/kachaka/${this.robotId}/command/move_to_location`, {
-      location_name: locationId,
-      cancel_all: true
-    });
+  async speak(text) {
+    const res = await axios.post(`/kachaka/${this.robotId}/command/speak`, { text });
     return res.data;
   }
 
@@ -285,13 +294,6 @@ class DataService {
     const res = await axios.post(`/kachaka/${this.robotId}/command/reset_shelf_pose`, {
       shelf_id: shelfId,
       cancel_all: true
-    });
-    return res.data;
-  }
-
-  async moveToPose(x, y, theta) {
-    const res = await axios.post(`/kachaka/${this.robotId}/command/move_to_pose`, {
-      x, y, theta, cancel_all: true
     });
     return res.data;
   }

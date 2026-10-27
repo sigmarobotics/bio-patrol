@@ -37,6 +37,13 @@ router = APIRouter(prefix="/api", tags=["Patrol"])
 # would both pass a dedup run before it. The whole start body is serialized.
 _start_lock = asyncio.Lock()
 
+# F-20: task_ids whose resume is awaiting reset_shelf_pose. A plain set, not
+# _start_lock: a hung reset RPC must never hold up a scheduled start.
+_resuming: set[str] = set()
+
+LIVE_RUN_DETAIL = "巡房進行中，請等目前巡房結束"
+RESUME_DUPLICATE_DETAIL = "這次掉架已在續巡處理中或已處理，請勿重複操作"
+
 
 # ── Patrol config ────────────────────────────────────────────────────────────
 
@@ -267,19 +274,36 @@ def _robot_offline(cfg: dict) -> bool:
         return False
 
 
+def _find_live_run():
+    """The queued/executing patrol-family run, if any. Tasks without a mode are
+    not patrols (generic /api/tasks submissions)."""
+    for existing in tasks_db.values():
+        if existing.status not in (TaskStatus.QUEUED, TaskStatus.IN_PROGRESS):
+            continue
+        if (existing.metadata or {}).get("mode"):
+            return existing
+    return None
+
+
+def _refuse_during_live_run(action: str) -> None:
+    """F-20 (BIZ-019, overrides CORNER-081 for this case): resume and
+    recover-shelf send reset_shelf_pose to the robot, which mid-run is carrying
+    the shelf, and resume would queue a second patrol behind the live one."""
+    live = _find_live_run()
+    if live:
+        logger.warning(f"{action} refused: task {live.task_id} is {live.status.value}")
+        raise HTTPException(status_code=409, detail=LIVE_RUN_DETAIL)
+
+
 def _live_run(req: PatrolStartRequest, beds_count: int):
     """Dedup: a patrol-family run already queued/executing means this start is a
     duplicate — an impatient operator, a schedule firing onto a manual run, a
     demo button pressed mid-patrol, a resume still going. There is one robot
     and one shelf, so the mode is not what conflicts; any live run is. Return
-    that run instead of queueing a second one on the same shelf behind it.
-    Tasks without a mode are not patrols (generic /api/tasks submissions)."""
-    for existing in tasks_db.values():
-        if existing.status not in (TaskStatus.QUEUED, TaskStatus.IN_PROGRESS):
-            continue
-        running_mode = (existing.metadata or {}).get("mode")
-        if not running_mode:
-            continue
+    that run instead of queueing a second one on the same shelf behind it."""
+    existing = _find_live_run()
+    if existing:
+        running_mode = existing.metadata["mode"]
         logger.warning(
             f"Patrol start ignored (mode={req.mode}): task {existing.task_id} "
             f"(mode={running_mode}) is already {existing.status.value}"
@@ -473,6 +497,7 @@ async def recover_shelf(req: RecoverShelfRequest):
     shelf_dropped task DONE so the dashboard clears the alert — an offline
     weekend piles up one dropped task per fired schedule, and clearing one
     per press made the backlog look unclearable (新營/板榮 2026-08)."""
+    _refuse_during_live_run("Shelf recovery")
     try:
         from dependencies import get_fleet
         fleet = get_fleet()
@@ -510,12 +535,28 @@ async def resume_patrol(req: ResumePatrolRequest):
     meta = old_task.metadata or {}
     if not meta.get("shelf_drop"):
         raise HTTPException(status_code=400, detail="Task is not in shelf_dropped state")
+    # F-20: metadata.shelf_drop stays True after a resume, so the status is what
+    # says this drop is still open. A double tap or a second Zigbee press lands
+    # here while the first is in flight (_resuming) or after it (DONE).
+    if old_task.status != TaskStatus.SHELF_DROPPED or req.task_id in _resuming:
+        logger.warning(f"Resume of {req.task_id} refused: already resuming or resumed")
+        raise HTTPException(status_code=409, detail=RESUME_DUPLICATE_DETAIL)
+    _refuse_during_live_run("Resume")
 
     shelf_id = meta.get("shelf_id", "")
     remaining_beds = meta.get("remaining_beds", [])
     if not remaining_beds:
         raise HTTPException(status_code=400, detail="No remaining beds to resume")
 
+    _resuming.add(req.task_id)
+    try:
+        return await _resume_claimed(req, old_task, shelf_id, remaining_beds)
+    finally:
+        _resuming.discard(req.task_id)
+
+
+async def _resume_claimed(req: ResumePatrolRequest, old_task: Task,
+                          shelf_id: str, remaining_beds: list) -> dict:
     try:
         from dependencies import get_fleet
         fleet = get_fleet()
@@ -535,6 +576,8 @@ async def resume_patrol(req: ResumePatrolRequest):
             )
         raise HTTPException(status_code=500, detail=f"Shelf reset failed: {e}")
 
+    # A start whose gates were awaiting during the reset may have queued a run.
+    _refuse_during_live_run("Resume")
     old_task.status = TaskStatus.DONE
 
     steps = build_patrol_steps(
@@ -571,7 +614,7 @@ async def resume_latest_shelf_drop() -> dict:
     button — caller never has a task_id."""
     candidates = [
         t for t in tasks_db.values()
-        if (t.metadata or {}).get("shelf_drop") and t.status != TaskStatus.DONE
+        if (t.metadata or {}).get("shelf_drop") and t.status == TaskStatus.SHELF_DROPPED
     ]
     if not candidates:
         raise HTTPException(status_code=400, detail="No shelf-dropped task to resume")

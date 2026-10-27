@@ -49,3 +49,33 @@ def test_already_done_shelf_drop_does_not_count():
         with pytest.raises(HTTPException) as exc:
             asyncio.run(resume_latest_shelf_drop())
         assert exc.value.status_code == 400
+
+
+def test_cancelled_drop_does_not_shadow_an_open_one():
+    """A CANCELLED task that still carries shelf_drop=True must not be picked
+    over an older task that is really SHELF_DROPPED (code-review #56)."""
+    import routers.patrol as patrol
+    from common_types import Task, TaskStatus
+    from services.task_runtime import tasks_db
+
+    tasks_db.clear()
+    tasks_db["a"] = Task(task_id="a", robot_id="kachaka", steps=[], status=TaskStatus.SHELF_DROPPED,
+                         metadata={"shelf_drop": True, "dropped_at": "2026-10-28T01:00:00", "shelf_id": "S04",
+                                   "remaining_beds": ["101-1"]})
+    tasks_db["b"] = Task(task_id="b", robot_id="kachaka", steps=[], status=TaskStatus.CANCELLED,
+                         metadata={"shelf_drop": True, "dropped_at": "2026-10-28T02:00:00", "shelf_id": "S04",
+                                   "remaining_beds": ["101-2"]})
+    picked = []
+
+    async def _resume(req):
+        picked.append(req.task_id)
+        return {"status": "ok"}
+
+    orig = patrol.resume_patrol
+    patrol.resume_patrol = _resume
+    try:
+        asyncio.run(resume_latest_shelf_drop())
+    finally:
+        patrol.resume_patrol = orig
+        tasks_db.clear()
+    assert picked == ["a"]

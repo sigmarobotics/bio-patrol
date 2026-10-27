@@ -3,8 +3,8 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
-from settings.config import SCHEDULE_FILE
-from settings.defaults import DEFAULT_SCHEDULE
+from settings.config import PATROL_FILE, SCHEDULE_FILE, get_runtime_settings
+from settings.defaults import DEFAULT_PATROL, DEFAULT_SCHEDULE
 from utils.json_io import load_json, save_json
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,70 @@ async def _notify_turned_off(before: dict, after: dict) -> None:
         )
 
 
+MOVE_SECONDS_PER_BED = 60
+DAY_MINUTES = 24 * 60
+
+
+def _reboot_window_warnings(body: dict, before: dict | None = None) -> list[str]:
+    """F-24: a run that crosses the site's daily robot reboot (板榮 03:0x)
+    strands the shelf mid-corridor and fires a SHELF DROP. Estimate each
+    enabled entry's span — enabled beds × (initial wait + full retry loop +
+    one move) — and warn when it overlaps ``robot_reboot_window``
+    ("HH:MM-HH:MM", may cross midnight; empty = off). Warns, never refuses."""
+    from services.scheduler import parse_schedule_time
+
+    cfg = get_runtime_settings()
+    window = (cfg.get("robot_reboot_window") or "").strip()
+    if not window:
+        return []
+    try:
+        win_start_s, win_end_s = (p.strip() for p in window.split("-"))
+        wh, wm = parse_schedule_time(win_start_s)
+        eh, em = parse_schedule_time(win_end_s)
+    except ValueError:
+        logger.warning(f"Ignoring malformed robot_reboot_window: {window!r}")
+        return []
+    win_start = wh * 60 + wm
+    win_end = eh * 60 + em
+    if win_end <= win_start:
+        win_end += DAY_MINUTES
+
+    patrol_cfg = load_json(PATROL_FILE, DEFAULT_PATROL)
+    beds = sum(1 for b in patrol_cfg.get("beds_order", []) if b.get("enabled", False))
+    per_bed_s = (
+        int(cfg.get("bio_scan_initial_wait", 120))
+        + int(cfg.get("bio_scan_retry_count", 19)) * int(cfg.get("bio_scan_wait_time", 10))
+        + MOVE_SECONDS_PER_BED
+    )
+    run_minutes = max(1, -(-beds * per_bed_s // 60))  # ceil; a start inside still counts
+
+    # Only entries that this save turned on or re-timed: the page POSTs the
+    # whole list, so an unrelated toggle must not re-send the same warning to
+    # the ward every time (same diff rule as _notify_turned_off).
+    prior = _enabled_entries(before) if before is not None else {}
+    warnings = []
+    for schedule_id, entry in _enabled_entries(body).items():
+        old = prior.get(schedule_id)
+        if old is not None and old.get("time") == entry.get("time"):
+            continue
+        try:
+            h, m = parse_schedule_time(entry.get("time"))
+        except ValueError:
+            continue
+        start = h * 60 + m
+        end = start + run_minutes
+        # The window repeats daily; compare against yesterday's/today's/tomorrow's.
+        if not any(start < win_end + d and win_start + d < end
+                   for d in (-DAY_MINUTES, 0, DAY_MINUTES)):
+            continue
+        end_hhmm = f"{(end // 60) % 24:02d}:{end % 60:02d}"
+        warnings.append(
+            f"排程 {schedule_id}（{entry['time']} 開始，{beds} 床預估 {end_hhmm} 結束）"
+            f"可能撞到機器人每日重開時段 {window}"
+        )
+    return warnings
+
+
 @router.get("/schedule")
 async def get_schedule():
     """Return schedule.json (or defaults if empty/missing)."""
@@ -87,7 +151,22 @@ async def save_schedule(body: dict):
     save_json(SCHEDULE_FILE, body)
     await _reload_scheduler()
     await _notify_turned_off(before, body)
-    return {"status": "ok", "data": body}
+    try:
+        warnings = _reboot_window_warnings(body, before)
+    except Exception:
+        # The entry is already saved and live; a bad patrol.json row or a
+        # hand-edited setting must not turn that into a 500 (別讓通報把存檔弄成 500).
+        logger.exception("Reboot-window estimate failed; schedule saved without the check")
+        warnings = []
+    if warnings:
+        from services.scheduler import notify_schedule_issue
+        await notify_schedule_issue(
+            "⚠️ 排程可能撞到機器人每日重開時段",
+            "\n".join(warnings)
+            + "\n排程已存檔；巡房途中機器人若重開，棚車會停在走廊並觸發掉架警報，建議調整開始時間。",
+            raw={"warnings": warnings},
+        )
+    return {"status": "ok", "data": body, "warnings": warnings}
 
 
 @router.delete("/schedule/{schedule_id}")

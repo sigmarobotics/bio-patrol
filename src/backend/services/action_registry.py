@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
+from settings.config import get_runtime_settings
+
 logger = logging.getLogger("services.action_registry")
 
 ActionHandler = Callable[[dict], Awaitable[dict]]
@@ -108,21 +110,26 @@ async def _action_shelf_to_ns(params: dict) -> dict:
     """Deliver a sensor shelf to the nursing station, then send the robot home.
 
     Replaces the old TTS test action; the registry key stays "speak" so an
-    existing button binding keeps firing without re-pairing.
+    existing button binding keeps firing without re-pairing. Shelf and
+    location are per-site settings (BIZ-019): the shared image carries no
+    site's shelf id, and an unset shelf refuses instead of queueing.
     """
-    shelf_id = str(params.get("shelf_id") or "S05")
-    location_id = str(params.get("location_id") or "NS")
+    cfg = get_runtime_settings()
+    shelf_id = str(params.get("shelf_id") or cfg.get("ns_delivery_shelf_id") or "")
+    location_id = str(params.get("location_id")
+                      or cfg.get("ns_delivery_location_id") or "NS")
+    if not shelf_id:
+        return {"ok": False, "error": "未設定送護理站貨架（Settings ns_delivery_shelf_id）"}
     from common_types import (
         StepAction, StepStatus, Task, TaskStatus, TaskStep, generate_task_id,
     )
     from services.task_runtime import submit_task, tasks_db
+    from routers.patrol import _find_live_run
     # Same one-robot/one-shelf dedup as start_patrol: any live patrol-family
     # task means this press is a duplicate or a conflict — refuse, don't queue.
-    for existing in tasks_db.values():
-        if existing.status not in (TaskStatus.QUEUED, TaskStatus.IN_PROGRESS):
-            continue
-        if (existing.metadata or {}).get("mode"):
-            return {"ok": False, "error": f"task {existing.task_id} already running"}
+    existing = _find_live_run()
+    if existing is not None:
+        return {"ok": False, "error": f"task {existing.task_id} already running"}
     steps = [
         TaskStep(step_id="reset_shelf", action=StepAction.RESET_SHELF_POSE.value,
                  params={"shelf_id": shelf_id}, status=StepStatus.PENDING),
@@ -145,8 +152,7 @@ DEFAULT_ACTIONS: list[tuple[str, str, ActionHandler, dict]] = [
     ("patrol_start",  "Start patrol",              _action_patrol_start,  {}),
     ("patrol_cancel", "Cancel running patrol",     _action_patrol_cancel, {}),
     ("return_home",   "Return home",               _action_return_home,   {}),
-    ("speak",         "送 S_01 到護理站＋回家充電", _action_shelf_to_ns,
-     {"shelf_id": "S05", "location_id": "NS"}),
+    ("speak",         "送感測貨架到護理站＋回家充電", _action_shelf_to_ns, {}),
 ]
 
 

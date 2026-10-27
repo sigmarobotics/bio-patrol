@@ -312,19 +312,27 @@ function checkShelfDrop() {
       hintEl.textContent = hint;
     }
 
-    // Never disable this button: task.metadata is written once when the drop
-    // is handled and never refreshed, so a disabled-on-disconnect button stays
-    // disabled after the robot comes back — and with the resume button hidden
-    // when no beds remain, the full-screen overlay would have zero usable
-    // actions until the backend restarts. Pressing it while offline is
+    // Never disable on `disconnected`: task.metadata is written once when the
+    // drop is handled and never refreshed, so a disabled-on-disconnect button
+    // stays disabled after the robot comes back — and with the resume button
+    // hidden when no beds remain, the full-screen overlay would have zero
+    // usable actions until the backend restarts. Pressing it while offline is
     // harmless: the endpoint answers 503 and recoverShelf() shows its detail.
+    // Disable only on states this poll refreshes (F-20): a request in flight,
+    // or a live patrol run, which the backend refuses with 409 (same test as
+    // routers/patrol.py _find_live_run: queued/in_progress with a mode).
+    const liveRun = tasks.some(t =>
+      (t.status === 'in_progress' || t.status === 'queued') && t.metadata?.mode);
+    _shelfLiveRun = liveRun;
     const recoverBtn = document.getElementById('btn-recover-shelf');
     if (recoverBtn) {
-      recoverBtn.disabled = false;
-      recoverBtn.title = disconnected
-        ? '機器人失聯中，連線恢復後按此歸位（現在按會顯示失聯訊息）'
+      recoverBtn.disabled = liveRun || _shelfActionInFlight;
+      recoverBtn.title = liveRun ? '巡房進行中'
+        : disconnected ? '機器人失聯中，連線恢復後按此歸位（現在按會顯示失聯訊息）'
         : '';
     }
+    const liveHint = document.getElementById('shelf-drop-live-hint');
+    if (liveHint) liveHint.style.display = liveRun ? '' : 'none';
 
     // Draw mini-map with shelf drop marker
     drawShelfDropMiniMap();
@@ -344,7 +352,11 @@ function checkShelfDrop() {
 
     // Show/hide resume button based on remaining beds
     const resumeBtn = document.getElementById('btn-resume-patrol');
-    if (resumeBtn) resumeBtn.style.display = remaining.length > 0 ? '' : 'none';
+    if (resumeBtn) {
+      resumeBtn.style.display = remaining.length > 0 ? '' : 'none';
+      resumeBtn.disabled = liveRun || _shelfActionInFlight;
+      resumeBtn.title = liveRun ? '巡房進行中' : '';
+    }
 
     // Store task ID for recovery/resume
     overlay.dataset.taskId = shelfDropTask.task_id;
@@ -441,9 +453,34 @@ function drawShelfDropMiniMap() {
   ctx.restore();
 }
 
+// F-20: true while a recover/resume request is in flight; checkShelfDrop()
+// keeps both overlay buttons disabled meanwhile (it re-renders every poll).
+// _shelfLiveRun is checkShelfDrop()'s last "patrol run is live" verdict.
+let _shelfActionInFlight = false;
+let _shelfLiveRun = false;
+
+function _setShelfActionInFlight(on) {
+  _shelfActionInFlight = on;
+  for (const id of ['btn-recover-shelf', 'btn-resume-patrol']) {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = on || _shelfLiveRun;
+  }
+}
+
+// A 409 means the backend refused on purpose (live run / duplicate resume);
+// say it in a dialog so a nurse who double-tapped sees why nothing happened.
+function _shelfActionError(e) {
+  const detail = e.response?.data?.detail || e.message || e;
+  if (e.response?.status === 409) alert(detail);
+  return detail;
+}
+
 async function recoverShelf() {
+  if (_shelfActionInFlight) return;
   const statusEl = document.getElementById('shelf-recovery-status');
   if (statusEl) statusEl.textContent = '歸位中...';
+  _setShelfActionInFlight(true);
+  let ok = false;
 
   try {
     const settings = await dataService.getSettings();
@@ -451,34 +488,45 @@ async function recoverShelf() {
 
     const result = await dataService.recoverShelf(shelfId);
     if (statusEl) statusEl.textContent = '歸位成功！';
+    ok = true;
+    // Stay locked while the success text shows, so a second tap cannot land.
     setTimeout(() => {
       document.getElementById('shelf-drop-overlay').style.display = 'none';
       if (statusEl) statusEl.textContent = '';
+      _setShelfActionInFlight(false);
     }, 2000);
   } catch (e) {
     // The backend's detail carries the actionable text (e.g. the 503
     // "機器人失聯，請先確認機器人電源與網路"); e.message is just "Request failed".
-    if (statusEl) statusEl.textContent = `歸位失敗: ${e.response?.data?.detail || e.message || e}`;
+    if (statusEl) statusEl.textContent = `歸位失敗: ${_shelfActionError(e)}`;
+  } finally {
+    if (!ok) _setShelfActionInFlight(false);
   }
 }
 
 async function resumePatrol() {
   const overlay = document.getElementById('shelf-drop-overlay');
   const taskId = overlay?.dataset.taskId;
-  if (!taskId) return;
+  if (!taskId || _shelfActionInFlight) return;
 
   const statusEl = document.getElementById('shelf-recovery-status');
   if (statusEl) statusEl.textContent = '歸位並恢復巡房中...';
+  _setShelfActionInFlight(true);
+  let ok = false;
 
   try {
     const result = await dataService.resumePatrol(taskId);
     if (statusEl) statusEl.textContent = `已恢復巡房，剩餘 ${result.beds_count} 床`;
+    ok = true;
     setTimeout(() => {
       overlay.style.display = 'none';
       if (statusEl) statusEl.textContent = '';
+      _setShelfActionInFlight(false);
     }, 2000);
   } catch (e) {
-    if (statusEl) statusEl.textContent = `恢復失敗: ${e.response?.data?.detail || e.message || e}`;
+    if (statusEl) statusEl.textContent = `恢復失敗: ${_shelfActionError(e)}`;
+  } finally {
+    if (!ok) _setShelfActionInFlight(false);
   }
 }
 
@@ -608,41 +656,42 @@ async function startPatrol() {
   }
 }
 
+// 「停止巡房」(modal) and the dashboard ✕. With a patrol task: cancel it — the
+// backend then queues the usual cleanup (return shelf → home), so the robot
+// moves again. Without one (Return Home or any command outside the TaskEngine):
+// cancel the robot's running command directly.
 async function cancelPatrol() {
-  const active = tasks.find(t => t.status === 'in_progress' || t.status === 'queued');
-  if (!active) return;
-  try {
-    await dataService.cancelTask(active.task_id);
-  } catch (e) {
-    console.error('Cancel patrol failed:', e);
+  const active = tasks.find(t => t.status === 'in_progress')
+    || tasks.find(t => t.status === 'queued');
+  if (active) {
+    try {
+      await dataService.cancelTask(active.task_id);
+      const mode = active.metadata?.mode;
+      if (active.status !== 'in_progress') {
+        alert('已取消排隊中的任務');
+      } else if (mode === 'cleanup') {
+        // Cancelling the cleanup itself queues no second cleanup: the robot
+        // stops where it is, shelf still docked.
+        alert('已停止收工任務：機器人會停在原地（棚車仍在身上），請到場處理');
+      } else if (mode === 'delivery') {
+        alert('已取消送貨任務（機器人會歸還棚車並回充電座）');
+      } else {
+        alert('已停止巡房（機器人會自動歸還棚車並回充電座）');
+      }
+    } catch (e) {
+      alert('停止巡房失敗: ' + (e.response?.data?.detail || e.message || e));
+    }
+    return;
   }
-}
-
-// Manual control (D-pad)
-async function manualControl(direction) {
-  if (!robotData.pose) return;
-  const step = 0.1;
-  const angleStep = 0.174533; // ~10 degrees
-  let { x, y, theta } = robotData.pose;
-  theta = theta || 0;
-
-  switch (direction) {
-    case 'forward':
-      x += step * Math.cos(theta);
-      y += step * Math.sin(theta);
-      break;
-    case 'backward':
-      x -= step * Math.cos(theta);
-      y -= step * Math.sin(theta);
-      break;
-    case 'left': theta += angleStep; break;
-    case 'right': theta -= angleStep; break;
-  }
-
   try {
-    await dataService.moveToPose(x, y, theta);
+    const res = await dataService.cancelRobotCommand();
+    if (res?.ok) {
+      alert('已送出停止指令');
+    } else {
+      alert('停止指令失敗: ' + (res?.error || `error_code ${res?.error_code}`));
+    }
   } catch (e) {
-    console.error('Manual control failed:', e);
+    alert('停止指令失敗: ' + (e.response?.data?.detail || e.message || e));
   }
 }
 
@@ -720,10 +769,11 @@ async function addSchedule() {
   scheduleConfig.schedules.push(newSchedule);
 
   try {
-    await dataService.saveSchedules(scheduleConfig);
+    const res = await dataService.saveSchedules(scheduleConfig);
     renderScheduleList();
     updateNextRunDisplay();
     timeInput.value = '';
+    _alertScheduleWarnings(res);
   } catch (e) {
     alert('Failed to save schedule: ' + e.message);
   }
@@ -747,10 +797,20 @@ async function toggleSchedule(scheduleId, enabled) {
   const s = scheduleConfig.schedules.find(s => s.id === scheduleId);
   if (s) s.enabled = enabled;
   try {
-    await dataService.saveSchedules(scheduleConfig);
+    const res = await dataService.saveSchedules(scheduleConfig);
     updateNextRunDisplay();
+    _alertScheduleWarnings(res);
   } catch (e) {
     console.error('Failed to toggle schedule:', e);
+  }
+}
+
+// F-24: the schedule is saved either way; the backend only warns when an
+// enabled run may overlap the site's robot_reboot_window.
+function _alertScheduleWarnings(res) {
+  if (res?.warnings?.length) {
+    alert('排程已儲存，但：\n' + res.warnings.join('\n')
+      + '\n\n巡房途中機器人若重開，棚車會停在走廊並觸發掉架警報，建議調整開始時間。');
   }
 }
 
@@ -1263,6 +1323,9 @@ function exportSensorCSV() {
 
 const SETTINGS_MAP = [
   { id: 'setting-shelf-id', key: 'shelf_id' },
+  { id: 'setting-ns-delivery-shelf-id', key: 'ns_delivery_shelf_id' },
+  { id: 'setting-ns-delivery-location-id', key: 'ns_delivery_location_id' },
+  { id: 'setting-robot-reboot-window', key: 'robot_reboot_window' },
   { id: 'setting-robot-ip', key: 'robot_ip' },
   { id: 'setting-mqtt-broker', key: 'mqtt_broker' },
   { id: 'setting-mqtt-port', key: 'mqtt_port', type: 'number' },
@@ -1320,6 +1383,16 @@ const SECRET_SETTING_KEYS = new Set([
 ]);
 const loadedSecretMasks = {};
 
+// F-15: what loadSettings() put in each SETTINGS_MAP field (el.value string, or
+// boolean for checkboxes). saveSettings() posts only fields that differ, so a
+// Save never pins untouched defaults into settings.json — a later defaults.py
+// change then still reaches the site.
+const loadedSettingValues = {};
+let loadedLineGroupIds = null;  // sorted saved line_group_ids, null until known
+
+// Number settings stored as floats; every other type:'number' key is an int.
+const FLOAT_SETTING_KEYS = new Set(['robot_retry_base_delay', 'robot_retry_max_delay']);
+
 // ─── LINE 通報群組選擇 ──────────────────────────────────────────────────────
 // line_group_ids 是陣列，不走 SETTINGS_MAP 的 scalar 流程。清單成功載入後
 // 以 #line-group-list 的 data-loaded 標記，saveSettings 才收集勾選。
@@ -1338,6 +1411,7 @@ async function loadLineGroups() {
       axios.get('/api/line/groups'),
     ]);
     const savedIds = Array.isArray(settings.line_group_ids) ? settings.line_group_ids : [];
+    loadedLineGroupIds = [...savedIds].sort();
     const sources = res.data.sources || [];
 
     container.innerHTML = '';
@@ -1404,6 +1478,45 @@ async function testLine() {
   } finally {
     btn.textContent = original;
     btn.disabled = false;
+  }
+}
+
+// F-29: one test message through the real send path (hub relay or direct);
+// shows the Telegram API description, e.g. "Bad Request: chat not found".
+async function testTelegram() {
+  const btn = document.getElementById('btn-test-telegram');
+  const original = btn.textContent;
+  btn.textContent = '發送中…';
+  btn.disabled = true;
+
+  try {
+    const res = await dataService.testTelegram();
+    alert(res.ok
+      ? 'Telegram 測試訊息已發送'
+      : `Telegram 發送失敗：${res.description || `HTTP ${res.status}`}`);
+  } catch (e) {
+    alert(`Telegram 發送失敗：${e?.response?.data?.detail || e.message}`);
+  } finally {
+    btn.textContent = original;
+    btn.disabled = false;
+    loadTelegramStatus();
+  }
+}
+
+async function loadTelegramStatus() {
+  const el = document.getElementById('telegram-last-status');
+  if (!el) return;
+  try {
+    const st = await dataService.getTelegramStatus();
+    if (!st?.at) {
+      el.textContent = '';
+      return;
+    }
+    const at = new Date(st.at).toLocaleString();
+    el.textContent = `最近一次：${at} ${st.ok ? '成功' : '失敗'} ${st.description || ''}`.trim();
+    el.style.color = st.ok ? '' : 'var(--coral)';
+  } catch (e) {
+    el.textContent = '';
   }
 }
 
@@ -1502,12 +1615,15 @@ async function loadSettings() {
       if (!el) return;
       if (type === 'checkbox') {
         el.checked = !!settings[key];
+        loadedSettingValues[key] = el.checked;
       } else {
         el.value = settings[key] ?? '';
+        loadedSettingValues[key] = el.value;
         if (SECRET_SETTING_KEYS.has(key)) loadedSecretMasks[key] = el.value;
       }
     });
     const savedLineIds = Array.isArray(settings.line_group_ids) ? settings.line_group_ids : [];
+    loadedLineGroupIds = [...savedLineIds].sort();
     const lineList = document.getElementById('line-group-list');
     if (savedLineIds.length && lineList && lineList.dataset.loaded !== '1') {
       lineList.innerHTML =
@@ -1519,6 +1635,7 @@ async function loadSettings() {
   }
   loadMapList();
   loadTlsStatus();
+  loadTelegramStatus();
   if (typeof window.loadButtons === 'function') {
     window.loadButtons();
   }
@@ -1580,9 +1697,16 @@ async function saveSettings() {
     const el = document.getElementById(id);
     if (!el) return;
     if (type === 'checkbox') {
-      data[key] = el.checked;
-    } else if (type === 'number') {
-      data[key] = parseFloat(el.value) || 0;
+      if (el.checked !== loadedSettingValues[key]) data[key] = el.checked;
+      return;
+    }
+    if (el.value === loadedSettingValues[key]) return;  // untouched: not posted
+    if (type === 'number') {
+      // A cleared box means "keep what is saved", never 0.
+      if (el.value.trim() === '') return;
+      const n = FLOAT_SETTING_KEYS.has(key) ? parseFloat(el.value) : parseInt(el.value, 10);
+      if (Number.isNaN(n)) return;
+      data[key] = n;
     } else {
       data[key] = el.value;
       if (SECRET_SETTING_KEYS.has(key) && el.value.includes('•')
@@ -1601,16 +1725,32 @@ async function saveSettings() {
   // 群組清單只有在成功載入後才收集，避免未載入時把已存的勾選洗掉。
   const lineList = document.getElementById('line-group-list');
   if (lineList?.dataset.loaded === '1') {
-    data.line_group_ids = [...lineList.querySelectorAll('input[type="checkbox"]:checked')]
+    const ids = [...lineList.querySelectorAll('input[type="checkbox"]:checked')]
       .map(cb => cb.value);
+    if (JSON.stringify([...ids].sort()) !== JSON.stringify(loadedLineGroupIds)) {
+      data.line_group_ids = ids;
+    }
+  }
+
+  if (!Object.keys(data).length) {
+    alert('沒有變更');
+    return;
   }
 
   try {
     await dataService.saveSettings(data);
+    // What is saved now is the new baseline for the next Save.
+    SETTINGS_MAP.forEach(({ id, key, type }) => {
+      if (!(key in data)) return;
+      const el = document.getElementById(id);
+      if (el) loadedSettingValues[key] = type === 'checkbox' ? el.checked : el.value;
+    });
+    if (data.line_group_ids) loadedLineGroupIds = [...data.line_group_ids].sort();
     if (window.bedGrid?.refreshConfig) bedGrid.refreshConfig();
     alert('Settings saved!');
   } catch (e) {
-    alert('Failed to save settings: ' + e.message);
+    // 400 detail is "<key>: <reason>" from the backend validator.
+    alert('Failed to save settings: ' + (e.response?.data?.detail || e.message));
   }
 }
 
