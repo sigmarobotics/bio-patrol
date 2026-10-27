@@ -132,7 +132,7 @@ If `mqtt_connected` is `false`, the bio-patrol container cannot reach `mqtt-brok
 | `patrol_start` | 啟動正式巡房 | 用目前儲存的 patrol 路線 |
 | `patrol_cancel` | 取消當下執行中的任務 | 沒有任務時回傳錯誤 |
 | `return_home` | 機器人回充電座 | 會放下貨架 |
-| `speak` | 機器人說「こんにちは、シグマです」 | 預設文字，目前不可從 UI 修改 |
+| `speak` | 送感測貨架到護理站，再回充電座 | 貨架與地點取自 Settings `ns_delivery_shelf_id`／`ns_delivery_location_id`（預設 `NS`）；未設定貨架時拒絕執行。key 沿用 `speak` 以保留既有綁定 |
 
 ---
 

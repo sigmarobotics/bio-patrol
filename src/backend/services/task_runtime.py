@@ -53,6 +53,12 @@ DISCONNECT_POLL_THRESHOLD = 3
 # signal has time to end (板橋 blips last 4–12 s); ~12 s on a dead robot.
 SHELF_VERIFY_POLLS = 2
 SHELF_VERIFY_INTERVAL = 2.0
+# A run's final return_shelf failed with no drop: before deciding the shelf is
+# stranded on the robot, wait up to this many command-state reads, this far
+# apart, for a still-running placement (TIMEOUT does not cancel it) to end.
+# Never a retry of return_shelf itself.
+RETURN_SHELF_SETTLE_POLLS = 15
+RETURN_SHELF_SETTLE_INTERVAL = 2.0
 # return_home refused because furniture is docked: 11501 / 11019 「車上有家具
 # 不能充電」 — the firmware's own word that the shelf is still on the robot.
 CHARGE_REFUSED_WITH_SHELF = (11501, 11019)
@@ -1429,7 +1435,10 @@ class TaskEngine:
             # during the first move_shelf). Guard keeps a cancelled cleanup
             # from spawning another cleanup.
             meta = task.metadata or {}
-            if cancelled and meta.get("mode") != "cleanup":
+            # A FAILED run that left the shelf on the robot (final return_shelf,
+            # BIZ-019 F-03) is parked the same way.
+            if ((cancelled or meta.get("cleanup_shelf_id"))
+                    and meta.get("mode") != "cleanup"):
                 try:
                     cleanup_kwargs = {}
                     if meta.get("cleanup_shelf_id"):
@@ -1478,6 +1487,8 @@ class TaskEngine:
                     title = "🚫 巡房已取消"
                 elif task.status == TaskStatus.DONE:
                     title = "✅ 巡房完成"
+                elif meta.get("return_shelf_failed"):
+                    title = "⚠️ 巡房完成，貨架未歸位"
                 else:
                     title = "⚠️ 巡房中斷"
                 buckets, readings = None, None
@@ -1524,23 +1535,45 @@ class TaskEngine:
                     ]
                     if missed:
                         body += f"\n未量測：{'、'.join(missed)}"
-                await dispatcher.dispatch(AnomalyEvent(
-                    severity=Severity.INFO,
-                    source=Source.TASK_SUMMARY,
-                    task_id=task.task_id,
-                    title=title,
-                    body=body,
-                    raw={
-                        "cancelled": cancelled,
-                        "total_beds": total_beds,
-                        "success_beds": success_beds,
-                    },
-                    demo=is_demo,
-                    demo_synthetic=demo_synthetic,
-                    readings=readings,
-                ))
+                # A cleanup measures nothing: its 「巡房完成 / 0 床」 contradicted
+                # the abort it follows (BIZ-019 F-26). It only speaks up below,
+                # when it did not get the robot home.
+                if meta.get("mode") != "cleanup":
+                    await dispatcher.dispatch(AnomalyEvent(
+                        severity=Severity.INFO,
+                        source=Source.TASK_SUMMARY,
+                        task_id=task.task_id,
+                        title=title,
+                        body=body,
+                        raw={
+                            "cancelled": cancelled,
+                            "total_beds": total_beds,
+                            "success_beds": success_beds,
+                        },
+                        demo=is_demo,
+                        demo_synthetic=demo_synthetic,
+                        readings=readings,
+                    ))
             except Exception:
                 logger.exception("Failed to dispatch task-summary anomaly")
+            home_ok = any(s.step_id == "cleanup_return_home"
+                          and s.status == StepStatus.SUCCESS for s in task.steps)
+            if (meta.get("mode") == "cleanup"
+                    and (task.status != TaskStatus.DONE or not home_ok)
+                    and task.status != TaskStatus.SHELF_DROPPED
+                    and not meta.get("shelf_help_requested")):
+                # A drop and the 11501 path already sent their own alert.
+                try:
+                    await dispatcher.dispatch(AnomalyEvent(
+                        severity=Severity.WARN,
+                        source=Source.SHELF_DROP,
+                        task_id=task.task_id,
+                        title="⚠️ 收工未完成，請確認貨架與機器人位置",
+                        body="收工（貨架歸位、回充）未完成",
+                        raw={"status": task.status.value},
+                    ))
+                except Exception:
+                    logger.exception("Failed to dispatch cleanup-incomplete warning")
             current_tasks.pop(self.robot_id, None)
             logger.info(f"Robot {self.robot_id} is now free.")
         return task
@@ -1691,6 +1724,8 @@ class TaskEngine:
                 )
         else:
             dropped = await self._shelf_dropped_en_route(shelf_id)
+            if not dropped:
+                await self._flag_stranded_shelf(step, shelf_id)
         if dropped:
             self._shelf_release_expected = False
             if self.shelf_drop_event is not None:
@@ -1700,6 +1735,60 @@ class TaskEngine:
             self.shelf_drop_event.clear()
             self._signal_shelf_confirmed = None
         return self._make_result(result, step.action, {"shelf_id": shelf_id})
+
+    async def _flag_stranded_shelf(self, step: TaskStep, shelf_id: str) -> None:
+        """A patrol/demo run's final return_shelf failed and the shelf did not
+        fall: if the robot still carries it, the run must not end 「✅ 巡房完成」
+        with the robot stuck in the corridor unable to charge (BIZ-019 F-03).
+        FAILED + cleanup_shelf_id makes run_task's wrap-up queue the cleanup
+        that parks it; the summary keeps the readings (the beds were measured).
+        """
+        task = tasks_db.get(getattr(self, "current_task_id", None))
+        if (task is None or task.status != TaskStatus.IN_PROGRESS
+                or (task.metadata or {}).get("mode") not in ("patrol", "demo")
+                or not task.steps or task.steps[-1].step_id != step.step_id):
+            return
+        # A TIMEOUT leaves the placement running on the robot: let it finish.
+        for i in range(RETURN_SHELF_SETTLE_POLLS):
+            try:
+                cs = await self.fleet.get_command_state(self.robot_id)
+            except Exception:
+                break
+            if not (cs or {}).get("ok") or not cs.get("is_running"):
+                break
+            if i < RETURN_SHELF_SETTLE_POLLS - 1:
+                await asyncio.sleep(RETURN_SHELF_SETTLE_INTERVAL)
+        try:
+            res = await self.fleet.get_moving_shelf(self.robot_id)
+        except Exception as e:
+            res = {"ok": False, "error": str(e)}
+        if (res or {}).get("ok") and not res.get("shelf_id"):
+            return  # released after all — the step stays a plain failure
+        if task.status != TaskStatus.IN_PROGRESS:
+            return  # a stop landed during the wait: its cleanup owns the wrap-up
+        # Latched, or unreadable: err toward parking it (the robot answered
+        # moments ago, and a stranded shelf is the costly miss).
+        logger.warning(
+            f"[RETURN SHELF] Robot {self.robot_id} still holds shelf {shelf_id} after the "
+            f"final return_shelf failed ({res}) — ending run {task.task_id} FAILED for the cleanup"
+        )
+        self._shelf_release_expected = False
+        task.status = TaskStatus.FAILED
+        if task.metadata is None:
+            task.metadata = {}
+        task.metadata["cleanup_shelf_id"] = shelf_id
+        task.metadata["return_shelf_failed"] = True
+        try:
+            await dispatcher.dispatch(AnomalyEvent(
+                severity=Severity.WARN,
+                source=Source.SHELF_DROP,
+                task_id=task.task_id,
+                title="⚠️ 貨架歸位失敗，仍在機器人身上",
+                body="巡房已完成，但貨架未能歸位\n將再試一次貨架歸位後回充",
+                raw={"shelf_id": shelf_id, "moving_shelf": res},
+            ))
+        except Exception:
+            logger.exception("Failed to dispatch stranded-shelf warning")
 
     def _run_outcome_buckets(self, task_id: str, demo: bool = False) -> Optional[tuple]:
         """Per-bed outcome buckets and readings for one run, from the scan DB.
@@ -1848,6 +1937,9 @@ class TaskEngine:
                         f"shelf docked on cleanup {task.task_id} — needs a person"
                     )
                     body = "機器人無法在載著貨架時回充，自動歸位也失敗\n請協助將貨架歸位"
+                    # run_task's wrap-up sends no second 收工未完成 for this.
+                    if task.metadata is not None:
+                        task.metadata["shelf_help_requested"] = True
                 else:
                     logger.warning(
                         f"[RETURN HOME] Robot {self.robot_id} refused to charge with the "

@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 _HTTP_TIMEOUT_S = 10.0
 _PUSH_URL = "https://api.line.me/v2/bot/message/push"
 _client: Optional[httpx.AsyncClient] = None
+# "YYYY-MM" of the last quota-exhausted Telegram notice (one per month).
+_quota_notice_month: Optional[str] = None
+_QUOTA_NOTICE = "LINE 推播額度用罄，院方 LINE 通報已停止，請改看 Telegram"
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -34,6 +37,21 @@ async def aclose_client() -> None:
     if _client is not None and not _client.is_closed:
         await _client.aclose()
     _client = None
+
+
+async def _notify_quota_exhausted() -> None:
+    """Mirror a LINE 429 to Telegram once per calendar month. Never raises."""
+    global _quota_notice_month
+    try:
+        from common_types import get_now
+        month = get_now().strftime("%Y-%m")
+        if _quota_notice_month == month:
+            return
+        _quota_notice_month = month
+        from services.telegram_service import send_telegram_message
+        await send_telegram_message(_QUOTA_NOTICE)
+    except Exception as e:
+        logger.error(f"LINE quota notice to Telegram failed: {e}")
 
 
 async def send_line_message(message: str, to: str) -> bool:
@@ -58,6 +76,12 @@ async def send_line_message(message: str, to: str) -> bool:
         if resp.status_code == 200:
             logger.info("LINE message sent successfully")
             return True
+        if resp.status_code == 429:
+            # Monthly push quota (or rate limit): every later LINE alert,
+            # CRITICAL ones included, is dropped until it resets.
+            logger.error(f"LINE API returned 429: {resp.text}")
+            await _notify_quota_exhausted()
+            return False
         logger.warning(f"LINE API returned {resp.status_code}: {resp.text}")
         return False
     except Exception as e:

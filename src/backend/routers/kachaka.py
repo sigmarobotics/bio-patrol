@@ -279,6 +279,13 @@ async def return_home(robot_id: str, fleet: FleetAPI = Depends(get_fleet)):
     """Return robot to home position"""
     return await fleet.return_home(robot_id)
 
+@router.post("/{robot_id}/command/cancel")
+async def cancel_command(robot_id: str, fleet: FleetAPI = Depends(get_fleet)):
+    """Cancel the robot's running command (F-12). Robot-level only: no task
+    is touched and no cleanup is queued, so it also stops motion started
+    outside the TaskEngine (Return Home, D-pad)."""
+    return await fleet.cancel_command(robot_id)
+
 # ====== Command State APIs ======
 
 @router.get("/{robot_id}/command/state")

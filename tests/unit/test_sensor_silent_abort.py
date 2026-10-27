@@ -397,7 +397,8 @@ def test_announce_failure_keeps_the_summary(monkeypatch, dispatched):
     asyncio.run(eng.run_task(task))
 
     assert task.status == TaskStatus.DONE
-    assert [e.source for e in dispatched] == [Source.TASK_SUMMARY]
+    # BIZ-019 F-26: a cleanup that got home sends no summary of its own.
+    assert dispatched == []
 
 
 def _capture_cleanup(monkeypatch):

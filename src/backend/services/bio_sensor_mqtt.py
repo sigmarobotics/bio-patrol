@@ -9,6 +9,7 @@ import os
 import asyncio
 import sqlite3
 import time
+from collections import deque
 from common_types import get_now
 from utils.sqlite_wal import connect_db
 
@@ -69,6 +70,9 @@ class BioSensorMQTTClient:
         self.latest_data = None
         self._msg_seq = 0  # bumped once per arrived message (see _ingest)
         self._latest = (0, None)  # (seq, payload) written in one assignment
+        # Every recent arrival as (seq, payload), so a scan round can evaluate
+        # the frames that landed between its polls, not just the newest one.
+        self._frames = deque(maxlen=16)
         self.last_message_at = None  # time.monotonic() of the last arrival
         self.connected = False
         self._init_database()
@@ -162,8 +166,11 @@ class BioSensorMQTTClient:
     def _ingest(self, payload: dict):
         # Readers snapshot (seq, payload) from one tuple so a message landing
         # between two separate reads cannot be processed twice.
+        # Append before publishing _latest: any seq a reader snapshots from
+        # _latest is then already in _frames (unless a window start cleared it).
         self.latest_data = payload
         self._msg_seq += 1
+        self._frames.append((self._msg_seq, payload))
         self._latest = (self._msg_seq, payload)
         self.last_message_at = time.monotonic()
 
@@ -287,28 +294,48 @@ class BioSensorMQTTClient:
         # writing right after the clear — that is data from inside this window,
         # which is exactly what we want.
         # Snapshot the seq BEFORE the clear so a message landing in between
-        # still counts as new for this window.
+        # still counts as new for this window. _frames is cleared for the same
+        # reason: a previous bed's frames must never be filed under this bed.
         start_seq = seen_seq = self._msg_seq
         self.latest_data = None
+        self._frames.clear()
         await asyncio.sleep(INT_WAIT_TIME)
+        # The initial wait is blind (pole sway + the pad's 60 s moving
+        # average): the first round sees only the newest frame, never the
+        # frames that landed during the wait. max() keeps a pre-window seq out
+        # when nothing arrived during the wait.
+        seen_seq = max(start_seq, self._msg_seq - 1)
         for retry_count in range(RETRY_COUNT):
-            # Snapshot the reference: the paho thread reassigns latest_data
-            # wholesale, and concurrent scans (patrol + ad-hoc) iterate the
-            # same record dicts — label a copy, never the shared original.
+            # Evaluate every frame since the last round, in order. _latest is
+            # the floor: a concurrent scan's window start may have cleared
+            # _frames, and then this round still sees the newest frame.
             seq, latest = self._latest
-            if seq != seen_seq and latest and 'records' in latest:
+            frames = [f for f in tuple(self._frames) if seen_seq < f[0] <= seq]
+            if seq > seen_seq and (not frames or frames[-1][0] != seq):
+                frames.append((seq, latest))
+            frames = [p for _, p in frames if p and 'records' in p]
+            for i, payload in enumerate(frames):
                 has_any_data = True
-                for data in latest['records']:
+                # Rows are saved for the hit frame or the round's last frame
+                # only (the hit ends the round), so the DB does not grow with
+                # the frame rate.
+                labelled = []
+                for data in payload['records']:
                     logger.debug("scan_data: %s", data)
                     is_valid = is_valid_scan(data, VALID_STATUS)
+                    # The paho thread and concurrent scans (patrol + ad-hoc)
+                    # share these record dicts — label a copy, never the original.
                     data = dict(data)
                     data['details'] = '量測正常' if is_valid else '無有效量測數値'
                     data['location_id'] = target_bed
                     data['bed_name'] = bed_name
-                    self._save_scan_data(task_id, data, retry_count, is_valid)
+                    labelled.append((data, is_valid))
                     last_record_processed = data
                     if is_valid and valid_data is None:
                         valid_data = data
+                if valid_data is not None or i == len(frames) - 1:
+                    for data, is_valid in labelled:
+                        self._save_scan_data(task_id, data, retry_count, is_valid)
                 if valid_data is not None:
                     return ScanOutcome(
                         task_id=task_id,

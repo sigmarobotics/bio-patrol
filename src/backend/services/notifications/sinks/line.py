@@ -8,6 +8,15 @@ from services.notifications.events import AnomalyEvent
 from services.notifications.recipients import RecipientResolver
 from settings.config import get_runtime_settings
 
+# BIZ-019 (F-56): LINE push is quota-metered per recipient, so only these
+# sources go to LINE by default. Per-bed BIO_SCAN_FAILURE stays on Telegram
+# (the task summary already lists failed beds). Override via settings
+# ``line_sources`` (list of Source values).
+DEFAULT_LINE_SOURCES = [
+    "task_summary", "robot_offline", "robot_recovered",
+    "shelf_drop", "schedule_not_run", "vitals_out_of_band",
+]
+
 
 class LineSink:
     def __init__(self, resolver: RecipientResolver):
@@ -19,6 +28,11 @@ class LineSink:
     async def send(self, event: AnomalyEvent) -> None:
         if event.demo:
             return  # IT-21: synthetic demo data never goes out on LINE
+        allowed = get_runtime_settings().get("line_sources")
+        if not isinstance(allowed, list):  # settings.json is merged unvalidated
+            allowed = DEFAULT_LINE_SOURCES
+        if event.source.value not in allowed:
+            return
         targets = await self._resolver.resolve(event, channel="line")
         if not targets:
             return

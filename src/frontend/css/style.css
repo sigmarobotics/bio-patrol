@@ -581,41 +581,6 @@ body::after {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   D-PAD
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-.d-pad {
-    display: grid;
-    grid-template-areas: ". up ." "left . right" ". down .";
-    grid-template-columns: 36px 36px 36px;
-    grid-template-rows: 36px 36px 36px;
-    gap: 2px;
-}
-
-.d-pad button {
-    background: var(--panel-mid);
-    border: 1px solid var(--border-subtle);
-    color: var(--text-secondary);
-    font-size: 14px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.15s ease;
-}
-
-.d-pad button:hover {
-    background: var(--amber-subtle);
-    color: var(--amber);
-    border-color: var(--border-active);
-}
-
-.d-pad .up { grid-area: up; }
-.d-pad .down { grid-area: down; }
-.d-pad .left { grid-area: left; }
-.d-pad .right { grid-area: right; }
-
-/* ═══════════════════════════════════════════════════════════════════════════
    FORM ELEMENTS
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -2023,11 +1988,6 @@ input[type="checkbox"]:checked::after {
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-.robot-modal-controls .d-pad { margin-top: 6px; }
-.modal-controls-hint {
-  font-size: 10px; color: var(--text-muted);
-  text-align: center;
 }
 .modal-controls-pose {
   font-family: var(--font-mono);

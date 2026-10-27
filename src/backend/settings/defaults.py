@@ -96,6 +96,14 @@ DEFAULT_SETTINGS = {
     "whiteboard_enabled": False,
     "whiteboard_site_id": "",
     "whiteboard_bed_id_map": {},
+    # F-53: 按鈕動作 speak（送護理站）用的貨架／目的地。空 shelf_id＝按鈕拒絕執行
+    # （不再寫死板榮的 S05）。板榮下次 pull 前必須先在它的 settings.json 寫入
+    # "ns_delivery_shelf_id": "S05"，否則該站的送護理站按鈕會變成拒絕。
+    "ns_delivery_shelf_id": "",
+    "ns_delivery_location_id": "NS",
+    # F-24: 機器人每日例行重開窗 "HH:MM-HH:MM"（可跨午夜），空＝不檢查。值是各站
+    # 實測（板榮約 02:50-03:20），新站先實測再填；排程儲存時據此檢查。
+    "robot_reboot_window": "",
 }
 
 DEFAULT_BEDS = {
