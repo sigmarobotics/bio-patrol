@@ -152,10 +152,12 @@ class TaskSchedulerService:
                     if fresh and fresh < job.next_run_time:
                         job.modify(next_run_time=fresh)
                 elif isinstance(job.trigger, DateTrigger) and job.next_run_time:
-                    # Never into the past: a retry armed under an already-correct
-                    # clock would otherwise be dropped as missed.
+                    # A retry armed under an already-correct clock (after the
+                    # step, or before a second correction) would land in the
+                    # past — leave it on its own time rather than fire it now.
                     shifted = job.next_run_time + timedelta(seconds=step)
-                    job.modify(next_run_time=max(shifted, now))
+                    if shifted >= now:
+                        job.modify(next_run_time=shifted)
         self.scheduler.wakeup()
 
     def _on_job_missed(self, event):

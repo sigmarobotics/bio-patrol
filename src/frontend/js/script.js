@@ -1761,11 +1761,15 @@ async function fetchMapFromRobot() {
   try {
     const res = await dataService.fetchMapFromRobot();
     const count = res.maps?.length || 0;
+    const kept = res.kept?.length || 0;
+    const failed = res.failed?.length || 0;
     await loadMapList();
-    if (count > 0) {
+    if (res.status === 'partial') {
+      alert(`Fetched ${count} map(s); ${kept} kept from the local copy, ${failed} unavailable (preview failed). Try again when the link is better.`);
+    } else if (count > 0) {
       alert(`Fetched ${count} map(s) from robot`);
     } else {
-      alert('No maps found on robot');
+      alert('No maps found on robot (local maps kept)');
     }
   } catch (e) {
     alert('Failed to fetch maps: ' + (e.response?.data?.detail || e.message || e));

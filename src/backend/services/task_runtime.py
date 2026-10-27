@@ -2075,6 +2075,10 @@ class TaskEngine:
         )
 
 
+class _AlreadyReported(Exception):
+    """run_task's finally already sent the ward a summary for this crash."""
+
+
 async def task_worker(robot_id: str):
     queue = task_queues[robot_id]
     engine = engines[robot_id]
@@ -2093,15 +2097,27 @@ async def task_worker(robot_id: str):
             # IN_PROGRESS and every later patrol would be refused as
             # "already running" until a container restart.
             logger.exception(f"Robot {robot_id} worker: task {task.task_id} crashed — marking FAILED")
+            # run_task's finally pops current_tasks after sending its own
+            # summary; if it never ran (crash before/around the try) nothing
+            # has told the ward yet. A task that reached IN_PROGRESS may have
+            # left the robot mid-route with the shelf docked.
+            started = task.status == TaskStatus.IN_PROGRESS
+            reported = started and current_tasks.get(robot_id) != task.task_id
             if task.status in (TaskStatus.QUEUED, TaskStatus.IN_PROGRESS):
                 task.status = TaskStatus.FAILED
             task.metadata = {**(task.metadata or {}), "error": f"{type(e).__name__}: {e}"}
             tasks_db[task.task_id] = task
             if current_tasks.get(robot_id) == task.task_id:
                 current_tasks.pop(robot_id, None)
-            # A crash before run_task's own try block skips its summary, and a
-            # log line alone is "nothing happened" to the ward (TODO-039).
+            if started and (task.metadata or {}).get("mode") != "cleanup":
+                try:
+                    await submit_cleanup_task(robot_id)
+                except Exception:
+                    logger.exception(f"Robot {robot_id} worker: failed to queue crash cleanup")
+            # A log line alone is "nothing happened" to the ward (TODO-039).
             try:
+                if reported:
+                    raise _AlreadyReported
                 await dispatcher.dispatch(AnomalyEvent(
                     severity=Severity.WARN,
                     source=Source.TASK_SUMMARY,
@@ -2112,6 +2128,8 @@ async def task_worker(robot_id: str):
                          "total_beds": 0, "success_beds": 0},
                     demo=(task.metadata or {}).get("mode") == "demo",
                 ))
+            except _AlreadyReported:
+                pass
             except Exception:
                 logger.exception("Failed to dispatch worker-crash anomaly")
         finally:

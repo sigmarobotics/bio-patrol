@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from settings.config import MAPS_DIR, get_runtime_settings, update_settings
-from utils.json_io import load_json, save_json
+from utils.json_io import load_json, save_bytes, save_json
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +25,14 @@ def _safe_map_id(robot_map_id: str) -> str:
 _MAP_ID_RE = re.compile(r"[A-Za-z0-9_.-]+")
 
 
+def _is_valid_map_id(map_id: str) -> bool:
+    """Map ids are filename stems under MAPS_DIR — anything that could step
+    outside it (path separators, '..') is invalid."""
+    return bool(_MAP_ID_RE.fullmatch(map_id)) and ".." not in map_id
+
+
 def _require_valid_map_id(map_id: str) -> None:
-    """Request map ids are filename stems under MAPS_DIR — refuse anything that
-    could step outside it (path separators, '..')."""
-    if not _MAP_ID_RE.fullmatch(map_id) or ".." in map_id:
+    if not _is_valid_map_id(map_id):
         raise HTTPException(status_code=400, detail=f"Invalid map id: {map_id!r}")
 
 
@@ -44,8 +48,8 @@ def _save_map_png_and_meta(map_pb, robot_map_id: str, locations: list, entry_nam
 
     safe_id = _safe_map_id(robot_map_id)
     os.makedirs(MAPS_DIR, exist_ok=True)
-    with open(os.path.join(MAPS_DIR, f"{safe_id}.png"), "wb") as f:
-        f.write(png_bytes)
+    if not save_bytes(os.path.join(MAPS_DIR, f"{safe_id}.png"), png_bytes):
+        return None
 
     origin = map_dict.get("origin", {})
     meta = {
@@ -249,6 +253,9 @@ async def get_active_map_info():
     map_id = cfg.get("active_map", "")
     if not map_id:
         raise HTTPException(status_code=404, detail="No active map set")
+    if not _is_valid_map_id(map_id):
+        # settings.json can be edited by hand or via the generic settings POST
+        raise HTTPException(status_code=404, detail=f"Map metadata not found: {map_id}")
 
     meta = load_json(os.path.join(MAPS_DIR, f"{map_id}.json"), None)
     if not meta:
@@ -269,6 +276,7 @@ async def get_active_map_info():
 @router.get("/maps/{map_id}/image")
 async def get_map_image(map_id: str):
     """Serve a saved map PNG."""
+    _require_valid_map_id(map_id)
     png_path = os.path.join(MAPS_DIR, f"{map_id}.png")
     try:
         with open(png_path, "rb") as f:

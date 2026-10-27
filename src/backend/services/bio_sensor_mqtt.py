@@ -147,7 +147,17 @@ class BioSensorMQTTClient:
         if not isinstance(data, dict):
             logger.warning(f"Dropping non-object MQTT message on {msg.topic}: {type(data).__name__}")
             return
-        self._ingest(data)
+        try:
+            self._ingest(data)
+        except Exception as e:
+            # paho's own handler would log one bare line per message (every
+            # ~2.5 s) with no traceback; keep one full traceback per minute.
+            now = time.monotonic()
+            if now - getattr(self, "_ingest_error_logged_at", 0.0) >= 60:
+                self._ingest_error_logged_at = now
+                logger.exception(f"Failed to ingest MQTT message on {msg.topic}")
+            else:
+                logger.warning(f"Failed to ingest MQTT message on {msg.topic}: {type(e).__name__}: {e}")
 
     def _ingest(self, payload: dict):
         # Readers snapshot (seq, payload) from one tuple so a message landing

@@ -58,3 +58,18 @@ def test_set_active_unknown_valid_id_is_404(patched):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(maps.set_active_map(maps.SetActiveMapRequest(map_id="nope")))
     assert exc.value.status_code == 404
+
+
+def test_image_route_rejects_traversal(tmp_path, monkeypatch):
+    monkeypatch.setattr(maps, "MAPS_DIR", str(tmp_path))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(maps.get_map_image("../config/settings"))
+    assert exc.value.status_code == 400
+
+
+def test_active_info_ignores_traversal_in_settings(tmp_path, monkeypatch):
+    monkeypatch.setattr(maps, "MAPS_DIR", str(tmp_path))
+    monkeypatch.setattr(maps, "get_runtime_settings", lambda: {"active_map": "../config/settings"})
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(maps.get_active_map_info())
+    assert exc.value.status_code == 404

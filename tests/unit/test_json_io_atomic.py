@@ -64,14 +64,32 @@ def test_failure_at_replace_keeps_original(tmp_path, monkeypatch):
 
 def test_new_file_follows_umask(tmp_path):
     """A new settings.json must get the mode open(..., 'w') would have given
-    it (0o666 & ~umask), not a hard-coded 0644 (code-review #54)."""
+    it (0o666 & ~umask), not a hard-coded 0644 (code-review #54). The umask
+    is read once at import so a save never toggles the process-wide value."""
     import os
-    from utils.json_io import save_json
 
     target = tmp_path / "new.json"
-    old = os.umask(0o077)
-    try:
-        assert save_json(str(target), {"a": 1})
-    finally:
-        os.umask(old)
-    assert os.stat(target).st_mode & 0o777 == 0o600
+    assert save_json(str(target), {"a": 1})
+    assert os.stat(target).st_mode & 0o777 == 0o666 & ~json_io._UMASK
+
+
+def test_save_bytes_round_trip_and_stale_tmp_sweep(tmp_path):
+    from utils.json_io import save_bytes
+
+    target = tmp_path / "map.png"
+    stale = tmp_path / ".map.png.abc.tmp"
+    stale.write_bytes(b"orphan")
+    assert save_bytes(str(target), b"\x89PNG")
+    assert target.read_bytes() == b"\x89PNG"
+    assert not stale.exists()
+    assert not list(tmp_path.glob(".map.png.*.tmp"))
+
+
+def test_save_follows_symlink(tmp_path):
+    real = tmp_path / "real.json"
+    real.write_text('{"a": 0}')
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    assert save_json(str(link), {"a": 1})
+    assert link.is_symlink()
+    assert json.loads(real.read_text()) == {"a": 1}
