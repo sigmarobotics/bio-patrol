@@ -73,3 +73,11 @@ def test_active_info_ignores_traversal_in_settings(tmp_path, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(maps.get_active_map_info())
     assert exc.value.status_code == 404
+
+
+def test_non_ascii_id_from_robot_is_accepted(patched, tmp_path):
+    """_safe_map_id only rewrites path separators, so a robot map id with
+    spaces or CJK must round-trip through the validator (code-review #54)."""
+    (tmp_path / "maps" / "マップ 1.json").write_text("{}")
+    res = asyncio.run(maps.set_active_map(maps.SetActiveMapRequest(map_id="マップ 1")))
+    assert res["active_map"] == "マップ 1"

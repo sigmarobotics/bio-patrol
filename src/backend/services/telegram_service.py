@@ -48,7 +48,7 @@ async def send_telegram_message(message: str, chat_id: str | None = None,
     relayed through the cloud hub's /api/notify instead of calling the
     Telegram API directly — the hub owns the bot token.
     """
-    effective_chat_id = chat_id
+    effective_chat_id = chat_id  # for the failure log if settings itself fails
     try:
         cfg = get_runtime_settings()
 

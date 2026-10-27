@@ -3,7 +3,6 @@ import asyncio
 import base64
 import logging
 import os
-import re
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Response
@@ -22,13 +21,12 @@ def _safe_map_id(robot_map_id: str) -> str:
     return robot_map_id.replace("/", "_").replace("\\", "_")
 
 
-_MAP_ID_RE = re.compile(r"[A-Za-z0-9_.-]+")
-
-
 def _is_valid_map_id(map_id: str) -> bool:
-    """Map ids are filename stems under MAPS_DIR — anything that could step
-    outside it (path separators, '..') is invalid."""
-    return bool(_MAP_ID_RE.fullmatch(map_id)) and ".." not in map_id
+    """Map ids are filename stems under MAPS_DIR, produced by _safe_map_id —
+    so reject exactly what it rewrites (path separators) plus '..', and
+    nothing more, or a robot map id with other characters would be saved by
+    the fetch and then refused everywhere else."""
+    return bool(map_id) and "/" not in map_id and "\\" not in map_id and ".." not in map_id
 
 
 def _require_valid_map_id(map_id: str) -> None:
