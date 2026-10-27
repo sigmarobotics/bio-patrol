@@ -2075,10 +2075,6 @@ class TaskEngine:
         )
 
 
-class _AlreadyReported(Exception):
-    """run_task's finally already sent the ward a summary for this crash."""
-
-
 async def task_worker(robot_id: str):
     queue = task_queues[robot_id]
     engine = engines[robot_id]
@@ -2116,20 +2112,17 @@ async def task_worker(robot_id: str):
                     logger.exception(f"Robot {robot_id} worker: failed to queue crash cleanup")
             # A log line alone is "nothing happened" to the ward (TODO-039).
             try:
-                if reported:
-                    raise _AlreadyReported
-                await dispatcher.dispatch(AnomalyEvent(
-                    severity=Severity.WARN,
-                    source=Source.TASK_SUMMARY,
-                    task_id=task.task_id,
-                    title="⚠️ 巡房程式異常中止",
-                    body=f"任務 {task.task_id} 因程式錯誤未能執行：{type(e).__name__}",
-                    raw={"error": f"{type(e).__name__}: {e}", "cancelled": False,
-                         "total_beds": 0, "success_beds": 0},
-                    demo=(task.metadata or {}).get("mode") == "demo",
-                ))
-            except _AlreadyReported:
-                pass
+                if not reported:
+                    await dispatcher.dispatch(AnomalyEvent(
+                        severity=Severity.WARN,
+                        source=Source.TASK_SUMMARY,
+                        task_id=task.task_id,
+                        title="⚠️ 巡房程式異常中止",
+                        body=f"任務 {task.task_id} 因程式錯誤未能執行：{type(e).__name__}",
+                        raw={"error": f"{type(e).__name__}: {e}", "cancelled": False,
+                             "total_beds": 0, "success_beds": 0},
+                        demo=(task.metadata or {}).get("mode") == "demo",
+                    ))
             except Exception:
                 logger.exception("Failed to dispatch worker-crash anomaly")
         finally:
