@@ -48,6 +48,7 @@ async def send_telegram_message(message: str, chat_id: str | None = None,
     relayed through the cloud hub's /api/notify instead of calling the
     Telegram API directly — the hub owns the bot token.
     """
+    effective_chat_id = chat_id
     try:
         cfg = get_runtime_settings()
 
@@ -89,4 +90,9 @@ async def send_telegram_message(message: str, chat_id: str | None = None,
         else:
             logger.warning(f"Telegram API returned {resp.status_code}: {resp.text}")
     except Exception as e:
-        logger.error(f"Failed to send Telegram message: {e}")
+        # httpx timeouts stringify to "" — name the type and recipient. No
+        # exc_info/URL: the direct-Telegram URL embeds the bot token (TODO-047).
+        logger.error(
+            "Failed to send Telegram message to %s: %s %s",
+            effective_chat_id or "<unset>", type(e).__name__, e,
+        )

@@ -1780,6 +1780,11 @@ class TaskEngine:
                 if mid:
                     return False
             shelves_res = await self.fleet.get_shelves(self.robot_id)
+            if not shelves_res.get("ok", True):
+                # kachaka_core returns a failed read as {"ok": False} instead
+                # of raising — route it through the same handler, so a lost
+                # link is "state unknown", never a drop.
+                raise RuntimeError(shelves_res.get("error") or "list_shelves failed")
             shelf = next(
                 (s for s in shelves_res.get("shelves", [])
                  if s.get("id") == shelf_id or s.get("name") == shelf_id),
@@ -1788,6 +1793,8 @@ class TaskEngine:
             if shelf is None:
                 return True
             locs_res = await self.fleet.get_locations(self.robot_id)
+            if not locs_res.get("ok", True):
+                raise RuntimeError(locs_res.get("error") or "list_locations failed")
             home = next(
                 (l for l in locs_res.get("locations", [])
                  if l.get("id") == shelf.get("home_location_id")),
@@ -2074,10 +2081,23 @@ async def task_worker(robot_id: str):
     logger.info(f"Task worker started for robot {robot_id}")
     while True:
         task = await queue.get()
-        logger.info(f"Robot {robot_id} worker: got task {task.task_id} from its queue.")
-        if task.status != TaskStatus.CANCELLED:
-            updated_task = await engine.run_task(task)
-            tasks_db[task.task_id] = updated_task
-        else:
-            logger.info(f"Robot {robot_id} worker: task {task.task_id} was already cancelled. Not running.")
-        queue.task_done()
+        try:
+            logger.info(f"Robot {robot_id} worker: got task {task.task_id} from its queue.")
+            if task.status != TaskStatus.CANCELLED:
+                updated_task = await engine.run_task(task)
+                tasks_db[task.task_id] = updated_task
+            else:
+                logger.info(f"Robot {robot_id} worker: task {task.task_id} was already cancelled. Not running.")
+        except Exception as e:
+            # A crash here must not end the worker: the task would stay
+            # IN_PROGRESS and every later patrol would be refused as
+            # "already running" until a container restart.
+            logger.exception(f"Robot {robot_id} worker: task {task.task_id} crashed — marking FAILED")
+            if task.status in (TaskStatus.QUEUED, TaskStatus.IN_PROGRESS):
+                task.status = TaskStatus.FAILED
+            task.metadata = {**(task.metadata or {}), "error": f"{type(e).__name__}: {e}"}
+            tasks_db[task.task_id] = task
+            if current_tasks.get(robot_id) == task.task_id:
+                current_tasks.pop(robot_id, None)
+        finally:
+            queue.task_done()

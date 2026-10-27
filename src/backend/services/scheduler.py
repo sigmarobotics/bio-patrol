@@ -37,6 +37,18 @@ def _clock_offset() -> float:
     """Wall clock minus monotonic clock; constant unless the wall clock steps."""
     return time.time() - time.monotonic()
 
+
+def parse_schedule_time(time_str) -> tuple[int, int]:
+    """"HH:MM" -> (hour, minute); ValueError if malformed or out of range.
+    CronTrigger raises on hour 24 / minute 60 itself, but only after
+    reload_from_json has already removed every patrol job."""
+    if not isinstance(time_str, str):
+        raise ValueError(f"time must be a string: {time_str!r}")
+    hour, minute = map(int, time_str.split(":"))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"time out of range: {time_str}")
+    return hour, minute
+
 # start_patrol 的拒絕理由是英文 detail（給 API 呼叫者看的），通報是給現場人員看的，
 # 所以已知的兩種拒絕各給一句繁中；認不出來的就原樣帶出 detail。
 # 感測器類拒絕（IT-23）的 detail 本來就是繁中，原樣帶出，並觸發排程重試。
@@ -130,7 +142,8 @@ class TaskSchedulerService:
         """Forward step: wakeup() lets APScheduler run the slots that went by
         within the misfire grace and drop the rest (_on_job_missed reports them).
         Backward step: cron jobs computed under the fast clock point too far
-        ahead, so pull each back to its next slot from now first."""
+        ahead, so pull each back to its next slot from now first; a pending
+        sensor retry (DateTrigger, "N 分鐘後重試") moves back by the step too."""
         if step < 0:
             now = datetime.now(self.scheduler.timezone)
             for job in self.scheduler.get_jobs():
@@ -138,6 +151,8 @@ class TaskSchedulerService:
                     fresh = job.trigger.get_next_fire_time(None, now)
                     if fresh and fresh < job.next_run_time:
                         job.modify(next_run_time=fresh)
+                elif isinstance(job.trigger, DateTrigger) and job.next_run_time:
+                    job.modify(next_run_time=job.next_run_time + timedelta(seconds=step))
         self.scheduler.wakeup()
 
     def _on_job_missed(self, event):
@@ -198,10 +213,10 @@ class TaskSchedulerService:
                 continue
 
             try:
-                hour, minute = map(int, time_str.split(":"))
+                hour, minute = parse_schedule_time(time_str)
             except (ValueError, TypeError):
                 # 啟用中卻建不出 job：UI 上看起來排好了，到點卻什麼都不會發生。
-                logger.warning(f"Invalid time format for schedule '{schedule_id}': {time_str}")
+                logger.error(f"Invalid time for schedule '{schedule_id}': {time_str}")
                 await notify_schedule_issue(
                     "⚠️ 排程設定有誤，不會執行",
                     f"排程「{schedule_id}」的時間格式無法解析：{time_str}",

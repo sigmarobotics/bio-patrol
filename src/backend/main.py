@@ -74,6 +74,14 @@ def _setup_logging():
             # Button pairing/press history: stdout-only leaves no trace of which
             # physical button fired an action once the container is replaced.
             "services.button_manager", "services.action_registry",
+            # Same reason for alert delivery, whiteboard publish, robot voice,
+            # register retry and zigbee/button storage: their failures must
+            # survive a container recreate. "services.notifications" and
+            # "services.integration" cover their child loggers by propagation.
+            "services.notifications", "services.line_service",
+            "services.integration", "services.announcer", "lifespan_state",
+            "services.zigbee_mqtt", "services.zigbee_snapshot",
+            "services.button_db", "routers.buttons",
         ],
         "task.log": [
             "kachaka", "routers.tasks", "routers.kachaka",
@@ -153,8 +161,8 @@ async def lifespan(app: FastAPI):
                 logger.info("Zigbee button bindings initialised")
             else:
                 logger.info("Zigbee bindings disabled (zigbee_enabled=false)")
-        except Exception as e:
-            logger.error(f"Failed to initialise zigbee button bindings: {e}")
+        except Exception:
+            logger.exception("Failed to initialise zigbee button bindings")
         # None (zigbee off) → the board falls back to a short-lived connection per publish.
         board_publisher.configure(zigbee_mqtt)
 
@@ -175,8 +183,14 @@ async def lifespan(app: FastAPI):
                 bio_sensor_client = get_bio_sensor_client()
                 bio_sensor_client.start()
                 logger.info("Bio-sensor MQTT client started successfully")
-            except Exception as e:
-                logger.error(f"Failed to start bio-sensor MQTT client: {e}")
+            except Exception:
+                # ssl/paho FileNotFoundError text carries no path — name the
+                # configured cert/key so a wrong TLS path is obvious.
+                logger.exception(
+                    "Failed to start bio-sensor MQTT client "
+                    f"(mqtt_tls_cert={cfg.get('mqtt_tls_cert')!r}, "
+                    f"mqtt_tls_key={cfg.get('mqtt_tls_key')!r})"
+                )
         else:
             logger.info("Bio-sensor MQTT client disabled (mqtt_enabled=false)")
 

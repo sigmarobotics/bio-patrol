@@ -50,6 +50,10 @@ class BioSensorMQTTClient:
             self.db_path = db_path
 
         self.client = mqtt.Client(protocol=mqtt.MQTTv31)
+        # paho re-raises callback exceptions by default, which kills the loop
+        # thread without on_disconnect (connected stays True). Log and go on.
+        self.client.suppress_exceptions = True
+        self.client.enable_logger(logger)
         if tls_cert and tls_key:
             self.client.tls_set(certfile=tls_cert, keyfile=tls_key, cert_reqs=ssl.CERT_NONE)
             self.client.tls_insecure_set(True)
@@ -134,7 +138,16 @@ class BioSensorMQTTClient:
     
     def _on_message(self, client, userdata, msg):
         # logger.info(f"Received message: {msg.topic} {msg.payload.decode()}")
-        self._ingest(json.loads(msg.payload.decode()))
+        try:
+            data = json.loads(msg.payload.decode())
+        except (UnicodeDecodeError, ValueError) as e:
+            logger.warning(f"Dropping unparseable MQTT message on {msg.topic} "
+                           f"({len(msg.payload)} bytes): {type(e).__name__}")
+            return
+        if not isinstance(data, dict):
+            logger.warning(f"Dropping non-object MQTT message on {msg.topic}: {type(data).__name__}")
+            return
+        self._ingest(data)
 
     def _ingest(self, payload: dict):
         # Readers snapshot (seq, payload) from one tuple so a message landing

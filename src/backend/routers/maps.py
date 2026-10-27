@@ -3,6 +3,7 @@ import asyncio
 import base64
 import logging
 import os
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Response
@@ -19,6 +20,16 @@ router = APIRouter(prefix="/api", tags=["Maps"])
 def _safe_map_id(robot_map_id: str) -> str:
     """Local map id for a robot map id — it is the on-disk filename stem."""
     return robot_map_id.replace("/", "_").replace("\\", "_")
+
+
+_MAP_ID_RE = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+def _require_valid_map_id(map_id: str) -> None:
+    """Request map ids are filename stems under MAPS_DIR — refuse anything that
+    could step outside it (path separators, '..')."""
+    if not _MAP_ID_RE.fullmatch(map_id) or ".." in map_id:
+        raise HTTPException(status_code=400, detail=f"Invalid map id: {map_id!r}")
 
 
 def _save_map_png_and_meta(map_pb, robot_map_id: str, locations: list, entry_name: str = "") -> dict | None:
@@ -76,6 +87,18 @@ async def list_maps():
     return {"active_map": active_map, "maps": maps}
 
 
+def _clear_local_maps(previous_active: str) -> None:
+    """Drop every local map file and unset the active map (restored afterwards
+    by the caller if the robot still has it)."""
+    if os.path.isdir(MAPS_DIR):
+        for fname in os.listdir(MAPS_DIR):
+            fpath = os.path.join(MAPS_DIR, fname)
+            if os.path.isfile(fpath):
+                os.remove(fpath)
+    if previous_active:
+        update_settings(active_map="")
+
+
 @router.post("/maps/fetch")
 async def fetch_maps_from_robot():
     """Re-fetch all maps from the robot via get_map_list + load_map_preview."""
@@ -94,23 +117,17 @@ async def fetch_maps_from_robot():
         fleet.get_locations("kachaka"),
         return_exceptions=True,
     )
-    if isinstance(map_res, Exception):
-        raise HTTPException(status_code=502, detail=f"Failed to get map list: {map_res}")
+    # kachaka_core's @with_retry reports failure as {"ok": False, ...} instead
+    # of raising — that is an unreachable robot too, not an empty map list.
+    if isinstance(map_res, Exception) or not map_res.get("ok", True):
+        err = map_res if isinstance(map_res, Exception) else map_res.get("error", "unknown error")
+        raise HTTPException(status_code=502, detail=f"Failed to get map list: {err}")
 
     maps = map_res.get("maps", [])
     current_map_id = map_res.get("current_map_id", "")
 
-    # 2. Clear stale local data so we don't surface maps deleted on the robot
-    if os.path.isdir(MAPS_DIR):
-        for fname in os.listdir(MAPS_DIR):
-            fpath = os.path.join(MAPS_DIR, fname)
-            if os.path.isfile(fpath):
-                os.remove(fpath)
-
-    if previous_active:
-        update_settings(active_map="")
-
     if not maps:
+        _clear_local_maps(previous_active)
         return {"status": "ok", "maps": [], "active_map": "", "message": "No maps on robot"}
 
     locations = []
@@ -129,12 +146,25 @@ async def fetch_maps_from_robot():
         *(asyncio.to_thread(client.load_map_preview, rid) for rid, _ in targets),
         return_exceptions=True,
     )
+    # Every preview must arrive before the old local maps are dropped — a
+    # timeout on a slow link used to leave the dashboard blank even though
+    # the robot answered (新民 2026-10-13).
+    failed = []
+    for (rid, _), preview in zip(targets, previews):
+        if isinstance(preview, Exception):
+            logger.warning("load_map_preview error for %s", rid, exc_info=preview)
+            failed.append(rid)
+    if failed:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to load map preview for {', '.join(failed)}; local maps kept",
+        )
+
+    # 4. Clear stale local data so we don't surface maps deleted on the robot
+    _clear_local_maps(previous_active)
 
     saved = []
     for (robot_map_id, entry_name), preview in zip(targets, previews):
-        if isinstance(preview, Exception):
-            logger.warning("load_map_preview error for %s", robot_map_id, exc_info=preview)
-            continue
         # Locations apply only to the current map (others render without overlays)
         locs = locations if robot_map_id == current_map_id else []
         meta = _save_map_png_and_meta(preview, robot_map_id, locs, entry_name)
@@ -149,7 +179,7 @@ async def fetch_maps_from_robot():
                 "height": meta["height"],
             })
 
-    # 4. Restore the previously active map if it came back in this fetch
+    # 5. Restore the previously active map if it came back in this fetch
     active_map = ""
     if previous_active and any(m["id"] == previous_active for m in saved):
         update_settings(active_map=previous_active)
@@ -180,6 +210,7 @@ async def switch_map(req: SwitchMapRequest):
     """Switch the robot to a different map and set it as the dashboard's active map."""
     from dependencies import get_fleet
 
+    _require_valid_map_id(req.map_id)
     meta = load_json(os.path.join(MAPS_DIR, f"{req.map_id}.json"), None)
     if not meta:
         raise HTTPException(status_code=404, detail=f"Map '{req.map_id}' not found")
@@ -209,7 +240,9 @@ class SetActiveMapRequest(BaseModel):
 @router.post("/maps/active")
 async def set_active_map(req: SetActiveMapRequest):
     """Set active map for dashboard display only (no robot switch)."""
-    if load_json(os.path.join(MAPS_DIR, f"{req.map_id}.json"), None) is None:
+    _require_valid_map_id(req.map_id)
+    # load_json(path, None) returns {} for a missing file, never None.
+    if not os.path.isfile(os.path.join(MAPS_DIR, f"{req.map_id}.json")):
         raise HTTPException(status_code=404, detail=f"Map '{req.map_id}' not found")
     update_settings(active_map=req.map_id)
     return {"status": "ok", "active_map": req.map_id}

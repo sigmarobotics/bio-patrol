@@ -160,6 +160,11 @@ async function fetchRobotStatus() {
 
     // Battery — kachaka_core queries.get_battery returns {ok, percentage, power_status}
     const battery = batteryRes?.percentage ?? batteryRes?.remaining_percentage;
+    // with_retry gives up with HTTP 200 + {ok:false}; treat it as unreachable.
+    if (batteryRes?.ok === false || poseRes?.ok === false
+        || battery === undefined || poseRes?.x === undefined) {
+      throw new Error('robot unreachable');
+    }
     if (battery !== undefined) {
       robotData.battery = battery;
       const el = document.getElementById('battery-value');
@@ -1491,6 +1496,8 @@ function switchSettingsSubTab(name) {
   });
 }
 
+let settingsLoaded = false;
+
 async function loadSettings() {
   try {
     const settings = await dataService.getSettings();
@@ -1510,6 +1517,7 @@ async function loadSettings() {
       lineList.innerHTML =
         `<p class="test-note">已選擇 ${savedLineIds.length} 個通報對象——按「載入群組」顯示名稱。</p>`;
     }
+    settingsLoaded = true;
   } catch (e) {
     console.error('Failed to load settings:', e);
   }
@@ -1565,6 +1573,11 @@ async function uploadTlsCerts() {
 }
 
 async function saveSettings() {
+  // 設定沒載入成功就存，空白欄位會把憑證清掉、數值存成 0。
+  if (!settingsLoaded) {
+    alert('設定尚未載入成功，無法儲存。請重新載入頁面後再試。');
+    return;
+  }
   const data = {};
   const halfEdited = [];
   SETTINGS_MAP.forEach(({ id, key, type }) => {

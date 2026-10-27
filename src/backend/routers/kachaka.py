@@ -2,7 +2,7 @@ from fastapi import APIRouter, Response, HTTPException, Depends, File, UploadFil
 from pathlib import Path
 from typing import Optional
 from pydantic import BaseModel
-from google.protobuf.json_format import MessageToJson
+from google.protobuf.json_format import MessageToDict, MessageToJson
 from services.fleet_api import FleetAPI
 from dependencies import get_fleet
 
@@ -265,7 +265,14 @@ async def return_shelf(robot_id: str, req: ReturnShelfRequest, fleet: FleetAPI =
 async def reset_shelf_pose(robot_id: str, req: ResetShelfPoseRequest, fleet: FleetAPI = Depends(get_fleet)):
     """Reset shelf pose"""
     client = fleet.get_raw_client(robot_id)
-    return await asyncio.to_thread(client.reset_shelf_pose, req.shelf_id)
+    result = await asyncio.to_thread(client.reset_shelf_pose, req.shelf_id)
+    # The raw SDK returns a pb2.Result, which jsonable_encoder cannot serialise
+    # (HTTP 500 after a successful reset). Always print success/error_code so a
+    # failed reset (success=False, error_code=0) is not an empty {}.
+    return MessageToDict(
+        result, preserving_proto_field_name=True,
+        always_print_fields_with_no_presence=True,
+    )
 
 @router.post("/{robot_id}/command/return_home")
 async def return_home(robot_id: str, fleet: FleetAPI = Depends(get_fleet)):
