@@ -614,7 +614,7 @@ async def resume_latest_shelf_drop() -> dict:
     button — caller never has a task_id."""
     candidates = [
         t for t in tasks_db.values()
-        if (t.metadata or {}).get("shelf_drop") and t.status != TaskStatus.DONE
+        if (t.metadata or {}).get("shelf_drop") and t.status == TaskStatus.SHELF_DROPPED
     ]
     if not candidates:
         raise HTTPException(status_code=400, detail="No shelf-dropped task to resume")

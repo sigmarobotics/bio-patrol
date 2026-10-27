@@ -1437,7 +1437,8 @@ class TaskEngine:
             meta = task.metadata or {}
             # A FAILED run that left the shelf on the robot (final return_shelf,
             # BIZ-019 F-03) is parked the same way.
-            if ((cancelled or meta.get("cleanup_shelf_id"))
+            if ((cancelled or (task.status == TaskStatus.FAILED
+                               and meta.get("return_shelf_failed")))
                     and meta.get("mode") != "cleanup"):
                 try:
                     cleanup_kwargs = {}
@@ -1752,7 +1753,12 @@ class TaskEngine:
         for i in range(RETURN_SHELF_SETTLE_POLLS):
             try:
                 cs = await self.fleet.get_command_state(self.robot_id)
-            except Exception:
+            except Exception as e:
+                if is_connection_error(e):
+                    # Link lost mid-wait: shelf state is unknown, not latched
+                    # (2026-08-10 lesson); the offline path owns the alert.
+                    self._disconnect_suspected = True
+                    return
                 break
             if not (cs or {}).get("ok") or not cs.get("is_running"):
                 break
@@ -1761,7 +1767,14 @@ class TaskEngine:
         try:
             res = await self.fleet.get_moving_shelf(self.robot_id)
         except Exception as e:
+            if is_connection_error(e):
+                self._disconnect_suspected = True
+                return
             res = {"ok": False, "error": str(e)}
+        if not (res or {}).get("ok") and is_connection_error(
+                RuntimeError(str((res or {}).get("error", "")))):
+            self._disconnect_suspected = True
+            return
         if (res or {}).get("ok") and not res.get("shelf_id"):
             return  # released after all — the step stays a plain failure
         if task.status != TaskStatus.IN_PROGRESS:

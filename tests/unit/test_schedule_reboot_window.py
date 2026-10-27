@@ -115,3 +115,27 @@ def test_empty_or_malformed_window_is_off(env):
 
     env["cfg"].pop("robot_reboot_window")
     assert _save(_entry("early", "02:30"))["warnings"] == []
+
+
+def test_unchanged_entry_is_not_warned_again(env):
+    """The page POSTs the whole list; an unrelated toggle must not re-send the
+    same warning to the ward (code-review #56)."""
+    first = _save(_entry("early", "02:30"))
+    assert len(first["warnings"]) == 1
+    env["events"].clear()
+
+    again = _save(_entry("early", "02:30"), _entry("late", "23:30", enabled=False))
+
+    assert again["warnings"] == []
+    assert env["events"] == []
+
+    retimed = _save(_entry("early", "02:40"))
+    assert len(retimed["warnings"]) == 1
+
+
+def test_estimate_failure_does_not_fail_the_save(env, monkeypatch):
+    monkeypatch.setattr(schedule_router, "_reboot_window_warnings",
+                        lambda body, before=None: (_ for _ in ()).throw(RuntimeError("bad row")))
+    res = _save(_entry("early", "02:30"))
+    assert res["status"] == "ok"
+    assert res["warnings"] == []

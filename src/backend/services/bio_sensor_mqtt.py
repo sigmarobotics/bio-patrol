@@ -298,7 +298,9 @@ class BioSensorMQTTClient:
         # reason: a previous bed's frames must never be filed under this bed.
         start_seq = seen_seq = self._msg_seq
         self.latest_data = None
-        self._frames.clear()
+        # One round is WAIT_TIME long at a ~2.5 s pad cadence: keep every
+        # frame of a round plus margin, whatever the site's wait time.
+        self._frames = deque(maxlen=max(16, int(WAIT_TIME) // 2 + 8))
         await asyncio.sleep(INT_WAIT_TIME)
         # The initial wait is blind (pole sway + the pad's 60 s moving
         # average): the first round sees only the newest frame, never the

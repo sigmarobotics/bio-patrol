@@ -125,3 +125,25 @@ def test_demo_run_is_parked_too(dispatched, queued):
 
     assert task.status == TaskStatus.FAILED
     assert queued == [{"force_shelf_id": "S04"}]
+
+
+def test_link_lost_during_settle_is_unknown_not_stranded(dispatched, queued):
+    """Connection loss inside the settle window = shelf state unknown
+    (2026-08-10 lesson): no stranded WARN, no cleanup against an unreachable
+    robot (code-review #56)."""
+    fleet = _fleet(moving_shelf="S04")
+    fleet.get_command_state = AsyncMock(side_effect=RuntimeError("UNAVAILABLE: failed to connect"))
+    task = _run(fleet)
+
+    assert task.metadata.get("return_shelf_failed") is None
+    assert queued == []
+    assert not any(e.title == "⚠️ 貨架歸位失敗，仍在機器人身上" for e in dispatched)
+
+
+def test_moving_shelf_ok_false_connection_error_is_unknown(dispatched, queued):
+    fleet = _fleet(moving_shelf="S04")
+    fleet.get_moving_shelf = AsyncMock(return_value={"ok": False, "error": "UNAVAILABLE: timed out"})
+    task = _run(fleet)
+
+    assert task.metadata.get("return_shelf_failed") is None
+    assert queued == []

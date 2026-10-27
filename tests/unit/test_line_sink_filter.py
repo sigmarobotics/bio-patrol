@@ -93,3 +93,21 @@ def test_429_logs_error_and_notifies_telegram_once_per_month(_reset_quota_marker
 def test_429_telegram_failure_never_raises(_reset_quota_marker):
     tg = AsyncMock(side_effect=RuntimeError("tg down"))
     assert _post_429("2026-10", tg) is False
+
+
+def test_quota_notice_retries_until_delivered(_reset_quota_marker):
+    """A LINE-only site (Telegram off → None) or a failed send must not burn
+    the month's one notice (code-review #56)."""
+    tg_off = AsyncMock(return_value=None)
+    _post_429("2026-11", tg_off)
+    assert line_service._quota_notice_month is None
+
+    tg_fail = AsyncMock(return_value={"ok": False, "status": 400, "description": "chat not found"})
+    _post_429("2026-11", tg_fail)
+    assert line_service._quota_notice_month is None
+
+    tg_ok = AsyncMock(return_value={"ok": True, "status": 200, "description": "OK"})
+    _post_429("2026-11", tg_ok)
+    assert line_service._quota_notice_month == "2026-11"
+    _post_429("2026-11", tg_ok)
+    assert tg_ok.await_count == 1

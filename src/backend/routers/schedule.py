@@ -61,7 +61,7 @@ MOVE_SECONDS_PER_BED = 60
 DAY_MINUTES = 24 * 60
 
 
-def _reboot_window_warnings(body: dict) -> list[str]:
+def _reboot_window_warnings(body: dict, before: dict | None = None) -> list[str]:
     """F-24: a run that crosses the site's daily robot reboot (板榮 03:0x)
     strands the shelf mid-corridor and fires a SHELF DROP. Estimate each
     enabled entry's span — enabled beds × (initial wait + full retry loop +
@@ -94,8 +94,15 @@ def _reboot_window_warnings(body: dict) -> list[str]:
     )
     run_minutes = max(1, -(-beds * per_bed_s // 60))  # ceil; a start inside still counts
 
+    # Only entries that this save turned on or re-timed: the page POSTs the
+    # whole list, so an unrelated toggle must not re-send the same warning to
+    # the ward every time (same diff rule as _notify_turned_off).
+    prior = _enabled_entries(before) if before is not None else {}
     warnings = []
     for schedule_id, entry in _enabled_entries(body).items():
+        old = prior.get(schedule_id)
+        if old is not None and old.get("time") == entry.get("time"):
+            continue
         try:
             h, m = parse_schedule_time(entry.get("time"))
         except ValueError:
@@ -144,7 +151,13 @@ async def save_schedule(body: dict):
     save_json(SCHEDULE_FILE, body)
     await _reload_scheduler()
     await _notify_turned_off(before, body)
-    warnings = _reboot_window_warnings(body)
+    try:
+        warnings = _reboot_window_warnings(body, before)
+    except Exception:
+        # The entry is already saved and live; a bad patrol.json row or a
+        # hand-edited setting must not turn that into a 500 (別讓通報把存檔弄成 500).
+        logger.exception("Reboot-window estimate failed; schedule saved without the check")
+        warnings = []
     if warnings:
         from services.scheduler import notify_schedule_issue
         await notify_schedule_issue(

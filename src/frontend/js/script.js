@@ -666,9 +666,18 @@ async function cancelPatrol() {
   if (active) {
     try {
       await dataService.cancelTask(active.task_id);
-      alert(active.status === 'in_progress'
-        ? '已停止巡房（機器人會自動歸還棚車並回充電座）'
-        : '已取消排隊中的巡房');
+      const mode = active.metadata?.mode;
+      if (active.status !== 'in_progress') {
+        alert('已取消排隊中的任務');
+      } else if (mode === 'cleanup') {
+        // Cancelling the cleanup itself queues no second cleanup: the robot
+        // stops where it is, shelf still docked.
+        alert('已停止收工任務：機器人會停在原地（棚車仍在身上），請到場處理');
+      } else if (mode === 'delivery') {
+        alert('已取消送貨任務（機器人會歸還棚車並回充電座）');
+      } else {
+        alert('已停止巡房（機器人會自動歸還棚車並回充電座）');
+      }
     } catch (e) {
       alert('停止巡房失敗: ' + (e.response?.data?.detail || e.message || e));
     }

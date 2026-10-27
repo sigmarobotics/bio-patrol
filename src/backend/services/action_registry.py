@@ -124,13 +124,12 @@ async def _action_shelf_to_ns(params: dict) -> dict:
         StepAction, StepStatus, Task, TaskStatus, TaskStep, generate_task_id,
     )
     from services.task_runtime import submit_task, tasks_db
+    from routers.patrol import _find_live_run
     # Same one-robot/one-shelf dedup as start_patrol: any live patrol-family
     # task means this press is a duplicate or a conflict — refuse, don't queue.
-    for existing in tasks_db.values():
-        if existing.status not in (TaskStatus.QUEUED, TaskStatus.IN_PROGRESS):
-            continue
-        if (existing.metadata or {}).get("mode"):
-            return {"ok": False, "error": f"task {existing.task_id} already running"}
+    existing = _find_live_run()
+    if existing is not None:
+        return {"ok": False, "error": f"task {existing.task_id} already running"}
     steps = [
         TaskStep(step_id="reset_shelf", action=StepAction.RESET_SHELF_POSE.value,
                  params={"shelf_id": shelf_id}, status=StepStatus.PENDING),

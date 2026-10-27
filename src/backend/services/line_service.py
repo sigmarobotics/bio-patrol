@@ -47,9 +47,14 @@ async def _notify_quota_exhausted() -> None:
         month = get_now().strftime("%Y-%m")
         if _quota_notice_month == month:
             return
-        _quota_notice_month = month
         from services.telegram_service import send_telegram_message
-        await send_telegram_message(_QUOTA_NOTICE)
+        result = await send_telegram_message(_QUOTA_NOTICE)
+        # Only a delivered notice counts; a LINE-only site (Telegram off) or a
+        # failed send must get another chance on the next 429.
+        if result and result.get("ok"):
+            _quota_notice_month = month
+        else:
+            logger.error(f"LINE quota notice not delivered to Telegram: {result}")
     except Exception as e:
         logger.error(f"LINE quota notice to Telegram failed: {e}")
 

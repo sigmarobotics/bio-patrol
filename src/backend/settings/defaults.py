@@ -48,6 +48,12 @@ DEFAULT_SETTINGS = {
     "enable_line": False,
     "line_channel_access_token": "",
     "line_group_ids": [],
+    # BIZ-019 F-56: which anomaly sources go to the 院方 LINE group (per-bed
+    # bio_scan_failure stays on Telegram; the summary already lists the beds).
+    "line_sources": [
+        "task_summary", "robot_offline", "robot_recovered",
+        "shelf_drop", "schedule_not_run", "vitals_out_of_band",
+    ],
     "line_webhook_url": "",
     "line_webhook_api_key": "",
     "gemini_api_key": "",
