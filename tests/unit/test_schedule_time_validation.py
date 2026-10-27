@@ -63,3 +63,21 @@ def test_save_rejects_out_of_range_time(events, monkeypatch, tmp_path):
     assert "22:60" in exc.value.detail
     assert path.read_text(encoding="utf-8") == original
     assert reloads == [] and events == []
+
+
+def test_save_ignores_bad_time_on_disabled_entry(events, monkeypatch, tmp_path):
+    """A disabled legacy entry with a bad time never becomes a job, so it must
+    not block saving changes to the rest of the list (code-review #54)."""
+    path = tmp_path / "schedule.json"
+    path.write_text(json.dumps({"schedules": [dict(GOOD)]}), encoding="utf-8")
+    monkeypatch.setattr(schedule_router, "SCHEDULE_FILE", str(path))
+
+    async def _reload():
+        pass
+
+    monkeypatch.setattr(scheduler_service, "reload_from_json", _reload)
+
+    body = {"schedules": [dict(GOOD), {"id": "legacy", "enabled": False, "time": "24:00", "type": "daily"}]}
+    asyncio.run(schedule_router.save_schedule(body))
+
+    assert json.loads(path.read_text(encoding="utf-8")) == body

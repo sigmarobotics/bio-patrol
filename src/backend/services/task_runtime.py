@@ -2099,5 +2099,20 @@ async def task_worker(robot_id: str):
             tasks_db[task.task_id] = task
             if current_tasks.get(robot_id) == task.task_id:
                 current_tasks.pop(robot_id, None)
+            # A crash before run_task's own try block skips its summary, and a
+            # log line alone is "nothing happened" to the ward (TODO-039).
+            try:
+                await dispatcher.dispatch(AnomalyEvent(
+                    severity=Severity.WARN,
+                    source=Source.TASK_SUMMARY,
+                    task_id=task.task_id,
+                    title="⚠️ 巡房程式異常中止",
+                    body=f"任務 {task.task_id} 因程式錯誤未能執行：{type(e).__name__}",
+                    raw={"error": f"{type(e).__name__}: {e}", "cancelled": False,
+                         "total_beds": 0, "success_beds": 0},
+                    demo=(task.metadata or {}).get("mode") == "demo",
+                ))
+            except Exception:
+                logger.exception("Failed to dispatch worker-crash anomaly")
         finally:
             queue.task_done()

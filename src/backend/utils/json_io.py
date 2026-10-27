@@ -43,11 +43,14 @@ def save_json(filepath: str, data):
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
-        # mkstemp creates 0600; keep the target's mode (or a plain 0644).
+        # mkstemp creates 0600; keep the target's mode, or for a new file the
+        # mode open(..., "w") would have given it under the current umask.
         try:
             mode = os.stat(filepath).st_mode & 0o777
         except FileNotFoundError:
-            mode = 0o644
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
         os.chmod(tmp_path, mode)
         os.replace(tmp_path, filepath)
         tmp_path = None

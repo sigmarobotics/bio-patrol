@@ -165,22 +165,18 @@ async function fetchRobotStatus() {
         || battery === undefined || poseRes?.x === undefined) {
       throw new Error('robot unreachable');
     }
-    if (battery !== undefined) {
-      robotData.battery = battery;
-      const el = document.getElementById('battery-value');
-      if (el) el.textContent = `${Math.round(battery)}%`;
-    }
+    robotData.battery = battery;
+    const el = document.getElementById('battery-value');
+    if (el) el.textContent = `${Math.round(battery)}%`;
 
     // Pose
     const pose = poseRes;
-    if (pose && pose.x !== undefined) {
-      robotData.pose = pose;
-      const poseText = `X: ${pose.x.toFixed(2)} Y: ${pose.y.toFixed(2)} θ: ${(pose.theta || 0).toFixed(2)}`;
-      const poseEl = document.getElementById('pose-display');
-      if (poseEl) poseEl.textContent = poseText;
-      const modalPose = document.getElementById('modal-controls-pose');
-      if (modalPose) modalPose.textContent = poseText;
-    }
+    robotData.pose = pose;
+    const poseText = `X: ${pose.x.toFixed(2)} Y: ${pose.y.toFixed(2)} θ: ${(pose.theta || 0).toFixed(2)}`;
+    const poseEl = document.getElementById('pose-display');
+    if (poseEl) poseEl.textContent = poseText;
+    const modalPose = document.getElementById('modal-controls-pose');
+    if (modalPose) modalPose.textContent = poseText;
 
     // Update connection indicator
     robotData.status = 'online';

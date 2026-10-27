@@ -73,7 +73,9 @@ async def save_schedule(body: dict):
 
     entries = body.get("schedules")
     for entry in entries if isinstance(entries, list) else []:
-        if isinstance(entry, dict) and entry.get("time"):
+        # Disabled entries never become jobs (see _enabled_entries), so a
+        # legacy bad time on one must not block saving the rest of the list.
+        if isinstance(entry, dict) and entry.get("enabled") and entry.get("time"):
             try:
                 parse_schedule_time(entry["time"])
             except ValueError:

@@ -87,18 +87,6 @@ async def list_maps():
     return {"active_map": active_map, "maps": maps}
 
 
-def _clear_local_maps(previous_active: str) -> None:
-    """Drop every local map file and unset the active map (restored afterwards
-    by the caller if the robot still has it)."""
-    if os.path.isdir(MAPS_DIR):
-        for fname in os.listdir(MAPS_DIR):
-            fpath = os.path.join(MAPS_DIR, fname)
-            if os.path.isfile(fpath):
-                os.remove(fpath)
-    if previous_active:
-        update_settings(active_map="")
-
-
 @router.post("/maps/fetch")
 async def fetch_maps_from_robot():
     """Re-fetch all maps from the robot via get_map_list + load_map_preview."""
@@ -127,8 +115,12 @@ async def fetch_maps_from_robot():
     current_map_id = map_res.get("current_map_id", "")
 
     if not maps:
-        _clear_local_maps(previous_active)
-        return {"status": "ok", "maps": [], "active_map": "", "message": "No maps on robot"}
+        # A reachable robot answering ok:True with 0 entries is still
+        # initialising its map store, not asking us to delete: local maps and
+        # the active map stay until a later fetch replaces them.
+        logger.warning("Robot reports no maps; local maps kept")
+        return {"status": "ok", "maps": [], "active_map": previous_active,
+                "message": "No maps on robot; local maps kept"}
 
     locations = []
     if not isinstance(loc_res, Exception) and loc_res.get("ok"):
@@ -146,28 +138,21 @@ async def fetch_maps_from_robot():
         *(asyncio.to_thread(client.load_map_preview, rid) for rid, _ in targets),
         return_exceptions=True,
     )
-    # Every preview must arrive before the old local maps are dropped — a
-    # timeout on a slow link used to leave the dashboard blank even though
-    # the robot answered (新民 2026-10-13).
-    failed = []
-    for (rid, _), preview in zip(targets, previews):
-        if isinstance(preview, Exception):
-            logger.warning("load_map_preview error for %s", rid, exc_info=preview)
-            failed.append(rid)
-    if failed:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to load map preview for {', '.join(failed)}; local maps kept",
-        )
-
-    # 4. Clear stale local data so we don't surface maps deleted on the robot
-    _clear_local_maps(previous_active)
-
-    saved = []
+    # 4. Per-map upsert. A map that previewed is overwritten in place; one
+    #    whose preview failed (timeout on a slow link — 新民 2026-10-13 — or an
+    #    empty PNG) keeps its local copy; only maps the robot no longer has are
+    #    removed. One slow preview therefore never blanks the dashboard and
+    #    never blocks the other maps from refreshing.
+    saved, kept, failed = [], [], []
     for (robot_map_id, entry_name), preview in zip(targets, previews):
-        # Locations apply only to the current map (others render without overlays)
-        locs = locations if robot_map_id == current_map_id else []
-        meta = _save_map_png_and_meta(preview, robot_map_id, locs, entry_name)
+        safe_id = _safe_map_id(robot_map_id)
+        meta = None
+        if isinstance(preview, Exception):
+            logger.warning("load_map_preview error for %s", robot_map_id, exc_info=preview)
+        else:
+            # Locations apply only to the current map (others render without overlays)
+            locs = locations if robot_map_id == current_map_id else []
+            meta = _save_map_png_and_meta(preview, robot_map_id, locs, entry_name)
         if meta:
             saved.append({
                 "id": meta["id"],
@@ -178,25 +163,34 @@ async def fetch_maps_from_robot():
                 "width": meta["width"],
                 "height": meta["height"],
             })
-
-    # 5. Restore the previously active map if it came back in this fetch
-    active_map = ""
-    if previous_active and any(m["id"] == previous_active for m in saved):
-        update_settings(active_map=previous_active)
-        active_map = previous_active
-    elif previous_active:
-        if any(_safe_map_id(rid) == previous_active for rid, _ in targets):
-            logger.warning(
-                "Active map %s is still on the robot but its preview failed — cleared",
-                previous_active,
-            )
+        elif os.path.isfile(os.path.join(MAPS_DIR, f"{safe_id}.json")):
+            logger.warning("Preview for map %s unavailable — keeping the local copy", robot_map_id)
+            kept.append(safe_id)
         else:
-            logger.info("Previously active map %s no longer on robot — cleared", previous_active)
+            logger.warning("Preview for map %s unavailable and no local copy", robot_map_id)
+            failed.append(safe_id)
+
+    wanted = {_safe_map_id(rid) for rid, _ in targets}
+    if os.path.isdir(MAPS_DIR):
+        for fname in os.listdir(MAPS_DIR):
+            fpath = os.path.join(MAPS_DIR, fname)
+            if os.path.isfile(fpath) and os.path.splitext(fname)[0] not in wanted:
+                os.remove(fpath)
+
+    # 5. The active map survives when it is still on the robot (fresh or kept);
+    #    settings.json is written at most once.
+    present = {m["id"] for m in saved} | set(kept)
+    active_map = previous_active if previous_active in present else ""
+    if previous_active and not active_map:
+        update_settings(active_map="")
+        logger.info("Previously active map %s no longer on robot — cleared", previous_active)
 
     return {
-        "status": "ok",
+        "status": "partial" if (kept or failed) else "ok",
         "current_robot_map": current_map_id,
         "maps": saved,
+        "kept": kept,
+        "failed": failed,
         "active_map": active_map,
     }
 

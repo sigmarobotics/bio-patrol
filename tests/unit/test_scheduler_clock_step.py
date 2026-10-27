@@ -105,3 +105,24 @@ def test_backward_step_pulls_pending_sensor_retry_back():
 
     fresh, now = asyncio.run(run())
     assert fresh == now + timedelta(minutes=10)
+
+
+def test_backward_step_never_moves_sensor_retry_into_the_past():
+    # Retry armed under an already-correct clock, then a second backward step
+    # larger than the remaining wait: clamp to now so APScheduler cannot drop
+    # it as missed (code-review #54).
+    async def run():
+        svc = sched.TaskSchedulerService()
+        svc.scheduler.start()
+        now = datetime.now(svc.scheduler.timezone).replace(microsecond=0)
+        svc.scheduler.add_job(
+            _noop, DateTrigger(run_date=now + timedelta(minutes=10)),
+            id="patrol_night_retry", misfire_grace_time=sched.MISFIRE_GRACE_SECONDS)
+        await asyncio.sleep(0.05)
+        svc._realign_after_clock_step(-1200.0)
+        fresh = svc.scheduler.get_job("patrol_night_retry").next_run_time
+        svc.scheduler.shutdown(wait=False)
+        return fresh, now
+
+    fresh, now = asyncio.run(run())
+    assert fresh is not None and fresh >= now

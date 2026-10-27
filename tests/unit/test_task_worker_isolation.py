@@ -61,3 +61,40 @@ def test_crashing_task_fails_and_worker_runs_the_next(monkeypatch):
     assert nxt.status == TaskStatus.DONE
     assert task_runtime.tasks_db["next"].status == TaskStatus.DONE
     assert ROBOT not in task_runtime.current_tasks
+
+
+def test_crash_dispatches_a_ward_notification(monkeypatch):
+    """A crash before run_task's own try block skips its summary; the worker
+    must still tell the ward instead of only logging (code-review #54)."""
+    sent = []
+
+    async def run_task(task):
+        raise RuntimeError("boom before try")
+
+    async def dispatch(event):
+        sent.append(event)
+
+    engine = MagicMock()
+    engine.run_task = run_task
+    monkeypatch.setattr(task_runtime.dispatcher, "dispatch", dispatch)
+
+    async def go():
+        queue = asyncio.Queue()
+        monkeypatch.setitem(task_runtime.task_queues, ROBOT, queue)
+        monkeypatch.setitem(task_runtime.engines, ROBOT, engine)
+        monkeypatch.setattr(task_runtime, "tasks_db", {})
+        monkeypatch.setattr(task_runtime, "current_tasks", {})
+        await queue.put(Task(task_id="boom", robot_id=ROBOT, steps=[]))
+        worker = asyncio.create_task(task_runtime.task_worker(ROBOT))
+        await asyncio.wait_for(queue.join(), timeout=2)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(go())
+
+    assert len(sent) == 1
+    assert sent[0].task_id == "boom"
+    assert "RuntimeError" in sent[0].body
