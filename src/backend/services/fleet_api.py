@@ -40,6 +40,16 @@ from services.sounds import sound_key, sound_path
 logger = logging.getLogger(__name__)
 
 
+def _listify_errors(res: dict) -> dict:
+    """kachaka_core get_errors/get_status hand back the protobuf
+    ``error_codes`` RepeatedScalarContainer as-is whenever an error is active;
+    FastAPI's jsonable_encoder cannot serialise it (HTTP 500 exactly when the
+    robot has an error — 新營 traceback). A plain list of ints can."""
+    if "errors" in res:
+        res["errors"] = list(res["errors"])
+    return res
+
+
 class RobotNotRegistered(ValueError):
     """Raised by FleetAPI when a robot_id has no registered slot.
 
@@ -622,12 +632,12 @@ class FleetAPI:
     async def get_errors(self, robot_id: str) -> dict:
         """Current active errors on the robot."""
         slot = self._get_slot(robot_id)
-        return await asyncio.to_thread(slot.queries.get_errors)
+        return _listify_errors(await asyncio.to_thread(slot.queries.get_errors))
 
     async def get_status(self, robot_id: str) -> dict:
         """Full snapshot: pose, battery, command state, errors."""
         slot = self._get_slot(robot_id)
-        return await asyncio.to_thread(slot.queries.get_status)
+        return _listify_errors(await asyncio.to_thread(slot.queries.get_status))
 
     async def get_serial_number(self, robot_id: str) -> dict:
         """Robot serial number."""

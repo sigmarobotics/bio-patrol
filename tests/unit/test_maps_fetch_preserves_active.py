@@ -81,14 +81,17 @@ def test_active_map_cleared_when_map_gone_from_robot(patched):
     assert saved_settings["active_map"] == ""
 
 
-def test_no_maps_on_robot_reports_empty_active(patched):
+def test_no_maps_on_robot_keeps_local_state(patched, tmp_path):
+    """ok:True with 0 maps is a robot still initialising its map store, not a
+    request to delete everything local (code-review #54)."""
     set_robot_maps, saved_settings = patched
+    _seed_local_map(tmp_path)
     set_robot_maps([])
 
     res = asyncio.run(maps.fetch_maps_from_robot())
 
-    assert res["active_map"] == ""
-    assert saved_settings["active_map"] == ""
+    assert res["maps"] == []
+    _assert_local_state_kept(tmp_path, saved_settings)
 
 
 def test_unreachable_robot_leaves_local_maps_untouched(patched, tmp_path, monkeypatch):
@@ -114,3 +117,105 @@ def test_unreachable_robot_leaves_local_maps_untouched(patched, tmp_path, monkey
     assert saved_settings["active_map"] == "map_a"
     assert (tmp_path / "map_a.json").exists()
     assert (tmp_path / "map_a.png").exists()
+
+
+def _seed_local_map(tmp_path):
+    (tmp_path / "map_a.json").write_text("{}")
+    (tmp_path / "map_a.png").write_bytes(b"png")
+
+
+def _assert_local_state_kept(tmp_path, saved_settings):
+    assert saved_settings["active_map"] == "map_a"
+    assert (tmp_path / "map_a.json").exists()
+    assert (tmp_path / "map_a.png").exists()
+
+
+def test_toolkit_ok_false_leaves_local_maps_untouched(patched, tmp_path, monkeypatch):
+    """kachaka_core's @with_retry returns {"ok": False} instead of raising once
+    retries are exhausted — the real shape of an unreachable robot. It used to
+    read as "no maps on robot" and wipe everything with a 200."""
+    import dependencies
+
+    _, saved_settings = patched
+    _seed_local_map(tmp_path)
+
+    class _OkFalseFleet(_FakeFleet):
+        async def get_map_list(self, robot_id):
+            return {"ok": False, "error": "UNAVAILABLE: failed to connect", "retryable": True}
+
+    monkeypatch.setattr(dependencies, "get_fleet", lambda: _OkFalseFleet([]))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(maps.fetch_maps_from_robot())
+
+    assert exc.value.status_code == 502
+    assert "UNAVAILABLE" in exc.value.detail
+    _assert_local_state_kept(tmp_path, saved_settings)
+
+
+def test_preview_failure_leaves_local_maps_untouched(patched, tmp_path, monkeypatch):
+    """The list succeeds but a preview times out (新民 2026-10-13, slow mesh
+    link): the old local maps must survive instead of being deleted before the
+    download was attempted."""
+    import dependencies
+
+    _, saved_settings = patched
+    _seed_local_map(tmp_path)
+
+    class _SlowClient:
+        def load_map_preview(self, robot_map_id):
+            if robot_map_id == "map_a":
+                raise TimeoutError("DEADLINE_EXCEEDED")
+            return robot_map_id
+
+    class _SlowFleet(_FakeFleet):
+        def get_raw_client(self, robot_id):
+            return _SlowClient()
+
+    monkeypatch.setattr(dependencies, "get_fleet", lambda: _SlowFleet(["map_a", "map_b"]))
+
+    res = asyncio.run(maps.fetch_maps_from_robot())
+
+    # Per-map upsert: map_a keeps its local copy, map_b still refreshes, and
+    # the active map survives — a persistently slow preview must not block
+    # every later fetch (code-review #54).
+    assert res["status"] == "partial"
+    assert res["kept"] == ["map_a"]
+    assert [m["id"] for m in res["maps"]] == ["map_b"]
+    _assert_local_state_kept(tmp_path, saved_settings)
+
+
+def test_preview_failure_without_local_copy_is_reported(patched, tmp_path, monkeypatch):
+    import dependencies
+
+    _, saved_settings = patched
+
+    class _SlowClient:
+        def load_map_preview(self, robot_map_id):
+            if robot_map_id == "map_a":
+                raise TimeoutError("DEADLINE_EXCEEDED")
+            return robot_map_id
+
+    class _SlowFleet(_FakeFleet):
+        def get_raw_client(self, robot_id):
+            return _SlowClient()
+
+    monkeypatch.setattr(dependencies, "get_fleet", lambda: _SlowFleet(["map_a", "map_b"]))
+
+    res = asyncio.run(maps.fetch_maps_from_robot())
+
+    assert res["failed"] == ["map_a"]
+    assert res["active_map"] == ""          # map_a never arrived locally
+    assert saved_settings["active_map"] == ""
+
+
+def test_maps_gone_from_robot_are_removed_locally(patched, tmp_path):
+    set_robot_maps, _ = patched
+    (tmp_path / "old.json").write_text("{}")
+    (tmp_path / "old.png").write_bytes(b"png")
+    set_robot_maps(["map_a"])
+
+    asyncio.run(maps.fetch_maps_from_robot())
+
+    assert not (tmp_path / "old.json").exists()
+    assert not (tmp_path / "old.png").exists()

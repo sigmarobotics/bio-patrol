@@ -69,6 +69,20 @@ async def save_schedule(body: dict):
     """Save schedule.json and reload the scheduler. The page POSTs the whole
     list back, so a disable shows up as an entry no longer enabled in `body` —
     see `_notify_turned_off`."""
+    from services.scheduler import parse_schedule_time
+
+    entries = body.get("schedules")
+    for entry in entries if isinstance(entries, list) else []:
+        # Disabled entries never become jobs (see _enabled_entries), so a
+        # legacy bad time on one must not block saving the rest of the list.
+        if isinstance(entry, dict) and entry.get("enabled") and entry.get("time"):
+            try:
+                parse_schedule_time(entry["time"])
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid time for schedule '{entry.get('id')}': {entry['time']} (expected HH:MM, 00:00-23:59)",
+                )
     before = load_json(SCHEDULE_FILE, DEFAULT_SCHEDULE)
     save_json(SCHEDULE_FILE, body)
     await _reload_scheduler()

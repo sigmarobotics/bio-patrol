@@ -293,11 +293,12 @@ def _live_run(req: PatrolStartRequest, beds_count: int):
     return None
 
 
-async def _refuse(status: int, detail: str, sound: str) -> None:
+async def _refuse(status: int, detail: str, sound: str, mode: str = "patrol") -> None:
     """IT-24: say the refusal out loud on the robot, then refuse. The ward
     staff who pressed the button never see the web page or Telegram. ``detail``
     must stay word-for-word — scheduler._refusal_reason parses its prefix. A
     broken announcement must never turn a refusal into a start."""
+    logger.warning(f"Patrol start refused (mode={mode}, {status}): {detail}")
     try:
         await announcer.announce(sound)
     except Exception as e:
@@ -395,6 +396,7 @@ async def _start_patrol_locked(req: PatrolStartRequest):
     # alert minutes later (新營/板榮 backlog). Sits in start_patrol so manual,
     # demo and scheduled starts are all refused up front with the same words.
     if _robot_offline(cfg):
+        logger.warning(f"Patrol start refused (mode={req.mode}, 503): robot offline")
         raise HTTPException(
             status_code=503,
             detail="機器人失聯，無法啟動巡房，請確認機器人電源與網路",
@@ -416,7 +418,7 @@ async def _start_patrol_locked(req: PatrolStartRequest):
     if low:
         await _refuse(
             400, f"Battery too low to start patrol: {pct:.0f}% < {min_battery}%",
-            announcer.SOUND_BATTERY_LOW,
+            announcer.SOUND_BATTERY_LOW, mode=req.mode,
         )
 
     # Sensor gate — demo runs never read the pad, so only patrol is checked.
